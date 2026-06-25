@@ -1,4 +1,4 @@
-package org.example.airag.config;
+package org.example.airag.common.config;
 
 import javax.sql.DataSource;
 
