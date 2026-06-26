@@ -6,44 +6,56 @@ spring:
   # 默认业务数据源：MySQL，供 MyBatis、业务表和默认 JDBC 组件使用。
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
-    url: ${MYSQL_DATASOURCE_URL:jdbc:mysql://localhost:3306/agent?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true}
-    username: ${MYSQL_DATASOURCE_USERNAME:root}
-    password: ${MYSQL_DATASOURCE_PASSWORD:root}
+    url: jdbc:mysql://localhost:3306/agent?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+    username: root
+    password: root
   ai:
-    # OpenAI API key 不提供默认值，避免误用占位或泄露密钥。
+    # 本项目通过 OpenAI 兼容协议接入模型：DeepSeek 负责对话，百炼负责 Embedding。
+    model:
+      chat: openai
+      embedding: openai
+      image: none
+      audio:
+        speech: none
+        transcription: none
+      moderation: none
     openai:
-      api-key: ${OPENAI_API_KEY}
       chat:
-        model: ${OPENAI_CHAT_MODEL:gpt-3.5-turbo}
-        temperature: ${OPENAI_CHAT_TEMPERATURE:0.9}
-        max-tokens: ${OPENAI_CHAT_MAX_TOKENS:1024}
+        base-url: https://api.deepseek.com
+        api-key: ${DEEPSEEK_API_KEY}
+        model: deepseek-v4-flash
+        temperature: 0.7
+        max-tokens: 2048
       embedding:
-        model: ${OPENAI_EMBEDDING_MODEL:text-embedding-3-small}
-        dimensions: ${OPENAI_EMBEDDING_DIMENSIONS:1536}
+        # 若使用百炼新版工作空间地址，可用 DASHSCOPE_BASE_URL 覆盖默认值。
+        base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
+        api-key: ${DASHSCOPE_API_KEY}
+        model: text-embedding-v4
+        dimensions: 1024
     # 向量库类型声明为 PGVector；实际 PostgreSQL 连接见 app.pgvector.datasource。
     vectorstore:
       type: pgvector
       pgvector:
         # 默认不在启动时建扩展/建表；本地首次初始化时可设置 PGVECTOR_INITIALIZE_SCHEMA=true。
-        initialize-schema: ${PGVECTOR_INITIALIZE_SCHEMA:false}
-        schema-name: ${PGVECTOR_SCHEMA:public}
-        table-name: ${PGVECTOR_TABLE:vector_store}
-        # 维度需要与 embedding 模型一致；text-embedding-3-small / ada-002 常用 1536。
-        dimensions: ${PGVECTOR_DIMENSIONS:1536}
-        index-type: ${PGVECTOR_INDEX_TYPE:HNSW}
-        distance-type: ${PGVECTOR_DISTANCE_TYPE:COSINE_DISTANCE}
-        remove-existing-vector-store-table: ${PGVECTOR_REMOVE_EXISTING_TABLE:false}
-        schema-validation: ${PGVECTOR_SCHEMA_VALIDATION:false}
-        max-document-batch-size: ${PGVECTOR_MAX_DOCUMENT_BATCH_SIZE:10000}
+        initialize-schema: false
+        schema-name: public
+        table-name: vector_store
+        # 维度需要与 spring.ai.openai.embedding.dimensions 保持一致。
+        dimensions: 1024
+        index-type: HNSW
+        distance-type: COSINE_DISTANCE
+        remove-existing-vector-store-table: false
+        schema-validation: false
+        max-document-batch-size: 10000
 
 app:
   pgvector:
     # PGVector 独立数据源：由 PgVectorDataSourceConfiguration 绑定，避免占用默认 MySQL 数据源。
     datasource:
       driver-class-name: org.postgresql.Driver
-      url: ${PGVECTOR_DATASOURCE_URL:jdbc:postgresql://localhost:5433/postgres}
-      username: ${PGVECTOR_DATASOURCE_USERNAME:postgres}
-      password: ${PGVECTOR_DATASOURCE_PASSWORD:postgres}
+      url: jdbc:postgresql://localhost:5433/postgres
+      username: postgres
+      password: postgres
 
 mybatis:
   # Mapper XML 放在 src/main/resources/mapper 下时会被自动扫描。
