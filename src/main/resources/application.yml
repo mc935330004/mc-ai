@@ -1,5 +1,7 @@
 server:
   port: 8089
+  tomcat:
+    uri-encoding: UTF-8
   servlet:
     context-path: /agent-rag
 spring:
@@ -7,6 +9,7 @@ spring:
   datasource:
     driver-class-name: com.mysql.cj.jdbc.Driver
     url: jdbc:mysql://localhost:3306/agent?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
+#    url: jdbc:mysql://localhost:3306/mc-agent?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
     username: root
     password: root
   ai:
@@ -55,9 +58,10 @@ app:
     # PGVector 独立数据源：由 PgVectorDataSourceConfiguration 绑定，避免占用默认 MySQL 数据源。
     datasource:
       driver-class-name: org.postgresql.Driver
-      url: jdbc:postgresql://localhost:5433/vectordb
+      url: jdbc:postgresql://localhost:5432/vectordb
       username: postgres
-      password: postgres
+#      password: postgres
+      password: pgvector
 
 
 mybatis-plus:

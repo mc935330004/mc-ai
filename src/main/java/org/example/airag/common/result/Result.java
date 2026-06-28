@@ -25,7 +25,9 @@ public class Result<T> {
     public static <T> Result<T> success() {
         return new Result<>(CommonConstants.StatusCode.SUCCESS, "success", null);
     }
-    
+    public static <T> Result<T> success(String message) {
+        return new Result<>(CommonConstants.StatusCode.SUCCESS, message,null);
+    }
     public static <T> Result<T> success(T data) {
         return new Result<>(CommonConstants.StatusCode.SUCCESS, "success", data);
     }
