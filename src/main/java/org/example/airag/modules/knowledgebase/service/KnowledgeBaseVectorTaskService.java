@@ -30,4 +30,13 @@ public interface KnowledgeBaseVectorTaskService extends IService<KnowledgeBaseVe
      * @param taskId
      */
      void retryTask(Long taskId);
+
+    /**
+     * 创建文档版本向量化任务。
+     *
+     * @param documentId 文档ID
+     * @param versionId 文档版本ID
+     * @return 向量化任务ID
+     */
+    Long createDocumentVersionVectorizeTask(Long documentId, Long versionId);
 }

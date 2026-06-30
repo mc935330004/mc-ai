@@ -87,6 +87,27 @@ public class KnowledgeBaseVectorTaskServiceImpl extends ServiceImpl<KnowledgeBas
         task.setUpdatedAt(LocalDateTime.now());
         this.updateById(task);
     }
+
+    @Override
+    public Long createDocumentVersionVectorizeTask(Long documentId, Long versionId) {
+        if (documentId == null || versionId == null) {
+            throw new BusinessException(ErrorCode.BAD_REQUEST, "文档ID和版本ID不能为空");
+        }
+
+        KnowledgeBaseVectorTask task = new KnowledgeBaseVectorTask();
+        task.setKnowledgeBaseId(null);
+        task.setDocumentId(documentId);
+        task.setVersionId(versionId);
+        task.setTaskType("VECTORIZE");
+        task.setStatus(VectorTaskStatus.PENDING.name());
+        task.setRetryCount(0);
+        task.setMaxRetryCount(3);
+        task.setCreatedAt(LocalDateTime.now());
+        task.setUpdatedAt(LocalDateTime.now());
+        this.save(task);
+        return task.getId();
+    }
+
     private VectorTaskDTO toDTO(KnowledgeBaseVectorTask task) {
         return new VectorTaskDTO(
                 task.getId(),

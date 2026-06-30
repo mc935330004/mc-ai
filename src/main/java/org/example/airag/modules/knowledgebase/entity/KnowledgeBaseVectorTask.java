@@ -95,4 +95,21 @@ public class KnowledgeBaseVectorTask implements Serializable {
      */
     @TableField("finished_at")
     private LocalDateTime finishedAt;
+
+    /**
+     * 文档ID。
+     *
+     * 新的企业文档流程使用该字段关联 knowledge_document。
+     * 旧 knowledge_base 流程可以为空。
+     */
+    @TableField("document_id")
+    private Long documentId;
+
+    /**
+     * 文档版本ID。
+     * 新的企业文档流程使用该字段关联 knowledge_document_version。
+     * 后续解析、切片、向量化都应以 versionId 为核心。
+     */
+    @TableField("version_id")
+    private Long versionId;
 }

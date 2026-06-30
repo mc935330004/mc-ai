@@ -91,4 +91,21 @@ public class VectorRepository {
             throw new BusinessException(ErrorCode.KNOWLEDGE_BASE_VECTORIZATION_FAILED, "提升临时向量失败");
         }
     }
+
+    /**
+     * 删除指定文档版本的向量。
+     *
+     * 注意：
+     * 这里依赖向量写入时 metadata 中包含 version_id。
+     */
+    public void deleteByVersionId(Long versionId) {
+        if (versionId == null) {
+            return;
+        }
+        jdbcTemplate.update("""
+            DELETE FROM vector_store
+            WHERE metadata ->> 'version_id' = ?
+            """, versionId.toString());
+    }
+
 }

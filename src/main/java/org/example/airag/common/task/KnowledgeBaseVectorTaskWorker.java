@@ -6,8 +6,10 @@ import org.example.airag.modules.knowledgebase.entity.KnowledgeBaseVectorTask;
 import org.example.airag.modules.knowledgebase.mapper.KnowledgeBaseVectorTaskMapper;
 import org.example.airag.modules.knowledgebase.model.VectorTaskStatus;
 import org.example.airag.modules.knowledgebase.service.KnowledgeBaseVectorTaskService;
+import org.example.airag.modules.knowledgebase.service.KnowledgeDocumentVersionService;
 import org.example.airag.modules.knowledgebase.service.impl.KnowledgeBaseUploadServiceImpl;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
@@ -18,11 +20,13 @@ import java.util.UUID;
 
 @Slf4j
 @Service
+@ConditionalOnProperty(prefix = "app.vector-task", name = "enabled", havingValue = "true", matchIfMissing = true)
 @RequiredArgsConstructor
 public class KnowledgeBaseVectorTaskWorker {
     private final KnowledgeBaseVectorTaskService taskService;
     private final KnowledgeBaseVectorTaskMapper taskMapper;
     private final KnowledgeBaseUploadServiceImpl uploadService;
+    private final KnowledgeDocumentVersionService knowledgeDocumentVersionService;
 
     private final String workerId = buildWorkerId();
     @Value("${app.vector-task.timeout-minutes:30}")
@@ -66,7 +70,13 @@ public class KnowledgeBaseVectorTaskWorker {
             return;
         }
         try {
-            uploadService.vectorizeKnowledgeBase(task.getKnowledgeBaseId());
+            if (task.getVersionId() != null) {
+                // 新企业文档版本流程
+                knowledgeDocumentVersionService.vectorizeVersion(task.getVersionId());
+            } else {
+                // 旧 knowledge_base 流程，保留兼容
+                uploadService.vectorizeKnowledgeBase(task.getKnowledgeBaseId());
+            }
             markCompleted(task);
         } catch (Exception e) {
             markFailedOrRetry(task, e);

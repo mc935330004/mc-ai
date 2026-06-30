@@ -67,6 +67,7 @@ app:
       connect-timeout-ms: 10000
       data-timeout-ms: 30000
   vector-task:
+    enabled: true
     # 向量化任务轮询间隔，单位毫秒
     poll-delay-ms: 5000
     # 超时任务恢复扫描间隔，单位毫秒

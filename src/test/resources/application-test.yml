@@ -15,3 +15,7 @@ spring:
   ai:
     vectorstore:
       type: none
+
+app:
+  vector-task:
+    enabled: false
