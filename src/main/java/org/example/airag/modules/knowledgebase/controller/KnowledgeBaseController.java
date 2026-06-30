@@ -1,22 +1,21 @@
 package org.example.airag.modules.knowledgebase.controller;
 
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.example.airag.common.exception.ErrorCode;
 import org.example.airag.common.result.Result;
-import org.example.airag.modules.knowledgebase.dto.KnowledgeBaseListItemDTO;
-import org.example.airag.modules.knowledgebase.dto.KnowledgeBaseStatsDTO;
-import org.example.airag.modules.knowledgebase.dto.VectorStatusDTO;
-import org.example.airag.modules.knowledgebase.dto.VectorTaskDTO;
+import org.example.airag.modules.knowledgebase.dto.*;
 import org.example.airag.modules.knowledgebase.entity.KnowledgeBase;
 import org.example.airag.modules.knowledgebase.model.QueryRequest;
 import org.example.airag.modules.knowledgebase.model.QueryResponse;
 import org.example.airag.modules.knowledgebase.service.FileStorageService;
+import org.example.airag.modules.knowledgebase.service.KnowledgeBaseService;
 import org.example.airag.modules.knowledgebase.service.KnowledgeBaseUploadService;
 import org.example.airag.modules.knowledgebase.service.KnowledgeBaseVectorTaskService;
 import org.example.airag.modules.knowledgebase.service.impl.KnowledgeBaseDeleteService;
-import org.example.airag.modules.knowledgebase.service.impl.KnowledgeBaseListService;
 import org.example.airag.modules.knowledgebase.service.impl.KnowledgeBaseQueryService;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
@@ -26,11 +25,12 @@ import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 import reactor.core.publisher.Flux;
 
+import java.math.BigDecimal;
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * 知识库控制器
@@ -42,9 +42,9 @@ import java.util.Map;
 @Tag(name = "知识库管理", description = "知识库上传、下载、查询、分类与向量化")
 public class KnowledgeBaseController {
 
+    private final KnowledgeBaseService knowledgeBaseService;
     private final KnowledgeBaseUploadService uploadService;
     private final KnowledgeBaseQueryService queryService;
-    private final KnowledgeBaseListService listService;
     private final KnowledgeBaseDeleteService deleteService;
     private final FileStorageService fileStorageService;
     private final KnowledgeBaseVectorTaskService vectorTaskService;
@@ -87,21 +87,16 @@ public class KnowledgeBaseController {
      * 获取知识库列表。
      */
     @GetMapping("/list")
-    public Result<List<KnowledgeBaseListItemDTO>> getAllKnowledgeBases(
-            @RequestParam(value = "sortBy", required = false) String sortBy,
-            @RequestParam(value = "vectorStatus", required = false) String vectorStatus,
-            @RequestParam(value = "keyword", required = false) String keyword) {
-        return Result.success(listService.listKnowledgeBases(vectorStatus, sortBy, keyword));
+    public Result getAllKnowledgeBases(Page pag, KnowledgeBaseSerDTO dto) {
+        return Result.success(knowledgeBaseService.listKnowledgeBases(pag, dto));
     }
 
     /**
      * 获取知识库详情。
      */
     @GetMapping("/detail/{id}")
-    public Result<KnowledgeBaseListItemDTO> getKnowledgeBase(@PathVariable Long id) {
-        return listService.getKnowledgeBase(id)
-                .map(Result::success)
-                .orElse(Result.error("知识库不存在"));
+    public Result getKnowledgeBase(@PathVariable Long id) {
+        return Result.success(knowledgeBaseService.getKnowledgeBase(id));
     }
 
     /**
@@ -130,9 +125,11 @@ public class KnowledgeBaseController {
      */
     @GetMapping("/download/{id}")
     public ResponseEntity<byte[]> downloadKnowledgeBase(@PathVariable Long id) {
-        KnowledgeBase entity = listService.getEntityForDownload(id);
-        byte[] fileContent = listService.downloadFile(id);
-
+        KnowledgeBase entity= Optional.ofNullable(knowledgeBaseService.lambdaQuery()
+                .eq(KnowledgeBase::getId, id)
+                .eq(KnowledgeBase::getDelFlag, BigDecimal.ZERO).one()).orElseThrow(() ->
+                new RuntimeException(ErrorCode.KNOWLEDGE_BASE_NOT_FOUND.getMessage()));
+        byte[] fileContent = fileStorageService.downloadFile(entity.getStoragePath());
         String filename = StringUtils.hasText(entity.getOriginalFilename())
                 ? entity.getOriginalFilename()
                 : "knowledge-base-" + id;
@@ -156,17 +153,7 @@ public class KnowledgeBaseController {
      */
     @GetMapping("/categories")
     public Result<List<String>> getAllCategories() {
-        return Result.success(listService.getAllCategories());
-    }
-
-    /**
-     * 根据分类获取知识库列表。
-     *
-     * <p>分类名如果是中文，前端请求时需要 URL 编码。</p>
-     */
-    @GetMapping("/category")
-    public Result getByCategory(@RequestParam(value = "category") String category) {
-        return Result.success(listService.listByCategory(category));
+        return Result.success(knowledgeBaseService.getAllCategories());
     }
 
     /**
@@ -174,10 +161,9 @@ public class KnowledgeBaseController {
      *
      * <p>请求体示例：{"category":"技术文档"}；传空字符串表示清空分类。</p>
      */
-    @GetMapping("/updateCategory")
-    public Result<Void> updateCategory(@RequestParam(value ="id") Long id,
-                                       @RequestParam(value = "category") String category) {
-        listService.updateCategory(id, category);
+    @PostMapping("/updateCategory")
+    public Result<Void> updateCategory(@RequestBody KnowledgeBase  kb) {
+        knowledgeBaseService.updateKnowledgeBase(kb);
         return Result.success("更新知识库分类成功！");
     }
 
@@ -186,7 +172,7 @@ public class KnowledgeBaseController {
      */
     @GetMapping("/stats")
     public Result<KnowledgeBaseStatsDTO> getStatistics() {
-        return Result.success(listService.getStatistics());
+        return Result.success(knowledgeBaseService.getStatistics());
     }
 
     /**
@@ -196,7 +182,10 @@ public class KnowledgeBaseController {
      */
     @GetMapping("/getVectorStatus/{id}")
     public Result<VectorStatusDTO> getVectorStatus(@PathVariable Long id) {
-        KnowledgeBase kb = listService.getEntityForDownload(id);
+        KnowledgeBase kb= Optional.ofNullable(knowledgeBaseService.lambdaQuery()
+                .eq(KnowledgeBase::getId, id)
+                .eq(KnowledgeBase::getDelFlag, BigDecimal.ZERO).one()).orElseThrow(() ->
+                new RuntimeException(ErrorCode.KNOWLEDGE_BASE_NOT_FOUND.getMessage()));
         return Result.success(new VectorStatusDTO(
                 kb.getId(),
                 kb.getVectorStatus(),

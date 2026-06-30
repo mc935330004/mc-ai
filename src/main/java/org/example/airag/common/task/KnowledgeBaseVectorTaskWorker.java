@@ -65,7 +65,6 @@ public class KnowledgeBaseVectorTaskWorker {
         if (task == null) {
             return;
         }
-
         try {
             uploadService.vectorizeKnowledgeBase(task.getKnowledgeBaseId());
             markCompleted(task);

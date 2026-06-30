@@ -89,11 +89,9 @@ public class FileStorageServiceImp implements FileStorageService {
             }
         }
         LocalDate now = LocalDate.now();
-        return "%s/%d/%02d/%02d/%s%s".formatted(
+        return "%s/%d/%s%s".formatted(
                 properties.getBaseDir(),
                 now.getYear(),
-                now.getMonthValue(),
-                now.getDayOfMonth(),
                 UUID.randomUUID(),
                 ext
         );

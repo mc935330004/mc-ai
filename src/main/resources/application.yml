@@ -1,19 +1,19 @@
 server:
+  # 应用启动端口，本地访问地址示例：http://localhost:8089/agent-rag
   port: 8089
   tomcat:
+    # 统一请求 URI 编码，避免中文路径或参数乱码
     uri-encoding: UTF-8
   servlet:
+    # 应用上下文路径，所有接口都会带此前缀
     context-path: /agent-rag
+
 spring:
-  # 默认业务数据源：MySQL，供 MyBatis、业务表和默认 JDBC 组件使用。
-  datasource:
-    driver-class-name: com.mysql.cj.jdbc.Driver
-    url: jdbc:mysql://localhost:3306/agent?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
-#    url: jdbc:mysql://localhost:3306/mc-agent?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true
-    username: root
-    password: root
+  profiles:
+    # 默认启用开发环境配置；生产部署时应通过启动参数或环境变量切换为 prod
+    active: @spring.profiles.active@
   ai:
-    # 本项目通过 OpenAI 兼容协议接入模型：DeepSeek 负责对话，百炼负责 Embedding。
+    # Spring AI 模型类型声明：对话和向量模型都走 OpenAI 兼容协议
     model:
       chat: openai
       embedding: openai
@@ -24,66 +24,59 @@ spring:
       moderation: none
     openai:
       chat:
+        # DeepSeek 对话模型地址和 API Key；API Key 必须从环境变量读取
         base-url: https://api.deepseek.com
         api-key: ${DEEPSEEK_API_KEY}
         model: deepseek-v4-flash
         temperature: 0.7
         max-tokens: 2048
       embedding:
-        # 若使用百炼新版工作空间地址，可用 DASHSCOPE_BASE_URL 覆盖默认值。
+        # 百炼 DashScope Embedding，维度必须与 PGVector 配置保持一致
         base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
         api-key: ${DASHSCOPE_API_KEY}
         model: text-embedding-v4
         dimensions: 1024
-    # 向量库类型声明为 PGVector；实际 PostgreSQL 连接见 app.pgvector.datasource。
     vectorstore:
+      # 向量库类型：当前项目使用 PostgreSQL + pgvector
       type: pgvector
       pgvector:
-        # 默认不在启动时建扩展/建表；本地首次初始化时可设置 PGVECTOR_INITIALIZE_SCHEMA=true。
-        initialize-schema: true # 开发环境设置为 true，方便快速启动。生产环境设置为 false，手动管理数据库 schema，避免意外变更。
+        # 公共默认不自动初始化 schema，避免生产环境误删或误改表结构
+        initialize-schema: false
         schema-name: public
         table-name: vector_store
-        # 维度需要与 spring.ai.openai.embedding.dimensions 保持一致。
+        # 向量维度需要和 embedding 模型输出维度一致
         dimensions: 1024
         index-type: HNSW
         distance-type: COSINE_DISTANCE
-        remove-existing-vector-store-table: false # 保留现有表和数据
+        # 禁止启动时删除已有向量表，保护已入库知识库向量数据
+        remove-existing-vector-store-table: false
         schema-validation: false
         max-document-batch-size: 10000
   flyway:
+    # Flyway 管理 MySQL 业务表结构迁移
     enabled: true
     locations: classpath:db/migration
     baseline-on-migrate: true
+
 app:
   storage:
+    # 本地知识库文件目录；当前 FTP 实现主要使用 app.storage.ftp
     knowledge-base-dir: ${user.home}/.ai-rag/knowledgebase
-    # FTP配置
     ftp:
-#      host: 172.30.1.17
-      host: 221.6.20.82
-      username: projectm
-      password: ${FTP_PASSWORD}
-      port: 21
-      base-dir: projectm/knowledgebase
-      pathUrl: https://pmz.e-jt.cn/project/
+      # FTP 连接和数据传输超时时间，单位毫秒
       connect-timeout-ms: 10000
       data-timeout-ms: 30000
-  pgvector:
-    # PGVector 独立数据源：由 PgVectorDataSourceConfiguration 绑定，避免占用默认 MySQL 数据源。
-    datasource:
-      driver-class-name: org.postgresql.Driver
-      url: jdbc:postgresql://localhost:5432/vectordb
-#      url: jdbc:postgresql://localhost:5433/postgres
-      username: postgres
-#      password: postgres
-      password: pgvector
   vector-task:
-    poll-delay-ms: 5000 # 任务轮询间隔
-    recover-delay-ms: 60000 # 任务恢复间隔
-    timeout-minutes: 30 # 任务超时时间 单位 分钟
-#mybatis-plus
+    # 向量化任务轮询间隔，单位毫秒
+    poll-delay-ms: 5000
+    # 超时任务恢复扫描间隔，单位毫秒
+    recover-delay-ms: 60000
+    # 单个向量化任务最大处理时间，超过后进入恢复或失败流程
+    timeout-minutes: 30
+
 mybatis-plus:
+  # MyBatis Plus XML Mapper 扫描路径
   mapper-locations: classpath*:mapper/**/*.xml
   configuration:
+    # 数据库下划线字段自动映射 Java 驼峰字段
     map-underscore-to-camel-case: true
-

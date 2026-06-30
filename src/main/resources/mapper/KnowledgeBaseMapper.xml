@@ -1,6 +1,34 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
-        "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
 <mapper namespace="org.example.airag.modules.knowledgebase.mapper.KnowledgeBaseMapper">
 
+    <select id="listKnowledgeBases"
+            resultType="org.example.airag.modules.knowledgebase.dto.KnowledgeBaseListItemDTO">
+        SELECT
+        id,
+        name,
+        category,
+        original_filename AS originalFilename,
+        file_size AS fileSize,
+        content_type AS contentType,
+        created_at AS uploadedAt,
+        vector_status AS vectorStatus,
+        vector_error AS vectorError,
+        chunk_count AS chunkCount
+        FROM knowledge_base
+        WHERE del_flag = 0
+        <if test="dto.keyword != null and dto.keyword!=''">
+            AND (
+            name LIKE CONCAT('%', #{dto.keyword}, '%')
+            OR original_filename LIKE CONCAT('%', #{dto.keyword}, '%')
+            )
+        </if>
+        <if test="dto.vectorStatus != null and dto.vectorStatus!=''">
+            AND vector_status=#{dto.vectorStatus}
+        </if>
+        <if test="dto.category!=null and dto.category!=''">
+            and category= #{dto.category}
+        </if>
+        ORDER BY created_at DESC
+    </select>
 </mapper>

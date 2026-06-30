@@ -1,0 +1,36 @@
+spring:
+  datasource:
+    # 开发环境 MySQL 主数据源，保存知识库元数据、任务状态等业务表
+    driver-class-name: com.mysql.cj.jdbc.Driver
+    # 可用 MYSQL_DATASOURCE_URL 覆盖默认本地库地址
+    url: ${MYSQL_DATASOURCE_URL:jdbc:mysql://localhost:3306/agent?useUnicode=true&characterEncoding=utf-8&serverTimezone=Asia/Shanghai&useSSL=false&allowPublicKeyRetrieval=true}
+    # 数据库账号密码只从环境变量读取，避免写死到代码仓库
+    username: root
+    password: root
+  ai:
+    vectorstore:
+      pgvector:
+        # 开发环境允许自动初始化 pgvector 表结构，方便本地联调
+        initialize-schema: true
+app:
+  storage:
+    ftp:
+      # 开发环境 FTP 文件存储配置，用于保存上传的知识库原始文件
+      host: 221.6.20.82
+      username: projectm
+      password: ${FTP_PASSWORD}
+      port: 21
+      # FTP 根目录，知识库文件会按日期继续分层存储
+      base-dir: projectm/knowledgebase
+      # 文件外部访问前缀，如不需要对外访问可留空
+      path-url: https://pmz.e-jt.cn/project/
+  pgvector:
+    datasource:
+      # 开发环境 PGVector 独立数据源，避免占用 MySQL 主数据源
+      driver-class-name: org.postgresql.Driver
+      # 可用 PGVECTOR_DATASOURCE_URL 覆盖默认本地 PostgreSQL 地址
+      url: jdbc:postgresql://localhost:5433/rag_db
+      # PGVector 账号密码只从环境变量读取
+      username: postgres
+      password: postgres
+#      password: pgvector

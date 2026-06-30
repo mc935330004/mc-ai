@@ -116,22 +116,6 @@ public class KnowledgeBaseUploadServiceImpl implements KnowledgeBaseUploadServic
         knowledgeBaseService.updateById(kb);
         // 创建向量化任务
         vectorTaskService.createVectorizeTask(id);
-//        try {
-//            // 重新向量化必须基于原始文件重新解析，避免复用已经过期的文本内容。
-//            String content = parseStoredKnowledgeBase(kb);
-//            vectorizeKnowledgeBase(kb, content);
-//        } catch (BusinessException e) {
-//            // 文件丢失或解析失败时也要落库状态，方便列表页直接看到失败原因。
-//            markVectorFailed(kb, e.getMessage());
-//            throw e;
-//        } catch (Exception e) {
-//            markVectorFailed(kb, e.getMessage());
-//            throw new BusinessException(
-//                    ErrorCode.KNOWLEDGE_BASE_VECTORIZATION_FAILED,
-//                    "重新向量化失败: " + e.getMessage(),
-//                    e
-//            );
-//        }
     }
 
     /**
@@ -212,7 +196,6 @@ public class KnowledgeBaseUploadServiceImpl implements KnowledgeBaseUploadServic
         }
         return category.trim();
     }
-
     /**
      * 同步向量化知识库，并更新向量化状态。
      */
@@ -255,17 +238,6 @@ public class KnowledgeBaseUploadServiceImpl implements KnowledgeBaseUploadServic
             knowledgeBaseService.updateById(kb);
         }
     }
-
-    /**
-     * 标记向量化失败状态。
-     */
-    private void markVectorFailed(KnowledgeBase kb, String message) {
-        kb.setVectorStatus(VectorStatus.FAILED.name());
-        kb.setVectorError(truncateError(message));
-        kb.setUpdatedAt(LocalDateTime.now());
-        knowledgeBaseService.updateById(kb);
-    }
-
     /**
      * 限制错误信息长度，避免超过数据库字段长度。
      */
