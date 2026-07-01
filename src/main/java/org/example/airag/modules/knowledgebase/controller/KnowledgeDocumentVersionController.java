@@ -28,7 +28,7 @@ public class KnowledgeDocumentVersionController {
      * @param versionId
      * @return
      */
-    @GetMapping("/{documentId}/versions/{versionId}/publish")
+    @PostMapping("/{documentId}/versions/{versionId}/publish")
     public Result<Void> publishVersion( @PathVariable Long documentId,@PathVariable Long versionId) {
         versionService.publishVersion(documentId, versionId);
         return Result.success("文档版本发布成功");
@@ -40,7 +40,7 @@ public class KnowledgeDocumentVersionController {
      * @param versionId
      * @return
      */
-    @GetMapping("/{documentId}/versions/{versionId}/revectorize")
+    @PostMapping("/{documentId}/versions/{versionId}/revectorize")
     public Result<Void> revectorizeVersion(@PathVariable Long documentId,@PathVariable Long versionId) {
         versionService.revectorizeVersion(documentId, versionId);
         return Result.success("文档版本重新向量化任务已创建");

@@ -7,7 +7,6 @@ import org.example.airag.modules.knowledgebase.dto.KnowledgeDocumentDTO;
 import org.example.airag.modules.knowledgebase.dto.KnowledgeDocumentOverviewDTO;
 import org.example.airag.modules.knowledgebase.dto.KnowledgeDocumentQueryRequest;
 import org.example.airag.modules.knowledgebase.dto.KnowledgeDocumentQueryResponse;
-import org.example.airag.modules.knowledgebase.entity.KnowledgeDocument;
 import org.example.airag.modules.knowledgebase.service.KnowledgeDocumentService;
 import org.example.airag.modules.knowledgebase.service.impl.KnowledgeDocumentQueryService;
 import org.example.airag.modules.knowledgebase.vo.KnowledgeDocumentListItemVO;
@@ -17,6 +16,7 @@ import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 @RestController
 @RequestMapping("/api/knowledge/documents")
@@ -27,9 +27,7 @@ public class KnowledgeDocumentController {
     private final KnowledgeDocumentQueryService knowledgeDocumentQueryService;
 
     /**
-     * 根据问题查询知识库文档。
-     * @param request
-     * @return
+     * 企业文档普通问答。
      */
     @PostMapping("/query")
     public Result<KnowledgeDocumentQueryResponse> query(@RequestBody KnowledgeDocumentQueryRequest request) {
@@ -37,9 +35,15 @@ public class KnowledgeDocumentController {
     }
 
     /**
-     * 根据id获取知识库文档概述。
-     * @param id
-     * @return
+     * 企业文档流式问答，返回 text/event-stream。
+     */
+    @PostMapping("/query/stream")
+    public SseEmitter streamQuery(@RequestBody KnowledgeDocumentQueryRequest request) {
+        return knowledgeDocumentQueryService.streamQuery(request);
+    }
+
+    /**
+     * 根据 ID 获取企业文档概览。
      */
     @GetMapping("/{id}/overview")
     public Result<KnowledgeDocumentOverviewDTO> overview(@PathVariable Long id) {
@@ -47,39 +51,34 @@ public class KnowledgeDocumentController {
     }
 
     /**
-     * 获取知识库文档分页列表。
+     * 企业文档分页列表。
      */
     @GetMapping("/pageList")
-    public Result<Page<KnowledgeDocumentListItemVO>> pageList(Page<KnowledgeDocumentListItemVO> page, KnowledgeDocumentDTO query) {
+    public Result<Page<KnowledgeDocumentListItemVO>> pageList(Page<KnowledgeDocumentListItemVO> page,
+                                                             KnowledgeDocumentDTO query) {
         return Result.success(documentService.findPageList(page, query));
     }
 
     /**
-     * 废止文档。
-     *
-     * 废止后不再参与正式问答，但保留历史数据。
+     * 废止文档，废止后不再参与正式问答。
      */
-    @GetMapping("/{id}/deprecated")
+    @PostMapping("/{id}/deprecated")
     public Result<Void> deprecated(@PathVariable Long id) {
         documentService.deprecatedDocument(id);
         return Result.success("文档已废止");
     }
 
     /**
-     * 归档文档。
-     *
-     * 归档后不再参与正式问答，适用于历史资料留存。
+     * 归档文档，归档后不再参与正式问答。
      */
-    @GetMapping("/{id}/archive")
+    @PostMapping("/{id}/archive")
     public Result<Void> archive(@PathVariable Long id) {
         documentService.archiveDocument(id);
         return Result.success("文档已归档");
     }
 
     /**
-     * 恢复文档为已发布。
-     *
-     * 恢复后文档会重新参与正式问答。
+     * 恢复文档为已发布状态。
      */
     @PostMapping("/{id}/restorePublished")
     public Result<Void> restorePublished(@PathVariable Long id) {
