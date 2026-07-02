@@ -46,7 +46,7 @@ public class KnowledgeCategory implements Serializable {
     /**
      * 是否启用：0-禁用，1-启用
      */
-    private Integer enabled;
+    private Boolean enabled;
 
     /**
      * 创建时间
