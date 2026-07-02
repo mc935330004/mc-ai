@@ -6,6 +6,7 @@
         SELECT
         d.id,
         d.category_id AS categoryId,
+        kc.name AS categoryName,
         d.title,
         d.document_code AS documentCode,
         d.owner_dept AS ownerDept,
@@ -13,15 +14,14 @@
         d.current_version_id AS currentVersionId,
         d.summary,
         v.version_no AS currentVersionNo,
-        v.parse_status AS parseStatus,
-        v.vector_status AS vectorStatus,
+        v.parse_status,
+        v.vector_status,
         v.chunk_count AS chunkCount,
         d.created_at AS createdAt,
         d.updated_at AS updatedAt
         FROM knowledge_document d
-        LEFT JOIN knowledge_document_version v
-        ON d.current_version_id = v.id
-        AND v.del_flag = 0
+        LEFT JOIN knowledge_document_version v ON d.current_version_id = v.id AND v.del_flag = 0
+        LEFT JOIN knowledge_category kc on d.category_id = kc.id AND kc.del_flag = 0
         WHERE d.del_flag = 0
         <if test="query.keyword != null and query.keyword != ''">
             AND (

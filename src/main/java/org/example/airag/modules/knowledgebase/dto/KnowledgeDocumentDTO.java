@@ -21,7 +21,7 @@ public class KnowledgeDocumentDTO {
     private Long categoryId;
 
     /**
-     * 文档状态：ARCHIVED。DRAFT-草稿，PUBLISHED-已发布，DEPRECATED-已废止，ARCHIVED-已归档
+     * 文档状态：DRAFT-草稿，PUBLISHED-已发布，DEPRECATED-已废止，ARCHIVED-已归档
      */
     private String status;
 

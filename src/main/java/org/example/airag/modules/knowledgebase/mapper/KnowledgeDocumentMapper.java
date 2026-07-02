@@ -16,4 +16,6 @@ public interface KnowledgeDocumentMapper extends BaseMapper<KnowledgeDocument> {
      */
     Page<KnowledgeDocumentListItemVO> findPageList(Page<KnowledgeDocumentListItemVO> page,
                                                    @Param("query") KnowledgeDocumentDTO query);
+
+
 }

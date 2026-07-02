@@ -1,5 +1,6 @@
 package org.example.airag.modules.knowledgebase.service.impl;
 
+import cn.hutool.core.util.ObjectUtil;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import lombok.RequiredArgsConstructor;
@@ -59,23 +60,17 @@ public class KnowledgeDocumentServiceImpl extends ServiceImpl<KnowledgeDocumentM
         // 当前版本禁用切片数。
         Long disabledChunkCount = 0L;
 
-        if (document.getCurrentVersionId() != null) {
-            totalChunkCount = chunkService.lambdaQuery()
-                    .eq(KnowledgeChunk::getVersionId, document.getCurrentVersionId())
-                    .eq(KnowledgeChunk::getDelFlag, 0)
-                    .count();
+        //获取切片集合
+        List<KnowledgeChunk> chunkList = chunkService.lambdaQuery()
+                .eq(KnowledgeChunk::getVersionId, document.getCurrentVersionId())
+                .eq(KnowledgeChunk::getDelFlag, 0)
+                .list();
+        if (ObjectUtil.isNotEmpty(chunkList) && !chunkList.isEmpty()) {
+            totalChunkCount = (long) chunkList.size();
 
-            enabledChunkCount = chunkService.lambdaQuery()
-                    .eq(KnowledgeChunk::getVersionId, document.getCurrentVersionId())
-                    .eq(KnowledgeChunk::getDelFlag, 0)
-                    .eq(KnowledgeChunk::getEnabled, 1)
-                    .count();
+            enabledChunkCount = chunkList.stream().filter(chunk -> chunk.getEnabled() == 1).count();
 
-            disabledChunkCount = chunkService.lambdaQuery()
-                    .eq(KnowledgeChunk::getVersionId, document.getCurrentVersionId())
-                    .eq(KnowledgeChunk::getDelFlag, 0)
-                    .eq(KnowledgeChunk::getEnabled, 0)
-                    .count();
+            disabledChunkCount = chunkList.stream().filter(chunk -> chunk.getEnabled() == 0).count();
         }
         //最近一次向量化任务。
         KnowledgeBaseVectorTask latestVectorTask = vectorTaskService.lambdaQuery()
@@ -92,6 +87,7 @@ public class KnowledgeDocumentServiceImpl extends ServiceImpl<KnowledgeDocumentM
         overview.setEnabledChunkCount(enabledChunkCount);
         overview.setDisabledChunkCount(disabledChunkCount);
         overview.setLatestVectorTask(latestVectorTask);
+        overview.setChunkList(chunkList);
         return overview;
     }
 
@@ -99,6 +95,7 @@ public class KnowledgeDocumentServiceImpl extends ServiceImpl<KnowledgeDocumentM
     public Page<KnowledgeDocumentListItemVO> findPageList(Page<KnowledgeDocumentListItemVO> page, KnowledgeDocumentDTO query) {
         return baseMapper.findPageList(page, query);
     }
+
 
     @Override
     public void deprecatedDocument(Long documentId) {

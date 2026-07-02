@@ -4,6 +4,7 @@ package org.example.airag.modules.knowledgebase.dto;
 
 import lombok.Data;
 import org.example.airag.modules.knowledgebase.entity.KnowledgeBaseVectorTask;
+import org.example.airag.modules.knowledgebase.entity.KnowledgeChunk;
 import org.example.airag.modules.knowledgebase.entity.KnowledgeDocument;
 import org.example.airag.modules.knowledgebase.entity.KnowledgeDocumentVersion;
 
@@ -51,4 +52,9 @@ public class KnowledgeDocumentOverviewDTO {
      * 最近一次向量化任务。
      */
     private KnowledgeBaseVectorTask latestVectorTask;
+
+    /**
+     * 切片集合
+     */
+    private List<KnowledgeChunk> chunkList;
 }

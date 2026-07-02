@@ -22,6 +22,11 @@ public class KnowledgeDocumentListItemVO {
     private Long categoryId;
 
     /**
+     * 知识文档分类名称。
+     */
+    private String categoryName;
+
+    /**
      * 知识文档标题。
      */
     private String title;
