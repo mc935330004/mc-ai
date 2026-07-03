@@ -1,15 +1,18 @@
 package org.example.airag.modules.knowledgebase.controller;
 
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.example.airag.common.result.Result;
 import org.example.airag.modules.knowledgebase.dto.KnowledgeDocumentDTO;
 import org.example.airag.modules.knowledgebase.dto.KnowledgeDocumentOverviewDTO;
 import org.example.airag.modules.knowledgebase.dto.KnowledgeDocumentQueryRequest;
 import org.example.airag.modules.knowledgebase.dto.KnowledgeDocumentQueryResponse;
+import org.example.airag.modules.knowledgebase.entity.KnowledgeBaseVectorTask;
 import org.example.airag.modules.knowledgebase.service.KnowledgeDocumentService;
 import org.example.airag.modules.knowledgebase.service.impl.KnowledgeDocumentQueryService;
 import org.example.airag.modules.knowledgebase.vo.KnowledgeDocumentListItemVO;
+import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -17,6 +20,10 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 
 @RestController
 @RequestMapping("/api/knowledge/documents")
@@ -37,7 +44,7 @@ public class KnowledgeDocumentController {
     /**
      * 企业文档流式问答，返回 text/event-stream。
      */
-    @PostMapping("/query/stream")
+    @PostMapping(value = "/query/stream",produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter streamQuery(@RequestBody KnowledgeDocumentQueryRequest request) {
         return knowledgeDocumentQueryService.streamQuery(request);
     }
@@ -84,5 +91,13 @@ public class KnowledgeDocumentController {
     public Result<Void> restorePublished(@PathVariable Long id) {
         documentService.restorePublished(id);
         return Result.success("文档已恢复发布");
+    }
+
+    /**
+     * 向量任务监控列表（分页）
+     */
+    @GetMapping("/vectorTaskList")
+    public Result<?> vectorTaskList(Page<KnowledgeBaseVectorTask> page, @Valid KnowledgeDocumentDTO request) {
+        return Result.success(documentService.findVectorTaskList(page, request));
     }
 }

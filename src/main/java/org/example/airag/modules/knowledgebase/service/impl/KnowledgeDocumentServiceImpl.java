@@ -134,6 +134,11 @@ public class KnowledgeDocumentServiceImpl extends ServiceImpl<KnowledgeDocumentM
         updateById(document);
     }
 
+    @Override
+    public Page<KnowledgeBaseVectorTask> findVectorTaskList(Page<KnowledgeBaseVectorTask> page, KnowledgeDocumentDTO query) {
+        return baseMapper.findVectorTaskList(page, query);
+    }
+
     /**
      * 更新文档状态。
      *

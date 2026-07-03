@@ -68,4 +68,10 @@ public class KnowledgeQueryLog {
      */
     @TableField("created_at")
     private LocalDateTime createdAt;
+
+    /**
+     * 引用数量
+     */
+    @TableField(exist = false)
+    private Integer referenceCount;
 }

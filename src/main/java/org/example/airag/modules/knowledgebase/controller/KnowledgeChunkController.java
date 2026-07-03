@@ -21,8 +21,8 @@ public class KnowledgeChunkController {
      */
     @GetMapping("/page")
     public Result<Page<KnowledgeChunk>> page(Page<KnowledgeChunk> page,
-                                             @RequestParam("versionId") Long versionId) {
-        return Result.success(chunkService.findChunksByDocumentVersionId(page, versionId));
+                                             @RequestParam(value = "keyword", required = false) String keyword) {
+        return Result.success(chunkService.findChunksByDocumentVersionId(page, keyword));
     }
 
 

@@ -261,8 +261,8 @@ public class KnowledgeDocumentVersionServiceImpl extends ServiceImpl<KnowledgeDo
             chunk.setDocumentId(document.getId());
             chunk.setVersionId(version.getId());
             chunk.setChunkIndex(i);
-            chunk.setContent(text.trim());
-            chunk.setContentHash(contentHashService.sha256(text.trim()));
+            chunk.setContent(text);
+            chunk.setContentHash(contentHashService.sha256(text));
             chunk.setTokenCount(null);
             chunk.setPageNumber(null);
             chunk.setEnabled(1);

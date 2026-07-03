@@ -4,9 +4,16 @@
 
     <select id="findChunksByDocumentVersionId"
             resultType="org.example.airag.modules.knowledgebase.entity.KnowledgeChunk">
-        select * from knowledge_chunk
-        where version_id = #{versionId}
-        and del_flag = 0
-        order by created_at desc
+        select kc.*,kv.original_filename,kv.version_no,kd.status as documentStatus from knowledge_chunk kc
+        LEFT JOIN knowledge_document_version kv on kc.version_id = kv.id
+        left join knowledge_document kd on kc.document_id = kd.id
+        <where>
+            kv.del_flag = 0 and kc.del_flag = 0
+           <if test="keyword != null and keyword != ''">
+               and (kv.original_filename like CONCAT('%', #{keyword}, '%') or
+               kv.version_no like CONCAT('%', #{keyword}, '%'))
+           </if>
+        </where>
+        order by kc.created_at desc
     </select>
 </mapper>

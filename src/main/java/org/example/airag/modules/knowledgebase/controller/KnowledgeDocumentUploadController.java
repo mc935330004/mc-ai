@@ -28,4 +28,5 @@ public class KnowledgeDocumentUploadController {
     ) {
         return Result.success(uploadService.upload(request));
     }
+
 }

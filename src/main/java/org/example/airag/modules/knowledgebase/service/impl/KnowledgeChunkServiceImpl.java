@@ -14,8 +14,8 @@ import java.util.Optional;
 public class KnowledgeChunkServiceImpl extends ServiceImpl<KnowledgeChunkMapper, KnowledgeChunk>
         implements KnowledgeChunkService {
     @Override
-    public Page<KnowledgeChunk> findChunksByDocumentVersionId(Page<KnowledgeChunk>page,Long versionId) {
-        return baseMapper.findChunksByDocumentVersionId(page,versionId);
+    public Page<KnowledgeChunk> findChunksByDocumentVersionId(Page<KnowledgeChunk>page,String keyword) {
+        return baseMapper.findChunksByDocumentVersionId(page,keyword);
     }
 
     @Override

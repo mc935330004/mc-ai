@@ -11,7 +11,7 @@ public interface KnowledgeChunkService extends IService<KnowledgeChunk> {
      *
      * 用于管理端查看某个版本实际参与 RAG 检索的文本片段。
      */
-    Page<KnowledgeChunk> findChunksByDocumentVersionId(Page<KnowledgeChunk>page,Long versionId);
+    Page<KnowledgeChunk> findChunksByDocumentVersionId(Page<KnowledgeChunk>page,String keyword);
 
     /**
      * 启用或禁用切片。

@@ -4,16 +4,21 @@
 
     <select id="findKnowledgeQueryLogList"
             resultType="org.example.airag.modules.KnowledgeLog.entity.KnowledgeQueryLog">
-        select * from knowledge_query_log
+        select kl.question,kl.answer,kr.reference_count,kl.duration_ms,kl.error_message,kl.status
+        from knowledge_query_log kl
+        left join (
+            select count(*) as reference_count, query_log_id from knowledge_query_reference
+            group by query_log_id
+        )kr on kl.id = kr.query_log_id
         <where>
             <if test="status != null and status != ''">
-                and status = #{status}
+                and kl.status = #{status}
             </if>
             <if test="answer != null and answer != ''">
-               and  answer like CONCAT('%', #{answer}, '%')
+               and  kl.answer like CONCAT('%', #{answer}, '%')
             </if>
         </where>
-        order by created_at desc
+        order by kl.created_at desc
     </select>
     <select id="getEnterpriseQuestionStatistics"
             resultType="org.example.airag.modules.KnowledgeLog.dto.KnowledgeQueryStatsDTO">

@@ -111,4 +111,12 @@ public class KnowledgeBaseVectorTask implements Serializable {
      */
     @TableField("version_id")
     private Long versionId;
+
+    @TableField(exist = false)
+    private String title;
+    /**
+     * 本版
+     */
+    @TableField(exist = false)
+    private String versionNo;
 }

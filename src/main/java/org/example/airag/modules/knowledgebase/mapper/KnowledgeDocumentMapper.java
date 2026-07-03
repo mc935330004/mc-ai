@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 import org.example.airag.modules.knowledgebase.dto.KnowledgeDocumentDTO;
+import org.example.airag.modules.knowledgebase.entity.KnowledgeBaseVectorTask;
 import org.example.airag.modules.knowledgebase.entity.KnowledgeDocument;
 import org.example.airag.modules.knowledgebase.vo.KnowledgeDocumentListItemVO;
 
@@ -17,5 +18,9 @@ public interface KnowledgeDocumentMapper extends BaseMapper<KnowledgeDocument> {
     Page<KnowledgeDocumentListItemVO> findPageList(Page<KnowledgeDocumentListItemVO> page,
                                                    @Param("query") KnowledgeDocumentDTO query);
 
-
+    /**
+     * 向量任务监控列表（分页）
+     */
+    Page<KnowledgeBaseVectorTask> findVectorTaskList(Page<KnowledgeBaseVectorTask> page,
+                                                     @Param("query") KnowledgeDocumentDTO query);
 }

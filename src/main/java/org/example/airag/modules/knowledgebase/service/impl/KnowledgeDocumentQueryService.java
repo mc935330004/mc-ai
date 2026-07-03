@@ -88,7 +88,7 @@ public class KnowledgeDocumentQueryService {
             requireChatClient()
                     .prompt()
                     .system(buildSystemPrompt())
-                    .user(buildUserPrompt(buildContext(hits), question))
+                    .user(buildUserPrompt(question,buildContext(hits)))
                     .stream()
                     .content()
                     .doOnNext(content -> {
@@ -148,7 +148,7 @@ public class KnowledgeDocumentQueryService {
             String answer = requireChatClient()
                     .prompt()
                     .system(buildSystemPrompt())
-                    .user(buildUserPrompt(buildContext(hits), question))
+                    .user(buildUserPrompt(question,buildContext(hits)))
                     .call()
                     .content();
 
@@ -218,21 +218,51 @@ public class KnowledgeDocumentQueryService {
 
     private String buildSystemPrompt() {
         return """
-                你是企业知识库问答助手。
-                你必须优先根据检索到的企业知识文档回答。
-                如果文档内容不足以回答，请明确说明未检索到足够信息。
-                不要编造企业知识文档中没有出现的内容。
+                你是一个企业知识库 AI 助手。
+                #回答要求：
+                1. 标题格式必须是：### 标题名称，### 后面必须有一个空格。
+                2. 如果内容适合表格展示，请使用 Markdown 表格。
+                3. 表格前后必须保留一个空行。
+                4. 表格每一行必须独占一行。
+                5. 不要把表格压缩成一行。
+                6. 不要删除换行符。
+                7. 重要内容可以使用 **加粗**。
+                8. 不要输出 HTML。
+                9. 不要编造知识库中不存在的内容。
+                10. 如果检索内容不足，请明确说明“当前知识库中没有找到足够信息”。
+                11. 你必须优先根据检索到的企业知识文档回答。
+                12. 如果文档内容不足以回答，请明确说明未检索到足够信息。
+                13. 不要编造企业知识文档中没有出现的内容。
+                
+                # Java 代码格式要求
+                
+                如果回答中包含 Java 代码，请必须使用 Markdown 代码块格式：
+                
+                ```java
+                // Java 代码写在这里
+                ```
+                
+                要求：
+                1. Java 代码块必须以 ```java 开头。
+                2. Java 代码块必须以 ``` 结束。
+                3. 代码缩进必须保留。
+                4. 不要把代码压缩成一行。
+                5. 不要删除代码中的换行符。
+                6. 如果是 Spring Boot 示例代码，也必须放在 ```java 代码块中。
+                7. 如果是 Maven 依赖，请使用 ```xml 代码块。
+                8. 如果是 SQL，请使用 ```sql 代码块。
                 """;
     }
 
-    private String buildUserPrompt(String context, String question) {
+    private String buildUserPrompt(String question, String context) {
         return """
-                【企业知识文档内容】
+                # 用户问题：
                 %s
 
-                【用户问题】
+                # 知识库内容
                 %s
-                """.formatted(context, question);
+                请基于以上资料回答用户问题，并使用 Markdown 格式输出。
+                """.formatted(question, context);
     }
 
     private List<KnowledgeDocumentQueryResponse.Reference> buildReferences(List<Document> documents) {

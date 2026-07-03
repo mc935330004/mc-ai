@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.extension.service.IService;
 import org.apache.ibatis.annotations.Param;
 import org.example.airag.modules.knowledgebase.dto.KnowledgeDocumentDTO;
 import org.example.airag.modules.knowledgebase.dto.KnowledgeDocumentOverviewDTO;
+import org.example.airag.modules.knowledgebase.entity.KnowledgeBaseVectorTask;
 import org.example.airag.modules.knowledgebase.entity.KnowledgeDocument;
 import org.example.airag.modules.knowledgebase.vo.KnowledgeDocumentListItemVO;
 
@@ -40,4 +41,9 @@ public interface KnowledgeDocumentService extends IService<KnowledgeDocument> {
      * 只有当前版本解析和向量化完成后，才允许恢复。
      */
     void restorePublished(Long documentId);
+
+    /**
+     * 向量任务监控列表（分页）
+     */
+    Page<KnowledgeBaseVectorTask> findVectorTaskList(Page<KnowledgeBaseVectorTask> page, KnowledgeDocumentDTO query);
 }

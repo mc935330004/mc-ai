@@ -45,4 +45,27 @@
         </if>
         ORDER BY d.created_at DESC
     </select>
+    <select id="findVectorTaskList"
+            resultType="org.example.airag.modules.knowledgebase.entity.KnowledgeBaseVectorTask">
+        SELECT
+        kt.id,
+        kd.title,
+        kv.version_no AS versionNo,
+        kt.task_type AS taskType,
+        kt.status,
+        kt.retry_count AS retryCount,
+        kt.max_retry_count AS maxRetryCount,
+        kt.error_message AS errorMessage,
+        kt.started_at AS startedAt,
+        kt.finished_at AS finishedAt
+        FROM knowledge_base_vector_task kt
+        left join knowledge_document kd on kd.id = kt.document_id
+        left join knowledge_document_version kv on kv.id = kt.version_id
+        <where>
+             kd.del_flag=0
+        <if test="query.keyword != null and query.keyword != ''">
+            AND kd.title LIKE CONCAT('%', #{query.keyword}, '%')
+        </if>
+        </where>
+    </select>
 </mapper>

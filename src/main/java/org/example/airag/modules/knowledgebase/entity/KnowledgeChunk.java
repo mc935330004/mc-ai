@@ -87,4 +87,22 @@ public class KnowledgeChunk implements Serializable {
      * 逻辑删除：0-未删除，1-已删除
      */
     private Integer delFlag;
+
+    /**
+     * 源文件名称
+     */
+    @TableField(exist = false)
+    private String originalFilename;
+
+    /**
+     * 源文件版本号
+      */
+    @TableField(exist = false)
+    private String versionNo;
+
+    /**
+     * 文档状态
+     */
+    @TableField(exist = false)
+    private String documentStatus;
 }
