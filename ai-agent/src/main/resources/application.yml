@@ -60,11 +60,12 @@ spring:
     enabled: true
     locations: classpath:db/migration
     baseline-on-migrate: true
-
+  servlet:
+    multipart:
+      max-file-size: 100MB
+      max-request-size: 100MB
 app:
   storage:
-    # 本地知识库文件目录；当前 FTP 实现主要使用 app.storage.ftp
-    knowledge-base-dir: ${user.home}/.ai-rag/knowledgebase
     ftp:
       # FTP 连接和数据传输超时时间，单位毫秒
       connect-timeout-ms: 10000

@@ -73,6 +73,15 @@ public class KnowledgeDocumentVersion implements Serializable {
      * 向量化失败原因
      */
     private String vectorError;
+    /**
+     * 解析引擎：DOCLING、TIKA
+     */
+    private String parseEngine;
+
+    /**
+     * 解析失败原因
+     */
+    private String parseError;
 
     /**
      * 切片数量

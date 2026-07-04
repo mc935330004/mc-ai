@@ -56,6 +56,8 @@ CREATE TABLE IF NOT EXISTS knowledge_document_version (
     chunk_count INT NOT NULL DEFAULT 0 COMMENT '切片数量',
     effective_start_time DATETIME COMMENT '生效开始时间',
     effective_end_time DATETIME COMMENT '生效结束时间',
+    parse_engine varchar(32) DEFAULT NULL COMMENT '解析引擎：DOCLING、TIKA',
+    parse_error varchar(500) DEFAULT NULL COMMENT '解析失败原因',
     published_at DATETIME COMMENT '发布时间',
     deprecated_at DATETIME COMMENT '废止时间',
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',

@@ -202,17 +202,10 @@ public class KnowledgeDocumentVersionServiceImpl extends ServiceImpl<KnowledgeDo
      */
     private String parseVersionContent(KnowledgeDocumentVersion version) {
         byte[] fileBytes = fileStorageService.downloadFile(version.getStoragePath());
-        String content = documentParseService.parseContent(
+        return documentParseService.parseContent(
                 fileBytes,
                 version.getOriginalFilename()
         );
-        if (!StringUtils.hasText(content)) {
-            throw new BusinessException(
-                    ErrorCode.KNOWLEDGE_BASE_PARSE_FAILED,
-                    "无法从文档版本中解析出有效文本"
-            );
-        }
-        return content.trim();
     }
     /**
      * 切分文档内容
