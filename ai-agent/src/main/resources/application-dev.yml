@@ -12,23 +12,6 @@ spring:
       pgvector:
         # 开发环境允许自动初始化 pgvector 表结构，方便本地联调
         initialize-schema: true
-document:
-  parse:
-    provider: docling
-    url: http://localhost:8001
-    path: /api/parse/sync
-    timeout-seconds: 120
-    # 是否启用 Docling
-    # true：优先 Docling，失败回退 Tika
-    # false：不调用 Docling，直接走 Tika
-    docling-enabled: true
-    output-format: markdown
-    # 连接 Docling 的超时时间，单位毫秒
-    connect-timeout-ms: 10000
-    # 等待 Docling 解析结果的超时时间，单位毫秒
-    # PDF / Word 大文件解析慢，可以先给 120 秒
-    read-timeout-ms: 120000
-
 app:
   storage:
     ftp:

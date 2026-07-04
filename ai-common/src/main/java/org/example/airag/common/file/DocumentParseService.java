@@ -59,6 +59,7 @@ public class DocumentParseService {
     // 是否启用 Docling，方便本地调试或 Docling 服务不可用时关闭
     @Value("${document.parse.docling-enabled:true}")
     private boolean doclingEnabled;
+
     /**
      * 解析上传的文件，提取文本内容
      *
@@ -66,30 +67,11 @@ public class DocumentParseService {
      * @return 提取的文本内容
      */
     public String parseContent(MultipartFile file) {
-//        String fileName = file.getOriginalFilename();
-//        log.info("开始解析文件: {}", fileName);
-//
-//        // 处理空文件
-//        if (file.isEmpty() || file.getSize() == 0) {
-//            log.warn("文件为空: {}", fileName);
-//            return "";
-//        }
-//
-//        try (InputStream inputStream = file.getInputStream()) {
-//            String content = parseContent(inputStream);
-//            String cleanedContent = textCleaningService.cleanText(content);
-//            log.info("文件解析成功，提取文本长度: {} 字符", cleanedContent.length());
-//            return cleanedContent;
-//        } catch (IOException | TikaException | SAXException e) {
-//            log.error("文件解析失败: {}", e.getMessage(), e);
-//            throw new BusinessException(ErrorCode.INTERNAL_ERROR, "文件解析失败: " + e.getMessage());
-//        }
         String fileName = file.getOriginalFilename();
         if (file.isEmpty() || file.getSize() == 0) {
             log.warn("上传文件为空: {}", fileName);
             return "";
         }
-
         try {
             return parseContent(file.getBytes(), fileName);
         } catch (IOException e) {
@@ -114,82 +96,29 @@ public class DocumentParseService {
         }
         long startTime = System.currentTimeMillis();
         String content;
-        String parser = "TIKA";
         if (!doclingEnabled) {
             // Docling 关闭时，直接使用 Tika，方便本地开发和排查问题
             content = parseByTika(fileBytes, fileName);
-        }else{
+        } else {
             try {
-                parser = "DOCLING";
                 content = parseByDocling(fileBytes, fileName);
-                if (StringUtils.hasText(content)) {
-                    return textCleaningService.cleanText(content);
-                }
+                content = textCleaningService.cleanText(content);
             } catch (Exception e) {
                 // ponytail: 先用最小 fallback，后面真需要再拆 Parser 接口
                 log.warn("Docling 解析失败，回退 Tika 解析: fileName={}, error={}", fileName, e.getMessage());
-                parser = "TIKA";
                 content = parseByTika(fileBytes, fileName);
             }
         }
         String parsedText = requireParsedText(content, fileName);
         log.info(
-                "文件解析完成: fileName={}, parser={}, textLength={}, durationMs={}",
+                "文件解析完成: fileName={}, textLength={}, durationMs={}",
                 fileName,
-                parser,
                 parsedText.length(),
                 System.currentTimeMillis() - startTime
         );
         return parsedText;
     }
 
-    /**
-     * 核心解析方法：使用显式 Parser + Context 方式解析文档
-     * <p>
-     * 优化点：
-     * 1. 使用 BodyContentHandler 只提取正文内容
-     * 2. 禁用 EmbeddedDocumentExtractor，不解析嵌入资源（图片、附件）
-     * 3. 配置 PDFParserConfig，关闭图片和注释提取
-     * 4. 显式指定 Parser 到 Context，增强健壮性
-     *
-     * @param inputStream 文件输入流
-     * @return 提取的文本内容
-     * @throws IOException     IO 异常
-     * @throws TikaException   Tika 解析异常
-     * @throws SAXException    SAX 解析异常
-     */
-    private String parseContent(InputStream inputStream) throws IOException, TikaException, SAXException {
-        // 1. 创建自动检测解析器
-        AutoDetectParser parser = new AutoDetectParser();
-
-        // 2. 创建内容处理器，只接收正文，限制最大长度为 5MB
-        BodyContentHandler handler = new BodyContentHandler(MAX_TEXT_LENGTH);
-
-        // 3. 创建元数据对象
-        Metadata metadata = new Metadata();
-
-        // 4. 创建解析上下文
-        ParseContext context = new ParseContext();
-
-        // 5. 显式指定 Parser 到 Context（增强健壮性）
-        context.set(Parser.class, parser);
-
-        // 6. 禁用嵌入文档解析（关键：避免提取图片引用和临时文件路径）
-        context.set(EmbeddedDocumentExtractor.class, new NoOpEmbeddedDocumentExtractor());
-
-        // 7. PDF 专用配置：关闭图片提取，按位置排序文本
-        PDFParserConfig pdfConfig = new PDFParserConfig();
-        pdfConfig.setExtractInlineImages(false);
-        pdfConfig.setSortByPosition(true); // 按 x/y 坐标排序文本，改善多栏布局解析顺序
-        // 注意：Tika 2.9.2 中 setExtractAnnotations 方法可能不存在，关闭图片提取已足够
-        context.set(PDFParserConfig.class, pdfConfig);
-
-        // 8. 执行解析
-        parser.parse(inputStream, handler, metadata, context);
-
-        // 9. 返回提取的文本内容
-        return handler.toString();
-    }
     /**
      * 调用 Docling 解析文件。
      * 注意：Docling 的真实接口路径和返回字段要按你的 Docling 服务确认。
@@ -228,6 +157,12 @@ public class DocumentParseService {
         );
 
         Map<?, ?> result = response.getBody();
+        if (result == null || result.isEmpty()) {
+            throw new BusinessException(
+                    ErrorCode.KNOWLEDGE_BASE_PARSE_FAILED,
+                    "Docling 返回为空"
+            );
+        }
         // 只打印返回字段名，不打印正文内容，避免日志过大
         log.info("Docling 解析返回字段: {}", result.keySet());
         return extractDoclingContent(result);
@@ -292,7 +227,9 @@ public class DocumentParseService {
     private String buildDoclingApiUrl() {
         String baseUrl = doclingUrl.trim();
         String apiPath = doclingPath.trim();
-
+        if (!StringUtils.hasText(apiPath)) {
+            apiPath = "/api/parse/sync";
+        }
         if (baseUrl.endsWith("/") && apiPath.startsWith("/")) {
             return baseUrl.substring(0, baseUrl.length() - 1) + apiPath;
         }
@@ -308,43 +245,14 @@ public class DocumentParseService {
      * 优先使用 markdown，因为它能保留标题、列表、表格结构。
      */
     private String extractDoclingContent(Map<?, ?> result) {
-        // 常见情况 1：直接返回 markdown
         String markdown = getString(result, "markdown");
         if (StringUtils.hasText(markdown)) {
             return markdown;
         }
-        // 常见情况 2：返回 md_content
-        String mdContent = getString(result, "md_content");
-        if (StringUtils.hasText(mdContent)) {
-            return mdContent;
-        }
-        // 常见情况 3：直接返回 text
-        String text = getString(result, "text");
-        if (StringUtils.hasText(text)) {
-            return text;
-        }
-        // 常见情况 4：返回 content
-        String content = getString(result, "content");
-        if (StringUtils.hasText(content)) {
-            return content;
-        }
-        // 常见情况 5：内容包在 document 对象里
-        Object document = result.get("document");
-        if (document instanceof Map<?, ?> documentMap) {
-            String documentMarkdown = getString(documentMap, "markdown");
-            if (StringUtils.hasText(documentMarkdown)) {
-                return documentMarkdown;
-            }
-
-            String documentText = getString(documentMap, "text");
-            if (StringUtils.hasText(documentText)) {
-                return documentText;
-            }
-        }
 
         throw new BusinessException(
                 ErrorCode.KNOWLEDGE_BASE_PARSE_FAILED,
-                "Docling 未返回有效文本"
+                "Docling 未返回有效 Markdown 内容"
         );
     }
 

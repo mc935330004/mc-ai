@@ -30,7 +30,7 @@ public class KnowledgeDocumentVersion implements Serializable {
     private Long documentId;
 
     /**
-     * 版本号，例如v1.0、v1.1
+     * 版本号，例如 v1.0、v1.1
      */
     private String versionNo;
 
@@ -60,12 +60,12 @@ public class KnowledgeDocumentVersion implements Serializable {
     private String storagePath;
 
     /**
-     * 解析状态：PENDING待处理，PROCESSING处理中，COMPLETED成功，FAILED失败
+     * 解析状态：PENDING、PROCESSING、COMPLETED、FAILED
      */
     private String parseStatus;
 
     /**
-     * 向量化状态：PENDING待处理，PROCESSING处理中，COMPLETED成功，FAILED失败
+     * 向量化状态：PENDING、PROCESSING、COMPLETED、FAILED
      */
     private String vectorStatus;
 
@@ -73,15 +73,6 @@ public class KnowledgeDocumentVersion implements Serializable {
      * 向量化失败原因
      */
     private String vectorError;
-    /**
-     * 解析引擎：DOCLING、TIKA
-     */
-    private String parseEngine;
-
-    /**
-     * 解析失败原因
-     */
-    private String parseError;
 
     /**
      * 切片数量

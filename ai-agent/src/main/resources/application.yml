@@ -64,6 +64,19 @@ spring:
     multipart:
       max-file-size: 100MB
       max-request-size: 100MB
+
+document:
+  parse:
+    # 默认关闭 Docling，避免非开发环境未配置地址时误调用
+    docling-enabled: true
+    # Docling 文件解析接口路径，环境不同优先只覆盖 url
+    path: /api/parse/sync
+    # Docling 服务地址，生产环境建议通过 DOCLING_URL 注入
+    url: http://localhost:8001
+    # 连接 Docling 的超时时间，单位毫秒
+    connect-timeout-ms: 10000
+    # 等待 Docling 解析结果的超时时间，单位毫秒
+    read-timeout-ms: 120000
 app:
   storage:
     ftp:
