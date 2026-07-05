@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
-<mapper namespace="org.example.airag.modules.KnowledgeLog.mapper.KnowledgeQueryLogMapper">
+<mapper namespace="org.example.ai.agent.modules.KnowledgeLog.mapper.KnowledgeQueryLogMapper">
 
     <select id="findKnowledgeQueryLogList"
-            resultType="org.example.airag.modules.KnowledgeLog.entity.KnowledgeQueryLog">
+            resultType="org.example.ai.agent.modules.KnowledgeLog.entity.KnowledgeQueryLog">
         select kl.question,kl.answer,kr.reference_count,kl.duration_ms,kl.error_message,kl.status
         from knowledge_query_log kl
         left join (
@@ -21,7 +21,7 @@
         order by kl.created_at desc
     </select>
     <select id="getEnterpriseQuestionStatistics"
-            resultType="org.example.airag.modules.KnowledgeLog.dto.KnowledgeQueryStatsDTO">
+            resultType="org.example.ai.agent.modules.KnowledgeLog.dto.KnowledgeQueryStatsDTO">
         select
             id,
             sum(if(status='SUCCESS',1,0))as successCount,

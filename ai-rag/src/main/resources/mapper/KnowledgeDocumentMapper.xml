@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
-<mapper namespace="org.example.airag.modules.knowledgebase.mapper.KnowledgeDocumentMapper">
+<mapper namespace="org.example.ai.agent.modules.knowledgebase.mapper.KnowledgeDocumentMapper">
 
-    <select id="findPageList" resultType="org.example.airag.modules.knowledgebase.vo.KnowledgeDocumentListItemVO">
+    <select id="findPageList" resultType="org.example.ai.agent.modules.knowledgebase.vo.KnowledgeDocumentListItemVO">
         SELECT
         d.id,
         d.category_id AS categoryId,
@@ -46,7 +46,7 @@
         ORDER BY d.created_at DESC
     </select>
     <select id="findVectorTaskList"
-            resultType="org.example.airag.modules.knowledgebase.entity.KnowledgeBaseVectorTask">
+            resultType="org.example.ai.agent.modules.knowledgebase.entity.KnowledgeBaseVectorTask">
         SELECT
         kt.id,
         kd.title,
