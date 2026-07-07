@@ -30,3 +30,32 @@ CREATE TABLE ai_field_dictionary (
  aggregatable TINYINT DEFAULT 0 COMMENT '是否可聚合统计',
  created_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间'
 ) COMMENT='AI字段语义字典表';
+
+CREATE TABLE ai_run_trace (
+id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键ID',
+run_id VARCHAR(64) NOT NULL UNIQUE COMMENT '运行ID',
+conversation_id VARCHAR(64) COMMENT '会话ID',
+user_id VARCHAR(64) COMMENT '用户ID',
+question TEXT COMMENT '用户问题',
+route_type VARCHAR(64) COMMENT '路由类型',
+status VARCHAR(32) COMMENT '状态：RUNNING/SUCCESS/FAILED',
+error_message TEXT COMMENT '错误信息',
+total_duration_ms BIGINT COMMENT '总耗时毫秒',
+created_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间'
+) COMMENT='Agent运行主记录表';
+
+CREATE TABLE ai_run_step (
+ id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键ID',
+ run_id VARCHAR(64) NOT NULL COMMENT '运行ID',
+ step_no INT COMMENT '步骤编号',
+ step_type VARCHAR(64) COMMENT '步骤类型',
+ step_name VARCHAR(128) COMMENT '步骤名称',
+ capability_code VARCHAR(128) COMMENT '能力编码',
+ input_json TEXT COMMENT '步骤入参JSON',
+ output_json MEDIUMTEXT COMMENT '步骤出参JSON',
+ status VARCHAR(32) COMMENT '状态：SUCCESS/FAILED/SKIPPED',
+ error_message TEXT COMMENT '错误信息',
+ duration_ms BIGINT COMMENT '步骤耗时毫秒',
+ created_at DATETIME DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间'
+) COMMENT='Agent运行步骤记录表';

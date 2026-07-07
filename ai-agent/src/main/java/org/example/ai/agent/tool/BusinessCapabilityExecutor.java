@@ -1,0 +1,21 @@
+package org.example.ai.agent.tool;
+
+import org.example.ai.agent.plan.PlanStep;
+
+/**
+ * 业务能力执行器。
+ *
+ * 只处理 stepType = BUSINESS_TOOL 的步骤。
+ * 它不负责规划，也不负责总结答案，只负责安全调用真实业务接口。
+ */
+public interface BusinessCapabilityExecutor {
+
+    /**
+     * 执行业务能力。
+     *
+     * @param context 执行上下文
+     * @param step 当前业务工具步骤
+     * @return 工具统一返回结果
+     */
+    ToolResult execute(ToolExecutionContext context, PlanStep step);
+}
