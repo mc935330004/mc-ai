@@ -16,6 +16,14 @@ CREATE TABLE ai_capability_definition (
   updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间'
 ) COMMENT='AI能力定义表';
 
+ALTER TABLE ai_capability_definition
+ADD COLUMN request_content_type varchar(64) DEFAULT 'application/json' COMMENT '请求内容类型',
+ADD COLUMN timeout_ms int DEFAULT 5000 COMMENT '接口超时时间',
+ADD COLUMN require_confirm tinyint DEFAULT 0 COMMENT '是否需要用户确认',
+ADD COLUMN pagination_json text COMMENT '分页配置JSON',
+ADD COLUMN remark varchar(512) DEFAULT NULL COMMENT '备注';
+
+
 CREATE TABLE ai_field_dictionary (
  id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键ID',
  capability_code VARCHAR(128) NOT NULL COMMENT '能力编码',

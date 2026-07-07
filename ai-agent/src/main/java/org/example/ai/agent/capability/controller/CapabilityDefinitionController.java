@@ -1,7 +1,12 @@
 package org.example.ai.agent.capability.controller;
 
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import lombok.RequiredArgsConstructor;
+import org.example.ai.agent.capability.dto.CapabilitySaveDTO;
+import org.example.ai.agent.capability.dto.CapabilityTestRequestDTO;
+import org.example.ai.agent.capability.entity.CapabilityDefinition;
 import org.example.ai.agent.capability.service.CapabilityDefinitionService;
+import org.example.ai.agent.capability.vo.CapabilityTestResultVO;
 import org.example.ai.agent.common.result.Result;
 import org.springframework.web.bind.annotation.*;
 
@@ -22,51 +27,60 @@ public class CapabilityDefinitionController {
      */
     private final CapabilityDefinitionService capabilityDefinitionService;
 
-//    /**
-//     * 查询全部能力列表。
-//     */
-//    @GetMapping
-//    public Result<List<CapabilityDefinition>> list() {
-//        return Result.success(capabilityDefinitionService.list());
-//    }
-//
-//    /**
-//     * 根据能力编码查询能力详情。
-//     */
-//    @GetMapping("/{capabilityCode}")
-//    public Result<CapabilityDefinition> getByCode(@PathVariable String capabilityCode) {
-//        return Result.success(capabilityDefinitionService.getEnabledByCode(capabilityCode));
-//    }
-//
-//    /**
-//     * 新增能力定义。
-//     *
-//     * 注意：
-//     * 第一版可以先手动录入 READ 类型能力。
-//     */
-//    @PostMapping
-//    public Result<Boolean> create(@RequestBody CapabilityDefinition capabilityDefinition) {
-//        return Result.success(capabilityDefinitionService.save(capabilityDefinition));
-//    }
-//
-//    /**
-//     * 更新能力定义。
-//     */
-//    @PutMapping
-//    public Result<Boolean> update(@RequestBody CapabilityDefinition capabilityDefinition) {
-//        return Result.success(capabilityDefinitionService.updateById(capabilityDefinition));
-//    }
-//
-//    /**
-//     * 停用能力。
-//     *
-//     * 不建议物理删除能力，因为后续执行轨迹可能还需要关联历史能力编码。
-//     */
-//    @PostMapping("/{id}/disable")
-//    public Result<Boolean> disable(@PathVariable Long id) {
-//        CapabilityDefinition entity = new CapabilityDefinition();
-//        entity.setId(id);
-//        entity.setEnabled(0);
-//        return Result.success(capabilityDefinitionService.updateById(entity));
-//    }
+    /**
+     * 查询全部能力列表。
+     */
+    @GetMapping("/pageList")
+    public Result<?> pageList(Page<CapabilityDefinition> page,
+                              @RequestParam(value = "keyword", required = false) String keyword,
+                              @RequestParam(value = "domain", required = false) String domain,
+                              @RequestParam(value = "enabled", required = false) Integer enabled) {
+        return Result.success(capabilityDefinitionService.pageCapabilities(page, keyword, domain, enabled));
+    }
+    /**
+     * 查询能力详情。
+     */
+    @GetMapping("/detail/{id}")
+    public Result<CapabilityDefinition> detail(@PathVariable Long id) {
+        return Result.success(capabilityDefinitionService.getById(id));
+    }
+
+    /**
+     * 新增或修改能力。
+     * 新增：id 为空。
+     * 修改：id 必传。
+     */
+    @PostMapping("/save")
+    public Result<Boolean> save(@RequestBody CapabilitySaveDTO dto) {
+        return Result.success(capabilityDefinitionService.saveCapability(dto));
+    }
+
+    /**
+     * 启用能力。
+     */
+    @PostMapping("/{id}/enable")
+    public Result<Boolean> enable(@PathVariable Long id) {
+        return Result.success(capabilityDefinitionService.updateEnabled(id, 1));
+    }
+
+    /**
+     * 停用能力。
+     *
+     * 不做物理删除，因为执行轨迹后续还要关联 capabilityCode。
+     */
+    @PostMapping("/{id}/disable")
+    public Result<Boolean> disable(@PathVariable Long id) {
+        return Result.success(capabilityDefinitionService.updateEnabled(id, 0));
+    }
+
+    /**
+     * 测试调用能力。
+     *
+     * 示例：
+     */
+    @PostMapping("/{capabilityCode}/test")
+    public Result<?> test(@PathVariable String capabilityCode,
+                                               @RequestBody(required = false) CapabilityTestRequestDTO request) {
+        return Result.success(capabilityDefinitionService.testCapability(capabilityCode, request));
+    }
 }

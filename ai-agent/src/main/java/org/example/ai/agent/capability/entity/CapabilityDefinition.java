@@ -78,7 +78,7 @@ public class CapabilityDefinition {
     private String sideEffect;
 
     /**
-     * 是否启用。0启用，1停用
+     * 是否启用。1启用，0停用
      */
     private Integer enabled;
 
@@ -110,4 +110,25 @@ public class CapabilityDefinition {
     @TableField(fill = FieldFill.INSERT_UPDATE)
     @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss", timezone = "GMT+8")
     private LocalDateTime updatedAt;
+
+    /**
+     * 请求内容类型。
+     */
+    private String requestContentType;
+    /**
+     * 接口超时时间。
+     */
+    private Integer timeoutMs;
+    /**
+     * 是否需要用户确认。
+     */
+    private Boolean requireConfirm;
+    /**
+     * 分页配置 JSON。
+     */
+    private String paginationJson;
+    /**
+     * 备注。
+     */
+    private String remark;
 }

@@ -158,7 +158,18 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
         if (capabilityUrl.startsWith("http://") || capabilityUrl.startsWith("https://")) {
             return capabilityUrl;
         }
-        return capabilityUrl;
+        String baseUrl = businessApiProperties.getBaseUrl();
+        if (!StringUtils.hasText(baseUrl)) {
+            throw new IllegalArgumentException("agent.business-api.base-url 未配置，无法调用相对路径能力：" + capabilityUrl);
+        }
+
+        if (baseUrl.endsWith("/") && capabilityUrl.startsWith("/")) {
+            return baseUrl.substring(0, baseUrl.length() - 1) + capabilityUrl;
+        }
+        if (!baseUrl.endsWith("/") && !capabilityUrl.startsWith("/")) {
+            return baseUrl + "/" + capabilityUrl;
+        }
+        return baseUrl + capabilityUrl;
     }
 
     /**

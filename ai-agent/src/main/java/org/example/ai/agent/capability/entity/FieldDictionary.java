@@ -73,12 +73,13 @@ public class FieldDictionary {
     private String exampleValue;
 
     /**
-     * 是否可搜索。
+     * 是否可搜索。 0 是  1 否
      */
     private Integer searchable;
 
     /**
      * 是否可聚合统计。
+     * 0 是  1 否
      */
     private Integer aggregatable;
 

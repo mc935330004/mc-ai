@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="org.example.ai.agent.capability.mapper.FieldDictionaryMapper">
+
+    <select id="listByCapabilityCode" resultType="org.example.ai.agent.capability.entity.FieldDictionary">
+        select * from ai_field_dictionary
+        <where>
+            <if test="capabilityCode != null and capabilityCode != ''">
+                capability_code like CONCAT('%', #{capabilityCode}, '%')
+            </if>
+        </where>
+    </select>
+</mapper>
