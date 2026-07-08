@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.extension.service.IService;
 import org.example.ai.agent.capability.dto.CapabilitySaveDTO;
 import org.example.ai.agent.capability.dto.CapabilityTestRequestDTO;
 import org.example.ai.agent.capability.entity.CapabilityDefinition;
+import org.example.ai.agent.capability.vo.CapabilityDetailVO;
 import org.example.ai.agent.capability.vo.CapabilityTestResultVO;
 
 /**
@@ -36,7 +37,8 @@ public interface CapabilityDefinitionService extends IService<CapabilityDefiniti
     Boolean updateEnabled(Long id, Integer enabled);
 
     /**
-     * 测试调用某个能力。
+     * 查询能力详情，包含字段字典。
      */
-    CapabilityTestResultVO testCapability(String capabilityCode, CapabilityTestRequestDTO request);
+    CapabilityDetailVO detailWithFields(Long id);
+
 }

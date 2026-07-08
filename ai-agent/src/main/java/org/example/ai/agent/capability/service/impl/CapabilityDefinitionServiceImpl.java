@@ -6,8 +6,11 @@ import lombok.RequiredArgsConstructor;
 import org.example.ai.agent.capability.dto.CapabilitySaveDTO;
 import org.example.ai.agent.capability.dto.CapabilityTestRequestDTO;
 import org.example.ai.agent.capability.entity.CapabilityDefinition;
+import org.example.ai.agent.capability.entity.FieldDictionary;
 import org.example.ai.agent.capability.mapper.CapabilityDefinitionMapper;
 import org.example.ai.agent.capability.service.CapabilityDefinitionService;
+import org.example.ai.agent.capability.service.FieldDictionaryService;
+import org.example.ai.agent.capability.vo.CapabilityDetailVO;
 import org.example.ai.agent.capability.vo.CapabilityTestResultVO;
 import org.example.ai.agent.common.exception.BusinessException;
 import org.example.ai.agent.plan.PlanStep;
@@ -21,18 +24,20 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
+import java.time.LocalDateTime;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
  * AI 能力定义 Service 实现。
  */
 @Service
-@RequiredArgsConstructor(onConstructor_ = {@Lazy, @Autowired})
+@RequiredArgsConstructor
 public class CapabilityDefinitionServiceImpl extends ServiceImpl<CapabilityDefinitionMapper, CapabilityDefinition>
         implements CapabilityDefinitionService {
 
-    private final BusinessCapabilityExecutor businessCapabilityExecutor;
+    private final FieldDictionaryService fieldDictionaryService;
     /**
      * 根据能力编码查询启用状态的能力。
      */
@@ -67,6 +72,7 @@ public class CapabilityDefinitionServiceImpl extends ServiceImpl<CapabilityDefin
         dto.setInputSchemaJson(cleanToSingleLine(dto.getInputSchemaJson()));
         CapabilityDefinition entity = new CapabilityDefinition();
         BeanUtils.copyProperties(dto, entity);
+        entity.setUpdatedAt(LocalDateTime.now());
         // 默认启用，默认只读。
         if (entity.getEnabled() == null) {
             entity.setEnabled(1);
@@ -91,36 +97,18 @@ public class CapabilityDefinitionServiceImpl extends ServiceImpl<CapabilityDefin
     }
 
     @Override
-    public CapabilityTestResultVO testCapability(String capabilityCode, CapabilityTestRequestDTO request) {
-        if (!StringUtils.hasText(capabilityCode)) {
-            throw new BusinessException(400, "能力编码不能为空");
+    public CapabilityDetailVO detailWithFields(Long id) {
+        CapabilityDetailVO vo = new CapabilityDetailVO();
+        CapabilityDefinition capability = getById(id);
+        if (capability == null) {
+            throw new BusinessException(404, "能力不存在：" + id);
         }
-
-        // 构造一个最小 PlanStep，复用正式 Agent 的能力执行器。
-        // ponytail: 不另写一套 HTTP 调用逻辑，测试路径和真实执行路径保持一致。
-        PlanStep step = PlanStep.builder()
-                .stepName("管理端测试调用")
-                .capabilityCode(capabilityCode)
-                .input(request == null ? new LinkedHashMap<>() : request.getInput())
-                .outputKey("testResult")
-                .build();
-
-        ToolExecutionContext context = ToolExecutionContext.builder()
-                .variables(new LinkedHashMap<>())
-                .build();
-
-        ToolResult result = businessCapabilityExecutor.execute(context, step);
-
-        return CapabilityTestResultVO.builder()
-                .success(result.isSuccess())
-                .capabilityCode(result.getCapabilityCode())
-                .input((Map<String, Object>) result.getInput())
-                .data(result.getData())
-                .fields(result.getFields())
-                .summary(result.getSummary())
-                .errorCode(result.getErrorCode())
-                .errorMessage(result.getErrorMessage())
-                .build();
+        List<FieldDictionary> list = fieldDictionaryService.lambdaQuery()
+                .eq(FieldDictionary::getCapabilityCode, capability.getCapabilityCode())
+                .list();
+        vo.setCapability(capability);
+        vo.setFields(list);
+        return vo;
     }
 
     /**

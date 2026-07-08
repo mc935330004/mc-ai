@@ -2,6 +2,7 @@ package org.example.ai.agent.capability.controller;
 
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import lombok.RequiredArgsConstructor;
+import org.example.ai.agent.capability.dto.FieldDictionaryGenerateDTO;
 import org.example.ai.agent.capability.dto.FieldDictionarySaveDTO;
 import org.example.ai.agent.capability.entity.FieldDictionary;
 import org.example.ai.agent.capability.service.FieldDictionaryService;
@@ -48,5 +49,12 @@ public class FieldDictionaryController {
     @PostMapping("/{id}/delete")
     public Result<Boolean> delete(@PathVariable Long id) {
         return Result.success(fieldDictionaryService.removeField(id));
+    }
+    /**
+     * 根据 ID 查询字段字典详情。
+     */
+    @GetMapping("/detail/{id}")
+    public Result<FieldDictionary> detail(@PathVariable Long id) {
+        return Result.success(fieldDictionaryService.detail(id));
     }
 }
