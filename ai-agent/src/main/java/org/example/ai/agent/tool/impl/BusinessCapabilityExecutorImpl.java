@@ -124,7 +124,7 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
      */
     private Object invokeBusinessApi(CapabilityDefinition capability, Map<String, Object> params) {
         String url = baseUrl(capability.getUrl());
-        String token="";
+        String token="2891c445-38f2-40b6-b3cd-a6c99dadba04";
 //        params.put("queryStr", "2674033");
         // GET 请求使用 query param。
         if ("GET".equalsIgnoreCase(capability.getMethod())) {
@@ -169,7 +169,7 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
         if (!baseUrl.endsWith("/") && !capabilityUrl.startsWith("/")) {
             return baseUrl + "/" + capabilityUrl;
         }
-        return baseUrl + capabilityUrl;
+        return capabilityUrl;
     }
 
     /**

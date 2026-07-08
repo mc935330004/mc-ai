@@ -63,6 +63,8 @@ public class CapabilityDefinitionServiceImpl extends ServiceImpl<CapabilityDefin
         if (exists) {
             throw new BusinessException(400, "能力编码已存在：" + dto.getCapabilityCode());
         }
+        dto.setOutputSchemaJson(cleanToSingleLine(dto.getOutputSchemaJson()));
+        dto.setInputSchemaJson(cleanToSingleLine(dto.getInputSchemaJson()));
         CapabilityDefinition entity = new CapabilityDefinition();
         BeanUtils.copyProperties(dto, entity);
         // 默认启用，默认只读。
@@ -119,5 +121,22 @@ public class CapabilityDefinitionServiceImpl extends ServiceImpl<CapabilityDefin
                 .errorCode(result.getErrorCode())
                 .errorMessage(result.getErrorMessage())
                 .build();
+    }
+
+    /**
+     * 清理文本并移除所有换行符（转为空格）
+     * 适用于需要单行显示的场景
+     *
+     * @param text 原始文本
+     * @return 单行文本
+     */
+    public String cleanToSingleLine(String text) {
+        if (text == null || text.isBlank()) {
+            return "";
+        }
+        return text
+                .replaceAll("[\\r\\n]+", " ")
+                .replaceAll("\\s+", " ")
+                .strip();
     }
 }

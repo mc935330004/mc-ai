@@ -88,10 +88,6 @@ public class CapabilitySaveDTO {
     /**
      * 是否需要用户确认。
      */
-    private Boolean requireConfirm;
+    private Integer requireConfirm;
 
-    /**
-     * 分页配置 JSON。
-     */
-    private String paginationJson;
 }

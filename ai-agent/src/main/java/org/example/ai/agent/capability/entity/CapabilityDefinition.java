@@ -3,6 +3,7 @@ package org.example.ai.agent.capability.entity;
 import com.baomidou.mybatisplus.annotation.*;
 import com.fasterxml.jackson.annotation.JsonFormat;
 import lombok.Data;
+import org.springframework.format.annotation.DateTimeFormat;
 
 import java.time.LocalDateTime;
 
@@ -100,15 +101,17 @@ public class CapabilityDefinition {
     /**
      * 创建时间。
      */
-    @TableField(fill = FieldFill.INSERT)
     @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss", timezone = "GMT+8")
+    @DateTimeFormat(pattern = "yyyy-MM-dd HH:mm:ss")
+    @TableField(fill = FieldFill.INSERT)
     private LocalDateTime createdAt;
 
     /**
      * 更新时间。
      */
-    @TableField(fill = FieldFill.INSERT_UPDATE)
     @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss", timezone = "GMT+8")
+    @DateTimeFormat(pattern = "yyyy-MM-dd HH:mm:ss")
+    @TableField(fill = FieldFill.UPDATE)
     private LocalDateTime updatedAt;
 
     /**
@@ -123,10 +126,7 @@ public class CapabilityDefinition {
      * 是否需要用户确认。
      */
     private Boolean requireConfirm;
-    /**
-     * 分页配置 JSON。
-     */
-    private String paginationJson;
+
     /**
      * 备注。
      */

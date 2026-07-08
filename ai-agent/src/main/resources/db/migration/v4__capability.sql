@@ -20,7 +20,6 @@ ALTER TABLE ai_capability_definition
 ADD COLUMN request_content_type varchar(64) DEFAULT 'application/json' COMMENT '请求内容类型',
 ADD COLUMN timeout_ms int DEFAULT 5000 COMMENT '接口超时时间',
 ADD COLUMN require_confirm tinyint DEFAULT 0 COMMENT '是否需要用户确认',
-ADD COLUMN pagination_json text COMMENT '分页配置JSON',
 ADD COLUMN remark varchar(512) DEFAULT NULL COMMENT '备注';
 
 
