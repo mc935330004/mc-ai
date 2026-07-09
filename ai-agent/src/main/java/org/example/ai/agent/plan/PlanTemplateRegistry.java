@@ -1,36 +1,27 @@
 package org.example.ai.agent.plan;
 
+import lombok.RequiredArgsConstructor;
 import org.example.ai.agent.chat.entity.AgentRequest;
 import org.example.ai.agent.router.IntentResult;
 import org.example.ai.agent.router.RouteType;
 import org.springframework.stereotype.Component;
-import org.springframework.util.StringUtils;
 
 import java.util.List;
 import java.util.Map;
 
 /**
- * 计划模板注册器。
+ * 运行计划生成器。
  *
- * 第一版不做复杂的自主规划，
- * 直接根据 routeType 生成固定模板。
- *
- * 好处：
- * 1. 稳定
- * 2. 可控
- * 3. 容易调试
- * 4. 后续可以逐步替换成数据库配置模板
+ * 业务查询不再写死 capabilityCode，而是从 ai_capability_definition 中动态选择能力。
  */
 @Component
+@RequiredArgsConstructor
 public class PlanTemplateRegistry {
+
+    private final DynamicCapabilityPlanner dynamicCapabilityPlanner;
 
     /**
      * 根据路由结果生成运行计划。
-     *
-     * @param runId        本次 Agent 运行 ID
-     * @param request      用户请求
-     * @param intentResult 路由结果
-     * @return 运行计划
      */
     public RoutePlan buildPlan(String runId, AgentRequest request, IntentResult intentResult) {
         RouteType routeType = intentResult.getRouteType();
@@ -38,35 +29,22 @@ public class PlanTemplateRegistry {
         if (routeType == RouteType.RAG_ONLY) {
             return buildRagOnlyPlan(runId, request);
         }
-
-        if (routeType == RouteType.BUSINESS_QUERY) {
-            return buildBusinessQueryPlan(runId, request);
+        if (routeType == RouteType.BUSINESS_QUERY
+                || routeType == RouteType.MIXED_QUERY
+                || routeType == RouteType.STATISTIC_QUERY) {
+            return buildDynamicBusinessPlan(runId, request, routeType);
         }
-
-        if (routeType == RouteType.MIXED_QUERY) {
-            return buildMixedQueryPlan(runId, request);
-        }
-
-        if (routeType == RouteType.STATISTIC_QUERY) {
-            return buildStatisticQueryPlan(runId, request);
-        }
-
         if (routeType == RouteType.WORKFLOW_ACTION) {
             return buildWorkflowActionPlan(runId, request);
         }
-
         if (routeType == RouteType.REJECT) {
             return buildRejectPlan(runId, request, intentResult);
         }
-
         return buildClarifyPlan(runId, request, intentResult);
     }
 
     /**
-     * 构建纯 RAG 问答计划。
-     *
-     * 示例：
-     * 用户问：“合同审批流程是什么？”
+     * 纯知识库问答计划。
      */
     private RoutePlan buildRagOnlyPlan(String runId, AgentRequest request) {
         return RoutePlan.builder()
@@ -94,46 +72,31 @@ public class PlanTemplateRegistry {
     }
 
     /**
-     * 构建业务查询计划。
+     * 动态业务查询计划。
      *
-     * 示例：
-     * 用户问：“查询 A 项目的合同金额”
-     *
-     * 第一版先给出固定步骤：
-     * 1. 查项目
-     * 2. 查合同
-     * 3. 汇总回答
+     * 这里不再写死接口，而是让 DynamicCapabilityPlanner 根据用户问题选择已启用能力。
      */
-    private RoutePlan buildBusinessQueryPlan(String runId, AgentRequest request) {
-        String projectName = extractProjectName(request.getUserQuestion());
-
+    private RoutePlan buildDynamicBusinessPlan(String runId, AgentRequest request, RouteType routeType) {
+        DynamicCapabilityPlan dynamicPlan = dynamicCapabilityPlanner.plan(request.getUserQuestion());
         return RoutePlan.builder()
                 .runId(runId)
-                .routeType(RouteType.BUSINESS_QUERY)
+                .routeType(routeType)
                 .userQuestion(request.getUserQuestion())
-                .goal("查询项目相关业务数据，并生成结构化回答")
+                .goal("调用业务系统真实接口查询数据，并根据字段字典生成 Markdown 回答")
                 .steps(List.of(
                         PlanStep.builder()
                                 .stepNo(1)
                                 .stepType(StepType.BUSINESS_TOOL)
-                                .stepName("根据项目编码查询工程类产值")
-                                .capabilityCode("pm.project.outputMain")
-                                .input(Map.of("queryStr", projectName))
-                                .outputKey("outputValue")
+                                .stepName("调用动态业务能力：" + dynamicPlan.getCapabilityCode())
+                                .capabilityCode(dynamicPlan.getCapabilityCode())
+                                .input(dynamicPlan.getInput())
+                                .outputKey("businessData")
                                 .build(),
                         PlanStep.builder()
                                 .stepNo(2)
-                                .stepType(StepType.BUSINESS_TOOL)
-                                .stepName("根据项目 ID 查询合同列表")
-                                .capabilityCode("pm.contract.listByProjectId")
-                                .inputRef(Map.of("projectId", "$.project.id"))
-                                .outputKey("contracts")
-                                .build(),
-                        PlanStep.builder()
-                                .stepNo(3)
                                 .stepType(StepType.LLM_SUMMARY)
-                                .stepName("汇总业务数据生成回答")
-                                .inputKeys(List.of("project", "contracts"))
+                                .stepName("根据业务数据和字段字典生成 Markdown 回答")
+                                .inputKeys(List.of("businessData"))
                                 .outputKey("finalAnswer")
                                 .build()
                 ))
@@ -141,110 +104,14 @@ public class PlanTemplateRegistry {
     }
 
     /**
-     * 构建混合问答计划。
-     *
-     * 示例：
-     * 用户问：“查询 A 项目回款情况，并分析有没有风险”
-     *
-     * 混合问答一般包含：
-     * 1. 查业务数据
-     * 2. 检索制度文档
-     * 3. 结合两类信息生成回答
-     */
-    private RoutePlan buildMixedQueryPlan(String runId, AgentRequest request) {
-        String projectName = extractProjectName(request.getUserQuestion());
-
-        return RoutePlan.builder()
-                .runId(runId)
-                .routeType(RouteType.MIXED_QUERY)
-                .userQuestion(request.getUserQuestion())
-                .goal("查询业务数据，并结合企业制度文档进行解释和风险分析")
-                .steps(List.of(
-                        PlanStep.builder()
-                                .stepNo(1)
-                                .stepType(StepType.BUSINESS_TOOL)
-                                .stepName("根据项目名称查询工程类产值")
-                                .capabilityCode("pm.project.outputMain")
-                                .input(Map.of("queryStr", projectName))
-                                .outputKey("outputValue")
-                                .build(),
-                        PlanStep.builder()
-                                .stepNo(2)
-                                .stepType(StepType.BUSINESS_TOOL)
-                                .stepName("根据项目 ID 查询合同列表")
-                                .capabilityCode("pm.contract.listByProjectId")
-                                .inputRef(Map.of("projectId", "$.project.id"))
-                                .outputKey("contracts")
-                                .build(),
-                        PlanStep.builder()
-                                .stepNo(3)
-                                .stepType(StepType.BUSINESS_TOOL)
-                                .stepName("根据项目 ID 查询回款汇总")
-                                .capabilityCode("pm.payment.summaryByProjectId")
-                                .inputRef(Map.of("projectId", "$.project.id"))
-                                .outputKey("paymentSummary")
-                                .build(),
-                        PlanStep.builder()
-                                .stepNo(4)
-                                .stepType(StepType.RAG)
-                                .stepName("检索项目回款风险相关制度")
-                                .ragQuery("项目回款风险 合同回款制度 风险判断规则")
-                                .outputKey("riskDocs")
-                                .build(),
-                        PlanStep.builder()
-                                .stepNo(5)
-                                .stepType(StepType.LLM_SUMMARY)
-                                .stepName("结合业务数据和制度依据生成最终回答")
-                                .inputKeys(List.of("project", "contracts", "paymentSummary", "riskDocs"))
-                                .outputKey("finalAnswer")
-                                .build()
-                ))
-                .build();
-    }
-
-    /**
-     * 构建统计分析计划。
-     *
-     * 示例：
-     * 用户问：“本月合同金额按项目类型统计”
-     */
-    private RoutePlan buildStatisticQueryPlan(String runId, AgentRequest request) {
-        return RoutePlan.builder()
-                .runId(runId)
-                .routeType(RouteType.STATISTIC_QUERY)
-                .userQuestion(request.getUserQuestion())
-                .goal("调用统计类业务能力，生成统计结果和文字解释")
-                .steps(List.of(
-                        PlanStep.builder()
-                                .stepNo(1)
-                                .stepType(StepType.BUSINESS_TOOL)
-                                .stepName("调用合同统计能力")
-                                .capabilityCode("pm.contract.statistic")
-                                .input(Map.of("question", request.getUserQuestion()))
-                                .outputKey("statisticResult")
-                                .build(),
-                        PlanStep.builder()
-                                .stepNo(2)
-                                .stepType(StepType.LLM_SUMMARY)
-                                .stepName("解释统计结果")
-                                .inputKeys(List.of("statisticResult"))
-                                .outputKey("finalAnswer")
-                                .build()
-                ))
-                .build();
-    }
-
-    /**
-     * 构建工作流动作计划。
-     *
-     * 第一版不执行，只生成一个需要人工确认的计划。
+     * 工作流动作第一版只提示，不自动执行。
      */
     private RoutePlan buildWorkflowActionPlan(String runId, AgentRequest request) {
         return RoutePlan.builder()
                 .runId(runId)
                 .routeType(RouteType.WORKFLOW_ACTION)
                 .userQuestion(request.getUserQuestion())
-                .goal("识别到工作流动作，当前版本只生成计划，不自动执行")
+                .goal("识别到工作流动作，当前版本只生成提示，不自动执行")
                 .steps(List.of(
                         PlanStep.builder()
                                 .stepNo(1)
@@ -258,7 +125,7 @@ public class PlanTemplateRegistry {
     }
 
     /**
-     * 构建拒绝执行计划。
+     * 拒绝危险操作。
      */
     private RoutePlan buildRejectPlan(String runId, AgentRequest request, IntentResult intentResult) {
         return RoutePlan.builder()
@@ -282,7 +149,7 @@ public class PlanTemplateRegistry {
     }
 
     /**
-     * 构建追问计划。
+     * 信息不足时追问用户。
      */
     private RoutePlan buildClarifyPlan(String runId, AgentRequest request, IntentResult intentResult) {
         return RoutePlan.builder()
@@ -300,31 +167,5 @@ public class PlanTemplateRegistry {
                                 .build()
                 ))
                 .build();
-    }
-
-    /**
-     * 从用户问题中简单提取项目名称。
-     *
-     * 第一版先做非常轻量的规则：
-     * - 如果包含“项目”，截取“项目”前面的短文本作为项目名候选
-     * - 如果无法识别，就先把原始问题放进去
-     *
-     * 后续可以升级为：
-     * 1. 正则提取
-     * 2. 项目名称词典匹配
-     * 3. 调用 LLM 做实体抽取
-     */
-    private String extractProjectName(String question) {
-        if (!StringUtils.hasText(question)) {
-            return "";
-        }
-
-        int index = question.indexOf("项目");
-        if (index <= 0) {
-            return question;
-        }
-
-        int start = Math.max(0, index - 20);
-        return question.substring(start, index + 2).trim();
     }
 }

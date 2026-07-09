@@ -1,6 +1,10 @@
 package org.example.ai.agent.tool.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.RequiredArgsConstructor;
 import org.example.ai.agent.capability.entity.CapabilityDefinition;
 import org.example.ai.agent.capability.entity.FieldDictionary;
@@ -22,72 +26,69 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 业务能力执行器实现。
+ * 业务能力执行器。
  *
- * 核心流程：
- * 1. 根据 capabilityCode 查询能力定义
- * 2. 校验能力是否启用、是否只读
- * 3. 合并 step.input 和 step.inputRef 参数
- * 4. 调用真实业务接口
- * 5. 查询字段字典并统一包装 ToolResult
+ * 核心职责：
+ * 1. 根据 capabilityCode 查询已启用能力定义。
+ * 2. 合并计划入参和上游变量引用。
+ * 3. 调用真实业务系统接口。
+ * 4. 根据字段字典压缩返回数据，减少大模型噪声。
  */
 @Service
 @RequiredArgsConstructor
 public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecutor {
+
     private final CapabilityDefinitionService capabilityDefinitionService;
     private final FieldDictionaryMapper fieldDictionaryMapper;
     private final BusinessApiProperties businessApiProperties;
     private final RestClient restClient;
+    private final ObjectMapper objectMapper;
+
     @Override
     public ToolResult execute(ToolExecutionContext context, PlanStep step) {
-        // 1. 根据 capabilityCode 查询能力定义
         String capabilityCode = step.getCapabilityCode();
-        try{
-            // 1. 根据能力编码查询已启用能力。
+        try {
             CapabilityDefinition capability = capabilityDefinitionService.getEnabledByCode(capabilityCode);
             if (capability == null) {
-                return fail(step, context,"CAPABILITY_NOT_FOUND", "能力不存在或未启用：" + capabilityCode);
+                return fail(step, context, "CAPABILITY_NOT_FOUND", "能力不存在或未启用：" + capabilityCode);
             }
-            // 2. 第一版只允许 READ，避免 Agent 自动执行写操作。
+
+            // 当前阶段只允许 READ 能力，避免 Agent 自动执行写操作。
             if (!"READ".equalsIgnoreCase(capability.getSideEffect())) {
-                return fail(step, context,"SIDE_EFFECT_NOT_ALLOWED", "当前版本只允许执行 READ 能力：" + capabilityCode);
+                return fail(step, context, "SIDE_EFFECT_NOT_ALLOWED", "当前版本只允许执行 READ 能力：" + capabilityCode);
             }
-            // 3. 解析当前步骤入参，包括直接 input 和 inputRef。
+
             Map<String, Object> requestParams = resolveInput(context, step);
-            // 4. 调用真实业务接口。
             Object raw = invokeBusinessApi(capability, requestParams);
-            // 5. 查询字段语义字典，方便后续 AnswerComposer 使用。
             List<FieldMeta> fields = loadFieldMetas(capabilityCode);
-            // 6. 包装统一返回结构。
+            Object compactData = compactByFieldDictionary(raw, fields);
+
             return ToolResult.builder()
                     .success(true)
                     .capabilityCode(capabilityCode)
                     .outputKey(step.getOutputKey())
-                    .data(raw)
+                    .data(compactData)
                     .fields(fields)
                     .summary("业务能力调用成功：" + capability.getCapabilityName())
                     .raw(raw)
                     .input(requestParams)
                     .build();
-        }catch (Exception e){
-            // 7. 异常必须结构化返回，不能让整个 Agent 链路直接崩掉。
-            return fail(step, context,"BUSINESS_API_ERROR", e.getMessage());
+        } catch (Exception e) {
+            // 异常必须结构化返回，避免整个 Agent 链路直接中断。
+            return fail(step, context, "BUSINESS_API_ERROR", e.getMessage());
         }
-
     }
 
     /**
-     * 合并当前步骤输入参数。
+     * 合并当前步骤的直接入参和上游变量引用。
      */
     private Map<String, Object> resolveInput(ToolExecutionContext context, PlanStep step) {
         Map<String, Object> params = new LinkedHashMap<>();
 
-        // 直接入参，例如 {"projectName": "A项目"}。
         if (!CollectionUtils.isEmpty(step.getInput())) {
             params.putAll(step.getInput());
         }
 
-        // 引用上游结果，例如 {"projectId": "$.project.id"}。
         if (!CollectionUtils.isEmpty(step.getInputRef())) {
             step.getInputRef().forEach((paramName, expression) ->
                     params.put(paramName, resolveVariable(context, expression))
@@ -100,11 +101,12 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
     /**
      * 解析简单变量表达式。
      *
-     * 第一版只支持 $.变量名.字段名 这种格式。
-     * 示例：
-     * $.project.id -> context.variables["project"]["id"]
+     * 当前只支持 $.变量名.字段名，例如 $.project.id。
      */
     private Object resolveVariable(ToolExecutionContext context, String expression) {
+        if (context == null || context.getVariables() == null) {
+            return null;
+        }
         if (!StringUtils.hasText(expression) || !expression.startsWith("$.")) {
             return null;
         }
@@ -119,14 +121,14 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
         }
         return current;
     }
+
     /**
-     * 调用真实业务接口。
+     * 调用真实业务系统接口。
      */
     private Object invokeBusinessApi(CapabilityDefinition capability, Map<String, Object> params) {
         String url = baseUrl(capability.getUrl());
-        String token="2891c445-38f2-40b6-b3cd-a6c99dadba04";
-//        params.put("queryStr", "2674033");
-        // GET 请求使用 query param。
+        String token = "2891c445-38f2-40b6-b3cd-a6c99dadba04";
+
         if ("GET".equalsIgnoreCase(capability.getMethod())) {
             return restClient.get()
                     .uri(uriBuilder -> {
@@ -138,7 +140,7 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
                     .retrieve()
                     .body(Object.class);
         }
-        // POST 请求使用 JSON body。
+
         if ("POST".equalsIgnoreCase(capability.getMethod())) {
             return restClient.post()
                     .uri(url)
@@ -146,15 +148,19 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
                     .retrieve()
                     .body(Object.class);
         }
+
         throw new IllegalArgumentException("不支持的请求方法：" + capability.getMethod());
     }
+
     /**
      * 拼接业务接口地址。
      *
-     * 如果能力表里保存的是 /api/projects 这种相对路径，
-     * 就和 agent.business-api.base-url 拼成完整地址。
+     * 能力表保存绝对地址时直接使用；保存相对路径时，与 agent.business-api.base-url 拼接。
      */
     private String baseUrl(String capabilityUrl) {
+        if (!StringUtils.hasText(capabilityUrl)) {
+            throw new IllegalArgumentException("能力接口地址不能为空");
+        }
         if (capabilityUrl.startsWith("http://") || capabilityUrl.startsWith("https://")) {
             return capabilityUrl;
         }
@@ -169,7 +175,7 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
         if (!baseUrl.endsWith("/") && !capabilityUrl.startsWith("/")) {
             return baseUrl + "/" + capabilityUrl;
         }
-        return capabilityUrl;
+        return baseUrl + capabilityUrl;
     }
 
     /**
@@ -195,7 +201,7 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
     /**
      * 构建失败结果。
      */
-    public ToolResult fail(PlanStep step, Object input,String errorCode, String errorMessage) {
+    public ToolResult fail(PlanStep step, Object input, String errorCode, String errorMessage) {
         return ToolResult.builder()
                 .success(false)
                 .capabilityCode(step.getCapabilityCode())
@@ -205,5 +211,106 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
                 .summary("业务能力调用失败：" + errorMessage)
                 .input(input)
                 .build();
+    }
+
+    /**
+     * 根据字段字典压缩业务数据。
+     *
+     * raw 保留原始接口返回；data 只保留字段字典配置过的字段。
+     */
+    private Object compactByFieldDictionary(Object raw, List<FieldMeta> fields) {
+        if (raw == null || fields == null || fields.isEmpty()) {
+            return raw;
+        }
+        JsonNode root = objectMapper.valueToTree(raw);
+        ObjectNode result = objectMapper.createObjectNode();
+        for (FieldMeta field : fields) {
+            if (!StringUtils.hasText(field.getPath())) {
+                continue;
+            }
+            if (field.getPath().contains("[]")) {
+                compactArrayField(root, result, field);
+                continue;
+            }
+            JsonNode value = readBySimplePath(root, field.getPath());
+            if (value == null || value.isMissingNode() || value.isNull()) {
+                continue;
+            }
+            result.set(displayName(field), value);
+        }
+        return objectMapper.convertValue(result, Object.class);
+    }
+
+    /**
+     * 根据字段路径读取 JSON 值。
+     *
+     * 当前支持 $.data.xxx 和 $.data.records[].xxx 这类常见路径。
+     */
+    private JsonNode readBySimplePath(JsonNode root, String path) {
+        if (root == null || !StringUtils.hasText(path) || !path.startsWith("$.")) {
+            return null;
+        }
+        String[] parts = path.substring(2).split("\\.");
+        JsonNode current = root;
+        for (String part : parts) {
+            if (current == null || current.isMissingNode() || current.isNull()) {
+                return null;
+            }
+            current = current.path(part);
+        }
+        return current;
+    }
+
+    /**
+     * 压缩数组字段，例如 $.data.records[].contractAmount。
+     */
+    private void compactArrayField(JsonNode root, ObjectNode result, FieldMeta field) {
+        String path = field.getPath();
+        int arrayIndex = path.indexOf("[]");
+        String arrayPath = path.substring(0, arrayIndex);
+        String leafPath = path.substring(arrayIndex + 3);
+
+        JsonNode arrayNode = readBySimplePath(root, arrayPath);
+        if (arrayNode == null || !arrayNode.isArray()) {
+            return;
+        }
+        String arrayName = arrayPath.substring(arrayPath.lastIndexOf('.') + 1);
+        ArrayNode targetArray = result.withArray(arrayName);
+        for (int i = 0; i < arrayNode.size(); i++) {
+            JsonNode row = arrayNode.get(i);
+            ObjectNode targetRow;
+
+            if (targetArray.size() > i && targetArray.get(i).isObject()) {
+                targetRow = (ObjectNode) targetArray.get(i);
+            } else {
+                targetRow = objectMapper.createObjectNode();
+                targetArray.add(targetRow);
+            }
+
+            if (!StringUtils.hasText(leafPath)) {
+                continue;
+            }
+            JsonNode value = readBySimplePath(row, "$" + leafPath);
+            if (value == null || value.isMissingNode() || value.isNull()) {
+                continue;
+            }
+            targetRow.set(displayName(field), value);
+        }
+    }
+
+    /**
+     * 获取字段展示名：优先使用字段字典中文名，没有中文名时回退到英文名。
+     */
+    private String displayName(FieldMeta field) {
+        if (field == null) {
+            return "";
+        }
+        if (StringUtils.hasText(field.getCnName())) {
+            return field.getCnName();
+        }
+        if (StringUtils.hasText(field.getName())) {
+            return field.getName();
+        }
+        return field.getPath();
     }
 }

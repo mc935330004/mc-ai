@@ -12,6 +12,7 @@ import org.example.ai.agent.trace.service.RunStepRecorder;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 
 /**
@@ -58,6 +59,9 @@ public class DefaultToolExecutor implements ToolExecutor {
             results.add(result);
             // 执行成功后，把结果写入变量池，供后续 inputRef 使用。
             if (result.isSuccess() && step.getOutputKey() != null) {
+                if (context.getVariables() == null) {
+                    context.setVariables(new LinkedHashMap<>());
+                }
                 context.getVariables().put(step.getOutputKey(), result.getData());
             }
             // 如果某个业务步骤失败，第一版建议直接停止，避免后续步骤拿到空参数乱查。

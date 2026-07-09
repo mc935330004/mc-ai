@@ -10,6 +10,7 @@ import org.example.ai.agent.capability.entity.FieldDictionary;
 import org.example.ai.agent.capability.mapper.CapabilityDefinitionMapper;
 import org.example.ai.agent.capability.service.CapabilityDefinitionService;
 import org.example.ai.agent.capability.service.FieldDictionaryService;
+import org.example.ai.agent.capability.vo.AgentCapabilityVO;
 import org.example.ai.agent.capability.vo.CapabilityDetailVO;
 import org.example.ai.agent.capability.vo.CapabilityTestResultVO;
 import org.example.ai.agent.common.exception.BusinessException;
@@ -28,6 +29,7 @@ import java.time.LocalDateTime;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 /**
  * AI 能力定义 Service 实现。
@@ -109,6 +111,52 @@ public class CapabilityDefinitionServiceImpl extends ServiceImpl<CapabilityDefin
         vo.setCapability(capability);
         vo.setFields(list);
         return vo;
+    }
+
+    @Override
+    public List<AgentCapabilityVO> listEnabledForAgent() {
+        return lambdaQuery()
+                .eq(CapabilityDefinition::getEnabled, 1)
+                .eq(CapabilityDefinition::getSideEffect, "READ")
+                .orderByAsc(CapabilityDefinition::getDomain)
+                .orderByAsc(CapabilityDefinition::getCapabilityCode)
+                .list()
+                .stream()
+                .map(item -> {
+                    AgentCapabilityVO vo = new AgentCapabilityVO();
+                    vo.setCapabilityCode(item.getCapabilityCode());
+                    vo.setCapabilityName(item.getCapabilityName());
+                    vo.setDomain(item.getDomain());
+                    vo.setModuleName(item.getModuleName());
+                    vo.setDescription(item.getDescription());
+                    vo.setInputSchemaJson(item.getInputSchemaJson());
+                    return vo;
+                })
+                .collect(Collectors.toList());
+    }
+
+    @Override
+    public String buildEnabledCapabilitiesPrompt() {
+        List<CapabilityDefinition> capabilities = lambdaQuery()
+                .eq(CapabilityDefinition::getEnabled, 1)
+                .eq(CapabilityDefinition::getSideEffect, "READ")
+                .orderByAsc(CapabilityDefinition::getDomain)
+                .orderByAsc(CapabilityDefinition::getCapabilityCode)
+                .list();
+
+        if (capabilities.isEmpty()) {
+            return "当前没有可用业务能力。";
+        }
+        StringBuilder builder = new StringBuilder();
+        builder.append("【可用业务能力】\n");
+        for (CapabilityDefinition item : capabilities) {
+            builder.append("- 能力编码：").append(item.getCapabilityCode()).append("\n");
+            builder.append("  能力名称：").append(item.getCapabilityName()).append("\n");
+            builder.append("  适用场景：").append(item.getDescription()).append("\n");
+            builder.append("  入参说明：").append(item.getInputSchemaJson()).append("\n");
+        }
+        // ponytail: 先生成纯文本，够 Agent 提示词使用；暂不做复杂 JSON Tool Schema。
+        return builder.toString();
     }
 
     /**

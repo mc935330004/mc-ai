@@ -5,8 +5,11 @@ import com.baomidou.mybatisplus.extension.service.IService;
 import org.example.ai.agent.capability.dto.CapabilitySaveDTO;
 import org.example.ai.agent.capability.dto.CapabilityTestRequestDTO;
 import org.example.ai.agent.capability.entity.CapabilityDefinition;
+import org.example.ai.agent.capability.vo.AgentCapabilityVO;
 import org.example.ai.agent.capability.vo.CapabilityDetailVO;
 import org.example.ai.agent.capability.vo.CapabilityTestResultVO;
+
+import java.util.List;
 
 /**
  * AI 能力定义 Service。
@@ -40,5 +43,18 @@ public interface CapabilityDefinitionService extends IService<CapabilityDefiniti
      * 查询能力详情，包含字段字典。
      */
     CapabilityDetailVO detailWithFields(Long id);
+
+
+    /**
+     * 查询 Agent 可用能力清单。
+     */
+    List<AgentCapabilityVO> listEnabledForAgent();
+
+    /**
+     * 构建 Agent 可读的能力说明文本。
+     *
+     * 用于后续放进大模型提示词，让模型知道有哪些业务能力可选。
+     */
+    String buildEnabledCapabilitiesPrompt();
 
 }

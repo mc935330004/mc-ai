@@ -66,7 +66,7 @@ public class RunStep {
      * 步骤状态。
      *
      * 示例：
-     * SUCCESS、FAILED、SKIPPED。
+     * SUCCESS 成功、FAILED 失败、SKIPPED 跳过。
      */
     private String status;
 

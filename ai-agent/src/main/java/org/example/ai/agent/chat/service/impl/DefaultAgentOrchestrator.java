@@ -2,6 +2,7 @@ package org.example.ai.agent.chat.service.impl;
 
 import lombok.RequiredArgsConstructor;
 import org.example.ai.agent.answer.AnswerComposer;
+import org.example.ai.agent.capability.service.CapabilityDefinitionService;
 import org.example.ai.agent.chat.entity.AgentRequest;
 import org.example.ai.agent.chat.entity.AgentStreamEvent;
 import org.example.ai.agent.chat.service.AgentOrchestrator;
@@ -22,6 +23,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -66,6 +68,13 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
      */
     private final AnswerComposer answerComposer;
 
+    /**
+     * AI 能力定义服务。
+     *
+     * 用于在聊天运行时读取当前可用业务能力。
+     */
+    private final CapabilityDefinitionService capabilityDefinitionService;
+
     @Override
     public SseEmitter chat(AgentRequest request) {
         SseEmitter emitter = new SseEmitter(0L);
@@ -85,6 +94,8 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
         try {
             // 1. 校验请求参数。
             validateRequest(request);
+            // 加载当前启用的业务能力清单，后续用于路由和规划。
+            String capabilitiesPrompt = capabilityDefinitionService.buildEnabledCapabilitiesPrompt();
             // 2. 创建运行主记录。
             runTraceService.startRun(runId, request);
             // 2. 推送开始处理事件。
@@ -92,7 +103,7 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                     runId,
                     "THINKING",
                     "已创建 Agent 运行任务，正在判断用户问题类型。",
-                    null
+                    capabilitiesPrompt
             ));
             /*
              * 在调用 RAG 之前，先进行意图路由。
@@ -228,6 +239,7 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                 .runId(runId)
                 .userId(request.getUserId())
                 .userContext(request.getPageContext())
+                .variables(new LinkedHashMap<>())
                 .build();
 
         // 3. 执行完整计划。
