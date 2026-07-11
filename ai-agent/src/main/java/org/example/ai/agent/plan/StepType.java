@@ -48,5 +48,11 @@ public enum StepType {
      *
      * 当命中危险操作或超出系统范围时使用。
      */
-    REJECT
+    REJECT,
+    /**
+     * 写操作预览。
+     *
+     * 该步骤只展示操作内容，不调用业务系统。
+     */
+    ACTION_PREVIEW,
 }

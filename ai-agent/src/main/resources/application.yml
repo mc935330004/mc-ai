@@ -58,7 +58,7 @@ spring:
         max-document-batch-size: 10000
   flyway:
     # Flyway 管理 MySQL 业务表结构迁移
-    enabled: true
+    enabled: false
     locations: classpath:db/migration
     baseline-on-migrate: true
   servlet:
@@ -73,8 +73,8 @@ document:
     # Docling 文件解析接口路径，环境不同优先只覆盖 url
     path: /api/parse/sync
     # Docling 服务地址，生产环境建议通过 DOCLING_URL 注入
-#    url: http://localhost:8001
-    url: http://192.168.12.84:8001
+    url: http://localhost:8001
+#    url: http://192.168.12.84:8001
     # 连接 Docling 的超时时间，单位毫秒
     connect-timeout-ms: 10000
     # 等待 Docling 解析结果的超时时间，单位毫秒

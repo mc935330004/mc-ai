@@ -2,6 +2,7 @@ package org.example.ai.agent.router;
 
 import lombok.Builder;
 import lombok.Data;
+import org.example.ai.agent.plan.DynamicCapabilityPlan;
 
 import java.util.List;
 import java.util.Map;
@@ -59,4 +60,12 @@ public class IntentResult {
      * 第一版可以先为空，后续可以放 projectName、contractNo、timeRange 等。
      */
     private Map<String, Object> entities;
+
+    /**
+     * 大模型已经选择好的动态业务能力。
+     *
+     * 路由阶段选择一次，计划生成阶段直接复用，
+     * 避免同一次请求重复选择能力导致结果不一致。
+     */
+    private DynamicCapabilityPlan dynamicCapabilityPlan;
 }

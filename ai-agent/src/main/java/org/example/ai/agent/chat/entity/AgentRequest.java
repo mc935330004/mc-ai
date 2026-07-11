@@ -1,5 +1,6 @@
 package org.example.ai.agent.chat.entity;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import jakarta.validation.constraints.NotBlank;
 import lombok.Data;
 
@@ -54,4 +55,10 @@ public class AgentRequest {
      * 额外信息
      */
     private Map<String, Object> extra;
+
+    /**
+     * 当前请求认证信息，只用于服务内部调用业务系统
+     */
+    @JsonIgnore
+    private String authorization;
 }

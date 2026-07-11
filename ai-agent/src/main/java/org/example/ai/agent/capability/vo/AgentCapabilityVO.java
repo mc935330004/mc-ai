@@ -40,4 +40,14 @@ public class AgentCapabilityVO {
      * 入参说明 JSON。
      */
     private String inputSchemaJson;
+
+    /**
+     * 能力副作用级别：READ只读、WRITE 写、DANGEROUS 危险。
+     */
+    private String sideEffect;
+
+    /**
+     * 执行前是否需要用户确认。
+     */
+    private Boolean requireConfirm;
 }

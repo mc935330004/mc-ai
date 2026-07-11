@@ -88,6 +88,6 @@ public class CapabilitySaveDTO {
     /**
      * 是否需要用户确认。
      */
-    private Integer requireConfirm;
+    private Boolean requireConfirm;
 
 }

@@ -1,11 +1,15 @@
 package org.example.ai.agent.capability.controller;
 
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import org.example.ai.agent.capability.dto.CapabilitySaveDTO;
 import org.example.ai.agent.capability.dto.CapabilityTestRequestDTO;
+import org.example.ai.agent.capability.dto.FieldDictionaryGenerateDTO;
 import org.example.ai.agent.capability.entity.CapabilityDefinition;
 import org.example.ai.agent.capability.service.CapabilityDefinitionService;
+import org.example.ai.agent.capability.service.FieldDictionaryService;
 import org.example.ai.agent.capability.vo.AgentCapabilityVO;
 import org.example.ai.agent.capability.vo.CapabilityDetailVO;
 import org.example.ai.agent.capability.vo.CapabilityTestResultVO;
@@ -38,7 +42,8 @@ public class CapabilityDefinitionController {
 
     private final CapabilityDefinitionService capabilityDefinitionService;
     private final BusinessCapabilityExecutor businessCapabilityExecutor;
-
+    private final FieldDictionaryService fieldDictionaryService;
+    private final ObjectMapper objectMapper;
     /**
      * 分页查询能力列表。
      */
@@ -89,7 +94,7 @@ public class CapabilityDefinitionController {
      */
     @PostMapping("/{capabilityCode}/test")
     public Result<CapabilityTestResultVO> test(@PathVariable String capabilityCode,
-                                               @RequestBody(required = false) CapabilityTestRequestDTO request) {
+                                               @RequestBody(required = false) CapabilityTestRequestDTO request) throws JsonProcessingException {
         if (!StringUtils.hasText(capabilityCode)) {
             throw new BusinessException(400, "能力编码不能为空");
         }
@@ -106,6 +111,10 @@ public class CapabilityDefinitionController {
                 .build();
 
         ToolResult result = businessCapabilityExecutor.execute(context, step);
+        fieldDictionaryService.generateFromJson(FieldDictionaryGenerateDTO.builder()
+                .capabilityCode(result.getCapabilityCode())
+                .json(objectMapper.writeValueAsString(result.getData()))
+                .build());
         return Result.success(CapabilityTestResultVO.builder()
                 .success(result.isSuccess())
                 .capabilityCode(result.getCapabilityCode())

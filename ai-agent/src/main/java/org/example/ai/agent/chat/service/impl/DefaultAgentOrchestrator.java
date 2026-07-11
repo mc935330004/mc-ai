@@ -1,5 +1,7 @@
 package org.example.ai.agent.chat.service.impl;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import org.example.ai.agent.answer.AnswerComposer;
 import org.example.ai.agent.capability.service.CapabilityDefinitionService;
@@ -10,6 +12,9 @@ import org.example.ai.agent.chat.service.AgentOrchestrator;
 import org.example.ai.agent.modules.knowledgebase.dto.KnowledgeDocumentQueryRequest;
 import org.example.ai.agent.modules.knowledgebase.dto.KnowledgeDocumentQueryResponse;
 import org.example.ai.agent.modules.knowledgebase.service.impl.KnowledgeDocumentQueryService;
+import org.example.ai.agent.pending.entity.PendingAction;
+import org.example.ai.agent.pending.service.PendingActionService;
+import org.example.ai.agent.plan.DynamicCapabilityPlan;
 import org.example.ai.agent.plan.PlanTemplateRegistry;
 import org.example.ai.agent.plan.RoutePlan;
 import org.example.ai.agent.router.IntentResult;
@@ -19,12 +24,14 @@ import org.example.ai.agent.tool.ToolExecutionContext;
 import org.example.ai.agent.tool.ToolExecutor;
 import org.example.ai.agent.tool.ToolResult;
 import org.example.ai.agent.trace.service.RunTraceService;
+import org.example.ai.agent.vo.ActionPreviewVO;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 
@@ -33,7 +40,6 @@ import java.util.concurrent.CompletableFuture;
 public class DefaultAgentOrchestrator implements AgentOrchestrator {
 
     private final KnowledgeDocumentQueryService knowledgeDocumentQueryService;
-
     /**
      * 意图路由器。
      *
@@ -46,35 +52,35 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
      * 根据 IntentRouter 的路由结果生成 RoutePlan。
      */
     private final PlanTemplateRegistry planTemplateRegistry;
-
     /**
      * 工具执行器。
      *
      * 用于真正执行 BUSINESS_TOOL 步骤。
      */
     private final ToolExecutor toolExecutor;
-
     /**
      * Agent 运行主记录服务。
      *
      * 用于写 ai_run_trace。
      */
     private final RunTraceService runTraceService;
-
     /**
      * 答案组装器。
      *
      * 用于把 ToolExecutor 返回的业务数据转换成自然语言回答。
      */
     private final AnswerComposer answerComposer;
-
     /**
      * AI 能力定义服务。
      *
      * 用于在聊天运行时读取当前可用业务能力。
      */
     private final CapabilityDefinitionService capabilityDefinitionService;
-
+    /**
+     * 保存待用户确认的写操作。
+     */
+    private final PendingActionService pendingActionService;
+    private final ObjectMapper objectMapper;
     @Override
     public SseEmitter chat(AgentRequest request) {
         SseEmitter emitter = new SseEmitter(0L);
@@ -185,7 +191,15 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                 sendDoneEvent(emitter, runId);
                 return;
             }
-
+            // 写操作只发送预览，当前阶段绝不进入 ToolExecutor
+            if (intentResult.getRouteType() == RouteType.WORKFLOW_ACTION) {
+                PendingAction pendingAction =pendingActionService.createPendingAction( runId,request.getUserId(),
+                        intentResult.getDynamicCapabilityPlan());
+                sendActionPreview(emitter,runId,intentResult.getDynamicCapabilityPlan(),pendingAction);
+                runTraceService.markSuccess(runId,System.currentTimeMillis() - startTime);
+                sendDoneEvent(emitter, runId);
+                return;
+            }
             /*
              * RAG_ONLY 走企业知识库问答。
              * 其它业务查询类型交给 ToolExecutor 执行真实业务能力。
@@ -195,7 +209,16 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                 runTraceService.markSuccess(runId, System.currentTimeMillis() - startTime);
                 return;
             }
-
+            // 防御性校验：即使前面的路由发生错误，WRITE 能力也不能直接进入工具执行器
+            DynamicCapabilityPlan selectedPlan = intentResult.getDynamicCapabilityPlan();
+            if (selectedPlan != null && "WRITE".equalsIgnoreCase(selectedPlan.getSideEffect())) {
+                PendingAction pendingAction =pendingActionService.createPendingAction( runId,request.getUserId(),
+                        selectedPlan);
+                sendActionPreview(emitter, runId, selectedPlan, pendingAction);
+                runTraceService.markSuccess(runId,System.currentTimeMillis() - startTime);
+                sendDoneEvent(emitter, runId);
+                return;
+            }
             // BUSINESS_QUERY / MIXED_QUERY / STATISTIC_QUERY 走工具执行链路。
             executeToolPlan(request, emitter, runId, routePlan);
             runTraceService.markSuccess(runId, System.currentTimeMillis() - startTime);
@@ -239,6 +262,7 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                 .runId(runId)
                 .userId(request.getUserId())
                 .userContext(request.getPageContext())
+                .authorization(request.getAuthorization())
                 .variables(new LinkedHashMap<>())
                 .build();
 
@@ -324,8 +348,6 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                 + "。能力编码："
                 + failedResult.getCapabilityCode();
     }
-
-
 
     /**
      * 验证请求参数
@@ -417,5 +439,54 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
 
         // 5. 结束 SSE。
         sendDoneEvent(emitter, runId);
+    }
+    /**
+     * 向聊天端发送写操作预览。
+     */
+    private void sendActionPreview(SseEmitter emitter,
+            String runId,DynamicCapabilityPlan plan, PendingAction pendingAction) throws Exception {
+        // 操作参数必须读取数据库中的待确认记录，
+        // 避免前端依赖或修改 Agent 内部的规划对象。
+        Map<String, Object> input = objectMapper.readValue(
+                pendingAction.getInputJson(),
+                new TypeReference<>() {
+                }
+        );
+        ActionPreviewVO preview = ActionPreviewVO.builder()
+                .runId(runId)
+                .capabilityCode(pendingAction.getCapabilityCode())
+                .capabilityName(pendingAction.getCapabilityName())
+                .actionSummary(pendingAction.getActionSummary())
+                .input(input)
+                .status(pendingAction.getStatus())
+                .expireAt(pendingAction.getExpireAt())
+                .requireConfirm(true)
+                .build();
+        StringBuilder markdown = new StringBuilder();
+        markdown.append("## 操作确认\n\n")
+                .append("即将执行：**")
+                .append(escapeMarkdown(pendingAction.getCapabilityName()))
+                .append("**\n\n");
+        if (StringUtils.hasText(pendingAction.getActionSummary())) {
+            markdown.append(pendingAction.getActionSummary())
+                    .append("\n\n");
+        }
+        markdown.append("请确认以上操作是否继续执行。");
+        // data 只返回稳定的预览 VO，不再暴露 DynamicCapabilityPlan。
+        sendEvent(emitter,"action_preview",
+                AgentStreamEvent.of(runId, "ACTION_PREVIEW", markdown.toString(), preview));
+    }
+
+    /**
+     * 转义 Markdown 表格中的特殊字符。
+     */
+    private String escapeMarkdown(Object value) {
+        if (value == null) {
+            return "";
+        }
+        return String.valueOf(value)
+                .replace("|", "\\|")
+                .replace("\r", " ")
+                .replace("\n", " ");
     }
 }

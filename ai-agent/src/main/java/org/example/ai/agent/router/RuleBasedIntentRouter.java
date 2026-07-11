@@ -1,6 +1,10 @@
 package org.example.ai.agent.router;
 
+import cn.hutool.core.collection.CollectionUtil;
+import lombok.RequiredArgsConstructor;
 import org.example.ai.agent.chat.entity.AgentRequest;
+import org.example.ai.agent.plan.DynamicCapabilityPlan;
+import org.example.ai.agent.plan.DynamicCapabilityPlanner;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
@@ -22,8 +26,13 @@ import java.util.Map;
  * 5. 最后兜底追问用户
  */
 @Component
+@RequiredArgsConstructor
 public class RuleBasedIntentRouter implements IntentRouter {
 
+    /**
+     * 根据数据库中的已启用能力匹配用户问题。
+     */
+    private final DynamicCapabilityPlanner dynamicCapabilityPlanner;
     /**
      * 业务数据类关键词。
      *
@@ -96,7 +105,7 @@ public class RuleBasedIntentRouter implements IntentRouter {
 
         // 1. 优先判断危险操作，避免 Agent 自动执行不可逆动作。
         List<String> dangerousHits = matchKeywords(question, DANGEROUS_KEYWORDS);
-        if (!dangerousHits.isEmpty()) {
+        if (CollectionUtil.isNotEmpty(dangerousHits)) {
             return IntentResult.builder()
                     .routeType(RouteType.REJECT)
                     .confidence(1.0)
@@ -108,30 +117,21 @@ public class RuleBasedIntentRouter implements IntentRouter {
         }
 
         // 2. 判断是否为写操作或工作流动作。
-        // 第一版只识别，不执行，后续需要 HumanConfirmStep。
         List<String> actionHits = matchKeywords(question, ACTION_KEYWORDS);
         if (!actionHits.isEmpty()) {
-            return IntentResult.builder()
-                    .routeType(RouteType.WORKFLOW_ACTION)
-                    .confidence(0.85)
-                    .reason("用户表达了发起、提交、修改等动作意图，后续需要人工确认")
-                    .matchedKeywords(actionHits)
-                    .needClarify(false)
-                    .entities(Map.of())
-                    .build();
+            return routeAction(question, actionHits);
         }
 
         // 3. 判断统计分析类问题。
         List<String> statisticHits = matchKeywords(question, STATISTIC_KEYWORDS);
         if (!statisticHits.isEmpty()) {
-            return IntentResult.builder()
-                    .routeType(RouteType.STATISTIC_QUERY)
-                    .confidence(0.8)
-                    .reason("用户问题包含统计、汇总、排名、趋势等分析类关键词")
-                    .matchedKeywords(statisticHits)
-                    .needClarify(false)
-                    .entities(Map.of())
-                    .build();
+            return routeBusiness(
+                    question,
+                    RouteType.STATISTIC_QUERY,
+                    statisticHits,
+                    "用户问题包含统计、汇总、排名或趋势意图",
+                    0.8
+            );
         }
 
         // 4. 分别匹配业务关键词、知识库关键词、分析关键词。
@@ -141,26 +141,24 @@ public class RuleBasedIntentRouter implements IntentRouter {
 
         // 5. 同时命中业务数据和文档/分析关键词，判断为混合问答。
         if (!businessHits.isEmpty() && (!ragHits.isEmpty() || !analysisHits.isEmpty())) {
-            return IntentResult.builder()
-                    .routeType(RouteType.MIXED_QUERY)
-                    .confidence(0.85)
-                    .reason("问题同时包含业务数据查询和制度/风险分析意图")
-                    .matchedKeywords(mergeKeywords(businessHits, ragHits, analysisHits))
-                    .needClarify(false)
-                    .entities(Map.of())
-                    .build();
+            return routeBusiness(
+                    question,
+                    RouteType.MIXED_QUERY,
+                    mergeKeywords(businessHits, ragHits, analysisHits),
+                    "用户问题同时包含业务数据和分析意图",
+                    0.85
+            );
         }
 
         // 6. 只命中业务关键词，判断为业务数据查询。
         if (!businessHits.isEmpty()) {
-            return IntentResult.builder()
-                    .routeType(RouteType.BUSINESS_QUERY)
-                    .confidence(0.75)
-                    .reason("问题主要是项目、合同、金额、回款等业务数据查询")
-                    .matchedKeywords(businessHits)
-                    .needClarify(false)
-                    .entities(Map.of())
-                    .build();
+            return routeBusiness(
+                    question,
+                    RouteType.BUSINESS_QUERY,
+                    businessHits,
+                    "用户问题属于业务数据查询",
+                    0.75
+            );
         }
 
         // 7. 只命中文档或分析关键词，先走 RAG。
@@ -176,8 +174,15 @@ public class RuleBasedIntentRouter implements IntentRouter {
                     .build();
         }
 
-        // 8. 兜底策略：不确定时不要乱调接口，先追问用户。
-        return clarify("我需要确认一下，你是想查业务数据，还是想查企业文档知识？");
+        // 固定关键词没有命中时，再从数据库能力目录中动态匹配。
+        // 这样新增里程碑、风险、成本等能力后不需要修改 Java 关键词。
+        return routeBusiness(
+                question,
+                RouteType.BUSINESS_QUERY,
+                List.of(),
+                "未命中固定关键词，尝试从已启用能力目录动态匹配",
+                0.65
+        );
     }
 
     /**
@@ -230,6 +235,90 @@ public class RuleBasedIntentRouter implements IntentRouter {
                 .clarifyQuestion(question)
                 .matchedKeywords(List.of())
                 .entities(Map.of())
+                .build();
+    }
+
+    /**
+     * 根据已启用能力目录判断问题是否属于业务查询。
+     */
+    private IntentResult routeBusiness(String question, RouteType routeType,List<String> matchedKeywords,String routeReason,
+            double confidence) {
+        DynamicCapabilityPlan dynamicPlan = dynamicCapabilityPlanner.plan(question);
+        // 没有匹配能力时不能调用业务接口，转为追问用户
+        if (!dynamicPlan.isMatched()) {
+            String clarifyQuestion = StringUtils.hasText(dynamicPlan.getClarifyQuestion()) ? dynamicPlan.getClarifyQuestion()
+                            : "当前没有找到匹配的业务能力，请补充具体业务对象和操作目标。";
+            return clarify(clarifyQuestion);
+        }
+        String sideEffect = dynamicPlan.getSideEffect();
+        // 危险能力始终拒绝，不能进入工具执行器
+        if ("DANGEROUS".equalsIgnoreCase(sideEffect)) {
+            return IntentResult.builder()
+                    .routeType(RouteType.REJECT)
+                    .confidence(1.0)
+                    .reason("匹配到危险业务能力，禁止自动执行")
+                    .matchedKeywords(matchedKeywords)
+                    .needClarify(false)
+                    .entities(Map.of())
+                    .dynamicCapabilityPlan(dynamicPlan)
+                    .build();
+        }
+        // 只要数据库配置为 WRITE，就必须进入操作预览
+        // 不能因为用户没有命中动作关键词而当成普通查询执行
+        if ("WRITE".equalsIgnoreCase(sideEffect)) {
+            return IntentResult.builder()
+                    .routeType(RouteType.WORKFLOW_ACTION)
+                    .confidence(0.9)
+                    .reason("匹配到 WRITE 能力，必须先展示操作预览")
+                    .matchedKeywords(matchedKeywords)
+                    .needClarify(false)
+                    .entities(Map.of())
+                    .dynamicCapabilityPlan(dynamicPlan)
+                    .build();
+        }
+        // READ 能力才允许进入正常工具执行链路
+        return IntentResult.builder()
+                .routeType(routeType)
+                .confidence(confidence)
+                .reason(routeReason + "；" + dynamicPlan.getReason())
+                .matchedKeywords(matchedKeywords)
+                .needClarify(false)
+                .entities(Map.of())
+                .dynamicCapabilityPlan(dynamicPlan)
+                .build();
+    }
+    /**
+     * 根据能力目录匹配写操作能力。
+     */
+    private IntentResult routeAction(String question, List<String> actionHits) {
+        DynamicCapabilityPlan dynamicPlan = dynamicCapabilityPlanner.plan(question);
+        if (!dynamicPlan.isMatched()) {
+            return clarify(dynamicPlan.getClarifyQuestion());
+        }
+        // 危险能力无论是否需要确认，都不允许进入执行流程
+        if ("DANGEROUS".equalsIgnoreCase(dynamicPlan.getSideEffect())) {
+            return IntentResult.builder()
+                    .routeType(RouteType.REJECT)
+                    .confidence(1.0)
+                    .reason("匹配到危险业务能力，禁止自动执行")
+                    .matchedKeywords(actionHits)
+                    .needClarify(false)
+                    .entities(Map.of())
+                    .dynamicCapabilityPlan(dynamicPlan)
+                    .build();
+        }
+        // 动作意图必须匹配 WRITE 能力，不能拿 READ 能力冒充写操作
+        if (!"WRITE".equalsIgnoreCase(dynamicPlan.getSideEffect())) {
+            return clarify("没有找到与当前操作匹配的写入能力，请补充具体操作目标。");
+        }
+        return IntentResult.builder()
+                .routeType(RouteType.WORKFLOW_ACTION)
+                .confidence(0.9)
+                .reason("已匹配写操作能力，等待用户确认")
+                .matchedKeywords(actionHits)
+                .needClarify(false)
+                .entities(Map.of())
+                .dynamicCapabilityPlan(dynamicPlan)
                 .build();
     }
 }

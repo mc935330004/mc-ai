@@ -43,4 +43,9 @@ public class ToolExecutionContext {
      * 可以放页面上下文、当前项目 ID、当前组织等信息。
      */
     private Map<String, Object> userContext;
+
+    /**
+     * 调用业务系统使用的认证信息，不允许写入日志和数据库
+     */
+    private String authorization;
 }

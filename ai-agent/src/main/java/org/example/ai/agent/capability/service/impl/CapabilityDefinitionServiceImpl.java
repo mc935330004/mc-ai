@@ -59,16 +59,24 @@ public class CapabilityDefinitionServiceImpl extends ServiceImpl<CapabilityDefin
     @Override
     public Boolean saveCapability(CapabilitySaveDTO dto) {
 //        checkRequired(dto);
-        // 第一阶段只开放 READ，避免 Agent 自动执行写操作。
-        if (StringUtils.hasText(dto.getSideEffect()) && !"READ".equalsIgnoreCase(dto.getSideEffect())) {
-            throw new BusinessException(400, "第一阶段只允许配置 READ 查询类能力");
+        // 标准化副作用级别，未填写时默认为只读能力
+        String sideEffect = StringUtils.hasText(dto.getSideEffect())
+                ? dto.getSideEffect().trim().toUpperCase()
+                : "READ";
+        if (!List.of("READ", "WRITE", "DANGEROUS").contains(sideEffect)) {
+            throw new BusinessException(400, "sideEffect 只允许配置 READ、WRITE 或 DANGEROUS");
         }
-        boolean exists = lambdaQuery()
-                .eq(CapabilityDefinition::getCapabilityCode, dto.getCapabilityCode())
-                .ne(dto.getId() != null, CapabilityDefinition::getId, dto.getId())
-                .count() > 0;
-        if (exists) {
-            throw new BusinessException(400, "能力编码已存在：" + dto.getCapabilityCode());
+        dto.setSideEffect(sideEffect);
+        if ("READ".equals(sideEffect)) {
+            dto.setRequireConfirm(Boolean.FALSE);
+        }
+        // 写操作默认必须经过用户确认
+        if ("WRITE".equals(sideEffect)) {
+            dto.setRequireConfirm(Boolean.TRUE);
+        }
+        // 危险能力即使配置成功，后续执行器也必须拒绝执行
+        if ("DANGEROUS".equals(sideEffect)) {
+            dto.setRequireConfirm(Boolean.TRUE);
         }
         dto.setOutputSchemaJson(cleanToSingleLine(dto.getOutputSchemaJson()));
         dto.setInputSchemaJson(cleanToSingleLine(dto.getInputSchemaJson()));
@@ -78,9 +86,6 @@ public class CapabilityDefinitionServiceImpl extends ServiceImpl<CapabilityDefin
         // 默认启用，默认只读。
         if (entity.getEnabled() == null) {
             entity.setEnabled(1);
-        }
-        if (!StringUtils.hasText(entity.getSideEffect())) {
-            entity.setSideEffect("READ");
         }
         return saveOrUpdate(entity);
     }
@@ -117,7 +122,6 @@ public class CapabilityDefinitionServiceImpl extends ServiceImpl<CapabilityDefin
     public List<AgentCapabilityVO> listEnabledForAgent() {
         return lambdaQuery()
                 .eq(CapabilityDefinition::getEnabled, 1)
-                .eq(CapabilityDefinition::getSideEffect, "READ")
                 .orderByAsc(CapabilityDefinition::getDomain)
                 .orderByAsc(CapabilityDefinition::getCapabilityCode)
                 .list()
@@ -130,6 +134,8 @@ public class CapabilityDefinitionServiceImpl extends ServiceImpl<CapabilityDefin
                     vo.setModuleName(item.getModuleName());
                     vo.setDescription(item.getDescription());
                     vo.setInputSchemaJson(item.getInputSchemaJson());
+                    vo.setSideEffect(item.getSideEffect());
+                    vo.setRequireConfirm(item.getRequireConfirm());
                     return vo;
                 })
                 .collect(Collectors.toList());
@@ -139,7 +145,6 @@ public class CapabilityDefinitionServiceImpl extends ServiceImpl<CapabilityDefin
     public String buildEnabledCapabilitiesPrompt() {
         List<CapabilityDefinition> capabilities = lambdaQuery()
                 .eq(CapabilityDefinition::getEnabled, 1)
-                .eq(CapabilityDefinition::getSideEffect, "READ")
                 .orderByAsc(CapabilityDefinition::getDomain)
                 .orderByAsc(CapabilityDefinition::getCapabilityCode)
                 .list();
@@ -154,6 +159,12 @@ public class CapabilityDefinitionServiceImpl extends ServiceImpl<CapabilityDefin
             builder.append("  能力名称：").append(item.getCapabilityName()).append("\n");
             builder.append("  适用场景：").append(item.getDescription()).append("\n");
             builder.append("  入参说明：").append(item.getInputSchemaJson()).append("\n");
+            builder.append("  操作类型：")
+                    .append(item.getSideEffect())
+                    .append("\n");
+            builder.append("  是否需要确认：")
+                    .append(Boolean.TRUE.equals(item.getRequireConfirm()))
+                    .append("\n");
         }
         // ponytail: 先生成纯文本，够 Agent 提示词使用；暂不做复杂 JSON Tool Schema。
         return builder.toString();

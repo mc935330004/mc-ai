@@ -46,20 +46,43 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
 
     @Override
     public ToolResult execute(ToolExecutionContext context, PlanStep step) {
+        // 普通工具执行入口只能调用 READ 能力
+        return executeInternal(context, step, false, null);
+
+    }
+
+    @Override
+    public ToolResult executeConfirmedWrite(ToolExecutionContext context, PlanStep step, String idempotencyKey) {
+        if (!StringUtils.hasText(idempotencyKey)) {
+            return fail( step,context,"IDEMPOTENCY_KEY_REQUIRED", "写操作缺少幂等键");
+        }
+        return executeInternal(context, step, true, idempotencyKey);
+    }
+    /**
+     * 统一能力执行入口。
+     */
+    private ToolResult executeInternal(ToolExecutionContext context, PlanStep step, boolean confirmedWrite, String idempotencyKey) {
         String capabilityCode = step.getCapabilityCode();
         try {
             CapabilityDefinition capability = capabilityDefinitionService.getEnabledByCode(capabilityCode);
             if (capability == null) {
                 return fail(step, context, "CAPABILITY_NOT_FOUND", "能力不存在或未启用：" + capabilityCode);
             }
-
-            // 当前阶段只允许 READ 能力，避免 Agent 自动执行写操作。
-            if (!"READ".equalsIgnoreCase(capability.getSideEffect())) {
-                return fail(step, context, "SIDE_EFFECT_NOT_ALLOWED", "当前版本只允许执行 READ 能力：" + capabilityCode);
+            String sideEffect = capability.getSideEffect();
+            // 危险能力当前始终禁止自动执行
+            if ("DANGEROUS".equalsIgnoreCase(sideEffect)) {
+                return fail(step,context,"DANGEROUS_CAPABILITY_NOT_ALLOWED","危险能力禁止执行：" + capabilityCode);
             }
-
+            // WRITE 能力必须经过待确认操作入口
+            if ("WRITE".equalsIgnoreCase(sideEffect) && !confirmedWrite) {
+                return fail(step,context,"WRITE_CONFIRM_REQUIRED","写操作必须经过用户确认：" + capabilityCode);
+            }
+            // 防止错误配置绕过安全检查
+            if (!"READ".equalsIgnoreCase(sideEffect) && !"WRITE".equalsIgnoreCase(sideEffect)) {
+                return fail(step, context,"INVALID_SIDE_EFFECT", "不支持的能力副作用类型：" + sideEffect);
+            }
             Map<String, Object> requestParams = resolveInput(context, step);
-            Object raw = invokeBusinessApi(capability, requestParams);
+            Object raw = invokeBusinessApi(capability, requestParams, idempotencyKey,context.getAuthorization());
             List<FieldMeta> fields = loadFieldMetas(capabilityCode);
             Object compactData = compactByFieldDictionary(raw, fields);
 
@@ -78,7 +101,6 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
             return fail(step, context, "BUSINESS_API_ERROR", e.getMessage());
         }
     }
-
     /**
      * 合并当前步骤的直接入参和上游变量引用。
      */
@@ -125,30 +147,51 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
     /**
      * 调用真实业务系统接口。
      */
-    private Object invokeBusinessApi(CapabilityDefinition capability, Map<String, Object> params) {
+    private Object invokeBusinessApi(CapabilityDefinition capability, Map<String, Object> params,
+                                     String idempotencyKey,String authorization) {
+        if (!StringUtils.hasText(authorization)) {
+            throw new IllegalArgumentException("调用业务系统缺少 Authorization");
+        }
         String url = baseUrl(capability.getUrl());
-        String token = "2891c445-38f2-40b6-b3cd-a6c99dadba04";
-
-        if ("GET".equalsIgnoreCase(capability.getMethod())) {
+        String method = capability.getMethod();
+        if (!StringUtils.hasText(method)) {
+            throw new IllegalArgumentException("能力未配置请求方法：" + capability.getCapabilityCode());
+        }
+        if ("GET".equalsIgnoreCase(method)) {
             return restClient.get()
                     .uri(uriBuilder -> {
                         uriBuilder.path(url);
-                        params.forEach(uriBuilder::queryParam);
+                        // 没有查询参数时不会进行任何处理
+                        if (!CollectionUtils.isEmpty(params)) {
+                            params.forEach((name, value) -> {
+                                // 空值不拼接到 URL，避免出现 name=null
+                                if (value != null) {
+                                    uriBuilder.queryParam(name, value);
+                                }
+                            });
+                        }
                         return uriBuilder.build();
                     })
-                    .header("Authorization", "Bearer " + token)
+                    .header("Authorization", authorization)
+                    .header("Idempotency-Key", idempotencyKey)
                     .retrieve()
                     .body(Object.class);
         }
 
-        if ("POST".equalsIgnoreCase(capability.getMethod())) {
-            return restClient.post()
+        if ("POST".equalsIgnoreCase(method)) {
+            RestClient.RequestBodySpec request = restClient.post()
                     .uri(url)
-                    .body(params)
+                    // 所有业务接口调用都必须携带当前用户认证信息
+                    .header("Authorization", authorization);
+            // 只有确认后的写操作才会携带幂等键
+            if (StringUtils.hasText(idempotencyKey)) {
+                request.header("Idempotency-Key", idempotencyKey);
+            }
+            return request
+                    .body(params == null ? Map.of() : params)
                     .retrieve()
                     .body(Object.class);
         }
-
         throw new IllegalArgumentException("不支持的请求方法：" + capability.getMethod());
     }
 
@@ -175,7 +218,7 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
         if (!baseUrl.endsWith("/") && !capabilityUrl.startsWith("/")) {
             return baseUrl + "/" + capabilityUrl;
         }
-        return baseUrl + capabilityUrl;
+        return capabilityUrl;
     }
 
     /**
@@ -267,7 +310,11 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
     private void compactArrayField(JsonNode root, ObjectNode result, FieldMeta field) {
         String path = field.getPath();
         int arrayIndex = path.indexOf("[]");
+        if (arrayIndex < 0) {
+            return;
+        }
         String arrayPath = path.substring(0, arrayIndex);
+        // 跳过 "[]."，得到 projectCode 这样的数组元素字段路径
         String leafPath = path.substring(arrayIndex + 3);
 
         JsonNode arrayNode = readBySimplePath(root, arrayPath);
@@ -277,23 +324,27 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
         String arrayName = arrayPath.substring(arrayPath.lastIndexOf('.') + 1);
         ArrayNode targetArray = result.withArray(arrayName);
         for (int i = 0; i < arrayNode.size(); i++) {
-            JsonNode row = arrayNode.get(i);
+            JsonNode sourceRow = arrayNode.get(i);
+            if (sourceRow == null || !sourceRow.isObject()) {
+                continue;
+            }
             ObjectNode targetRow;
-
+            // 同一条业务数据的多个字典字段要写入同一个对象
             if (targetArray.size() > i && targetArray.get(i).isObject()) {
                 targetRow = (ObjectNode) targetArray.get(i);
             } else {
                 targetRow = objectMapper.createObjectNode();
                 targetArray.add(targetRow);
             }
-
             if (!StringUtils.hasText(leafPath)) {
                 continue;
             }
-            JsonNode value = readBySimplePath(row, "$" + leafPath);
-            if (value == null || value.isMissingNode() || value.isNull()) {
+            // readBySimplePath 要求路径以 $. 开头
+            JsonNode value = readBySimplePath(sourceRow,"$." + leafPath);
+            if (value == null|| value.isMissingNode()|| value.isNull()) {
                 continue;
             }
+            // 使用字段字典中的中文名称作为最终展示字段名
             targetRow.set(displayName(field), value);
         }
     }

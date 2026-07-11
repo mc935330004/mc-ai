@@ -10,6 +10,8 @@ import org.example.ai.agent.trace.mapper.RunTraceMapper;
 import org.example.ai.agent.trace.service.RunTraceService;
 import org.springframework.stereotype.Service;
 
+import java.time.LocalDateTime;
+
 /**
  * Agent 运行主记录 Service 实现。
  */
@@ -27,6 +29,8 @@ public class RunTraceServiceImpl implements RunTraceService {
         trace.setUserId(request.getUserId());
         trace.setQuestion(request.getUserQuestion());
         trace.setStatus(RunStatus.RUNNING);
+        trace.setCreatedAt(LocalDateTime.now());
+        trace.setUpdatedAt(LocalDateTime.now());
         // 插入主运行记录。
         runTraceMapper.insert(trace);
     }

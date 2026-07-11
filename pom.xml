@@ -35,7 +35,7 @@
         <commons-net.version>3.11.1</commons-net.version>
         <flyway.version>12.3.0</flyway.version>
         <mybatis-jsqlparser.version>3.5.16</mybatis-jsqlparser.version>
-        <hutool.version>5.7.22</hutool.version>
+        <hutool.version>5.8.44</hutool.version>
     </properties>
 
     <dependencyManagement>

@@ -18,4 +18,11 @@ public interface BusinessCapabilityExecutor {
      * @return 工具统一返回结果
      */
     ToolResult execute(ToolExecutionContext context, PlanStep step);
+
+    /**
+     * 执行已经通过用户确认的 WRITE 能力。
+     *
+     * 该入口只能由 PendingActionService 调用。
+     */
+    ToolResult executeConfirmedWrite(ToolExecutionContext context, PlanStep step,String idempotencyKey);
 }
