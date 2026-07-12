@@ -226,12 +226,8 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
         } catch (Exception e) {
             runTraceService.markFailed(runId, System.currentTimeMillis() - startTime, e.getMessage() );
             //发生异常时，尽量通过 SSE 返回错误信息。
-            sendQuietly(emitter, "error", AgentStreamEvent.of(
-                    runId,
-                    "ERROR",
-                    e.getMessage(),
-                    null
-            ));
+            sendQuietly(emitter, "error",
+                    AgentStreamEvent.of(runId,"ERROR", e.getMessage(), null));
             //标记 SSE 异常结束。
             emitter.completeWithError(e);
         }

@@ -54,11 +54,7 @@ public class RunTraceServiceImpl implements RunTraceService {
         trace.setTotalDurationMs(totalDurationMs);
 
         // 标记整次运行成功。
-        runTraceMapper.update(
-                trace,
-                new LambdaUpdateWrapper<RunTrace>()
-                        .eq(RunTrace::getRunId, runId)
-        );
+        runTraceMapper.update(trace, new LambdaUpdateWrapper<RunTrace>().eq(RunTrace::getRunId, runId));
     }
 
     @Override
@@ -69,10 +65,6 @@ public class RunTraceServiceImpl implements RunTraceService {
         trace.setTotalDurationMs(totalDurationMs);
 
         // 标记整次运行失败。
-        runTraceMapper.update(
-                trace,
-                new LambdaUpdateWrapper<RunTrace>()
-                        .eq(RunTrace::getRunId, runId)
-        );
+        runTraceMapper.update(trace, new LambdaUpdateWrapper<RunTrace>().eq(RunTrace::getRunId, runId));
     }
 }
