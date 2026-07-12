@@ -3,6 +3,7 @@ package org.example.ai.agent.capability.entity;
 import com.baomidou.mybatisplus.annotation.*;
 import com.fasterxml.jackson.annotation.JsonFormat;
 import lombok.Data;
+import org.springframework.format.annotation.DateTimeFormat;
 
 import java.time.LocalDateTime;
 
@@ -88,5 +89,32 @@ public class FieldDictionary {
      */
     @TableField(fill = FieldFill.INSERT)
     @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss", timezone = "GMT+8")
+    @DateTimeFormat(pattern = "yyyy-MM-dd HH:mm:ss")
     private LocalDateTime createdAt;
+
+    /**
+     * 字段来源：MANUAL、OPENAPI、SAMPLE、AI。
+     */
+    private String sourceType;
+
+    /**
+     * 是否经过人工确认。
+     *
+     * 1：后续自动同步不能覆盖。
+     * 0：允许自动补充。
+     */
+    private Integer manualOverride;
+
+    /**
+     * 发布状态：DRAFT、PUBLISHED、DISABLED。
+     */
+    private String publishStatus;
+
+    /**
+     * 更新时间。
+     */
+    @TableField(fill = FieldFill.UPDATE)
+    @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss", timezone = "GMT+8")
+    @DateTimeFormat(pattern = "yyyy-MM-dd HH:mm:ss")
+    private LocalDateTime updatedAt;
 }

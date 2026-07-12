@@ -131,4 +131,33 @@ public class CapabilityDefinition {
      * 备注。
      */
     private String remark;
+
+    /**
+     * 所属业务系统编码。
+     *
+     * 为空时继续使用当前默认 BusinessApiProperties.baseUrl。
+     */
+    private String systemCode;
+
+    /**
+     * 配置来源。
+     *
+     * MANUAL：人工创建。
+     * OPENAPI：通过 OpenAPI 导入。
+     */
+    private String sourceType;
+
+    /**
+     * OpenAPI 接口唯一标识 operationId。
+     */
+    private String sourceOperationId;
+
+    /**
+     * 发布状态。
+     *
+     * DRAFT：草稿，不允许 Agent 调用。
+     * PUBLISHED：已发布。
+     * DISABLED：已停用。
+     */
+    private String publishStatus;
 }

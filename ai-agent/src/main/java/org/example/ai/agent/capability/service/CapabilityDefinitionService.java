@@ -7,6 +7,7 @@ import org.example.ai.agent.capability.dto.CapabilityTestRequestDTO;
 import org.example.ai.agent.capability.entity.CapabilityDefinition;
 import org.example.ai.agent.capability.vo.AgentCapabilityVO;
 import org.example.ai.agent.capability.vo.CapabilityDetailVO;
+import org.example.ai.agent.capability.vo.CapabilityPublishResultVO;
 import org.example.ai.agent.capability.vo.CapabilityTestResultVO;
 
 import java.util.List;
@@ -56,5 +57,12 @@ public interface CapabilityDefinitionService extends IService<CapabilityDefiniti
      * 用于后续放进大模型提示词，让模型知道有哪些业务能力可选。
      */
     String buildEnabledCapabilitiesPrompt();
+
+    /**
+     * 审核并批量发布能力。
+     *
+     * 全部能力校验通过后才会统一发布。
+     */
+    CapabilityPublishResultVO publishCapabilities(List<String> capabilityCodes);
 
 }

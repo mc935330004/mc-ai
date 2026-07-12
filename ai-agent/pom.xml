@@ -67,6 +67,13 @@
             <artifactId>h2</artifactId>
             <scope>test</scope>
         </dependency>
+        <!-- 解析 OpenAPI 3 文档，支持 $ref 引用解析 -->
+        <dependency>
+            <groupId>io.swagger.parser.v3</groupId>
+            <artifactId>swagger-parser</artifactId>
+            <version>${swagger-parser.version}</version>
+            <scope>compile</scope>
+        </dependency>
     </dependencies>
 
     <build>

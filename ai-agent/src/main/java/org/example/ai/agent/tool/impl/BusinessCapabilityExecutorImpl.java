@@ -6,9 +6,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.RequiredArgsConstructor;
+import org.example.ai.agent.capability.entity.BusinessSystem;
 import org.example.ai.agent.capability.entity.CapabilityDefinition;
 import org.example.ai.agent.capability.entity.FieldDictionary;
 import org.example.ai.agent.capability.mapper.FieldDictionaryMapper;
+import org.example.ai.agent.capability.service.BusinessSystemService;
 import org.example.ai.agent.capability.service.CapabilityDefinitionService;
 import org.example.ai.agent.common.config.BusinessApiProperties;
 import org.example.ai.agent.plan.PlanStep;
@@ -20,7 +22,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.util.CollectionUtils;
 import org.springframework.util.StringUtils;
 import org.springframework.web.client.RestClient;
+import org.springframework.web.util.UriComponentsBuilder;
 
+import java.net.URI;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -43,12 +47,12 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
     private final BusinessApiProperties businessApiProperties;
     private final RestClient restClient;
     private final ObjectMapper objectMapper;
+    private final BusinessSystemService businessSystemService;
 
     @Override
     public ToolResult execute(ToolExecutionContext context, PlanStep step) {
         // 普通工具执行入口只能调用 READ 能力
-        return executeInternal(context, step, false, null);
-
+        return executeInternal( context,step,false,null, false);
     }
 
     @Override
@@ -56,18 +60,37 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
         if (!StringUtils.hasText(idempotencyKey)) {
             return fail( step,context,"IDEMPOTENCY_KEY_REQUIRED", "写操作缺少幂等键");
         }
-        return executeInternal(context, step, true, idempotencyKey);
+        return executeInternal(context,step,true, idempotencyKey,false);
     }
+
+    @Override
+    public ToolResult executeReadTest(ToolExecutionContext context, PlanStep step) {
+        return executeInternal(context,step,false,null,true);
+    }
+
     /**
      * 统一能力执行入口。
      */
-    private ToolResult executeInternal(ToolExecutionContext context, PlanStep step, boolean confirmedWrite, String idempotencyKey) {
+    private ToolResult executeInternal(ToolExecutionContext context, PlanStep step, boolean confirmedWrite, String idempotencyKey,
+                                       boolean adminReadTest) {
         String capabilityCode = step.getCapabilityCode();
         try {
-            CapabilityDefinition capability = capabilityDefinitionService.getEnabledByCode(capabilityCode);
-            if (capability == null) {
-                return fail(step, context, "CAPABILITY_NOT_FOUND", "能力不存在或未启用：" + capabilityCode);
+
+            CapabilityDefinition capability;
+            if (adminReadTest) {
+                // 管理端允许读取尚未发布的草稿能力。
+                capability = capabilityDefinitionService.lambdaQuery()
+                        .eq(CapabilityDefinition::getCapabilityCode, capabilityCode).one();
+            } else {
+                // Agent 正常执行只能读取已启用、已发布能力。
+                capability = capabilityDefinitionService.getEnabledByCode(capabilityCode);
             }
+
+            if (capability == null) {
+                return fail(step,context,"CAPABILITY_NOT_FOUND",
+                        "能力不存在或未启用：" + capabilityCode);
+            }
+
             String sideEffect = capability.getSideEffect();
             // 危险能力当前始终禁止自动执行
             if ("DANGEROUS".equalsIgnoreCase(sideEffect)) {
@@ -152,43 +175,41 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
         if (!StringUtils.hasText(authorization)) {
             throw new IllegalArgumentException("调用业务系统缺少 Authorization");
         }
-        String url = baseUrl(capability.getUrl());
+        String url = resolveCapabilityUrl(capability);
         String method = capability.getMethod();
         if (!StringUtils.hasText(method)) {
             throw new IllegalArgumentException("能力未配置请求方法：" + capability.getCapabilityCode());
         }
         if ("GET".equalsIgnoreCase(method)) {
+            UriComponentsBuilder uriBuilder = UriComponentsBuilder.fromUriString(url);
+            if (!CollectionUtils.isEmpty(params)) {
+                params.forEach((name, value) -> {
+                    if (value != null) {
+                        uriBuilder.queryParam(name, value);
+                    }
+                });
+            }
+            URI requestUri = uriBuilder.build().encode().toUri();
+
             return restClient.get()
-                    .uri(uriBuilder -> {
-                        uriBuilder.path(url);
-                        // 没有查询参数时不会进行任何处理
-                        if (!CollectionUtils.isEmpty(params)) {
-                            params.forEach((name, value) -> {
-                                // 空值不拼接到 URL，避免出现 name=null
-                                if (value != null) {
-                                    uriBuilder.queryParam(name, value);
-                                }
-                            });
-                        }
-                        return uriBuilder.build();
-                    })
+                    // 使用URI对象后，不会与RestClient默认baseUrl重复拼接。
+                    .uri(requestUri)
                     .header("Authorization", authorization)
-                    .header("Idempotency-Key", idempotencyKey)
                     .retrieve()
                     .body(Object.class);
         }
 
         if ("POST".equalsIgnoreCase(method)) {
+            URI requestUri = URI.create(url);
             RestClient.RequestBodySpec request = restClient.post()
-                    .uri(url)
-                    // 所有业务接口调用都必须携带当前用户认证信息
+                    // 绝对URI直接覆盖RestClient默认baseUrl。
+                    .uri(requestUri)
                     .header("Authorization", authorization);
-            // 只有确认后的写操作才会携带幂等键
             if (StringUtils.hasText(idempotencyKey)) {
-                request.header("Idempotency-Key", idempotencyKey);
+                request.header("Idempotency-Key",idempotencyKey);
             }
-            return request
-                    .body(params == null ? Map.of() : params)
+
+            return request.body(params == null ? Map.of() : params)
                     .retrieve()
                     .body(Object.class);
         }
@@ -196,29 +217,55 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
     }
 
     /**
-     * 拼接业务接口地址。
+     * 根据能力所属业务系统解析真实地址。
      *
-     * 能力表保存绝对地址时直接使用；保存相对路径时，与 agent.business-api.base-url 拼接。
+     * 没有 systemCode 的旧能力继续使用默认 baseUrl。
      */
-    private String baseUrl(String capabilityUrl) {
+    private String resolveCapabilityUrl(CapabilityDefinition capability) {
+        String capabilityUrl = capability.getUrl();
         if (!StringUtils.hasText(capabilityUrl)) {
             throw new IllegalArgumentException("能力接口地址不能为空");
         }
+        capabilityUrl = capabilityUrl.trim();
         if (capabilityUrl.startsWith("http://") || capabilityUrl.startsWith("https://")) {
             return capabilityUrl;
         }
-        String baseUrl = businessApiProperties.getBaseUrl();
-        if (!StringUtils.hasText(baseUrl)) {
-            throw new IllegalArgumentException("agent.business-api.base-url 未配置，无法调用相对路径能力：" + capabilityUrl);
+        String targetBaseUrl = null;
+
+        if (StringUtils.hasText(capability.getSystemCode())) {
+            BusinessSystem system =businessSystemService.getEnabledByCode(capability.getSystemCode());
+
+            if (system == null) {
+                throw new IllegalArgumentException(
+                        "能力所属业务系统不存在或未启用：" + capability.getSystemCode());
+            }
+            targetBaseUrl = system.getBaseUrl();
         }
 
-        if (baseUrl.endsWith("/") && capabilityUrl.startsWith("/")) {
-            return baseUrl.substring(0, baseUrl.length() - 1) + capabilityUrl;
+        // 历史能力没有systemCode时使用原来的默认配置。
+        if (!StringUtils.hasText(targetBaseUrl)) {
+            targetBaseUrl =businessApiProperties.getBaseUrl();
         }
-        if (!baseUrl.endsWith("/") && !capabilityUrl.startsWith("/")) {
-            return baseUrl + "/" + capabilityUrl;
+
+        if (!StringUtils.hasText(targetBaseUrl)) {
+            throw new IllegalArgumentException("业务系统基础地址未配置");
         }
-        return capabilityUrl;
+        return joinUrl(targetBaseUrl, capabilityUrl);
+    }
+    /**
+     * 拼接基础地址与接口相对路径。
+     */
+    private String joinUrl(String baseUrl,String path) {
+        String normalizedBaseUrl = baseUrl.trim();
+        String normalizedPath = path.trim();
+        if (normalizedBaseUrl.endsWith("/")
+                && normalizedPath.startsWith("/")) {
+            return normalizedBaseUrl.substring(0,normalizedBaseUrl.length() - 1) + normalizedPath;
+        }
+        if (!normalizedBaseUrl.endsWith("/") && !normalizedPath.startsWith("/")) {
+            return normalizedBaseUrl+ "/"+ normalizedPath;
+        }
+        return normalizedBaseUrl + normalizedPath;
     }
 
     /**

@@ -90,4 +90,23 @@ public class CapabilitySaveDTO {
      */
     private Boolean requireConfirm;
 
+    /**
+     * 所属业务系统编码。
+     */
+    private String systemCode;
+
+    /**
+     * 配置来源：MANUAL/OPENAPI。
+     */
+    private String sourceType;
+
+    /**
+     * OpenAPI operationId。
+     */
+    private String sourceOperationId;
+
+    /**
+     * 发布状态：DRAFT 草稿、PUBLISHED 已发布、DISABLED 已停用。
+     */
+    private String publishStatus;
 }

@@ -25,4 +25,12 @@ public interface BusinessCapabilityExecutor {
      * 该入口只能由 PendingActionService 调用。
      */
     ToolResult executeConfirmedWrite(ToolExecutionContext context, PlanStep step,String idempotencyKey);
+
+    /**
+     * 管理端测试 READ 能力。
+     *
+     * 允许测试 DRAFT 和 disabled 能力，
+     * 但禁止测试 WRITE 和 DANGEROUS。
+     */
+    ToolResult executeReadTest(ToolExecutionContext context,PlanStep step);
 }
