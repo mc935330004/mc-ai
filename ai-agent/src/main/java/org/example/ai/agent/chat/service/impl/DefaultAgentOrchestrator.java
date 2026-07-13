@@ -2,13 +2,15 @@ package org.example.ai.agent.chat.service.impl;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import lombok.RequiredArgsConstructor;
 import org.example.ai.agent.answer.AnswerComposer;
-import org.example.ai.agent.capability.service.CapabilityDefinitionService;
 import org.example.ai.agent.chat.entity.AgentRequest;
 import org.example.ai.agent.chat.entity.AgentStreamEvent;
 import org.example.ai.agent.chat.service.AgentOrchestrator;
 
+import org.example.ai.agent.chat.support.AgentStreamSession;
+import org.example.ai.agent.chat.support.AgentStreamSessionFactory;
+import org.example.ai.agent.chat.vo.FactPreviewVO;
+import org.example.ai.agent.common.enums.AgentStreamEventType;
 import org.example.ai.agent.modules.knowledgebase.dto.KnowledgeDocumentQueryRequest;
 import org.example.ai.agent.modules.knowledgebase.dto.KnowledgeDocumentQueryResponse;
 import org.example.ai.agent.modules.knowledgebase.service.impl.KnowledgeDocumentQueryService;
@@ -25,6 +27,7 @@ import org.example.ai.agent.tool.ToolExecutor;
 import org.example.ai.agent.tool.ToolResult;
 import org.example.ai.agent.trace.service.RunTraceService;
 import org.example.ai.agent.vo.ActionPreviewVO;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
@@ -33,13 +36,15 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
 
 @Service
-@RequiredArgsConstructor
 public class DefaultAgentOrchestrator implements AgentOrchestrator {
-
+    private final AgentStreamSessionFactory streamSessionFactory;
     private final KnowledgeDocumentQueryService knowledgeDocumentQueryService;
+
+    private final Executor agentChatExecutor;
+
     /**
      * 意图路由器。
      *
@@ -71,46 +76,72 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
      */
     private final AnswerComposer answerComposer;
     /**
-     * AI 能力定义服务。
-     *
-     * 用于在聊天运行时读取当前可用业务能力。
-     */
-    private final CapabilityDefinitionService capabilityDefinitionService;
-    /**
      * 保存待用户确认的写操作。
      */
     private final PendingActionService pendingActionService;
     private final ObjectMapper objectMapper;
+    /**
+     * 使用显式构造器注入命名线程池。
+     *
+     * Executor 类型可能存在多个 Bean，必须使用 Qualifier 指定
+     * agentChatExecutor，避免 Lombok 未将字段注解复制到构造器参数。
+     */
+    public DefaultAgentOrchestrator(
+            AgentStreamSessionFactory streamSessionFactory,
+            KnowledgeDocumentQueryService knowledgeDocumentQueryService,
+            @Qualifier("agentChatExecutor") Executor agentChatExecutor,
+            IntentRouter intentRouter,
+            PlanTemplateRegistry planTemplateRegistry,
+            ToolExecutor toolExecutor,
+            RunTraceService runTraceService,
+            AnswerComposer answerComposer,
+            PendingActionService pendingActionService,
+            ObjectMapper objectMapper
+    ) {
+        this.streamSessionFactory = streamSessionFactory;
+        this.knowledgeDocumentQueryService = knowledgeDocumentQueryService;
+        this.agentChatExecutor = agentChatExecutor;
+        this.intentRouter = intentRouter;
+        this.planTemplateRegistry = planTemplateRegistry;
+        this.toolExecutor = toolExecutor;
+        this.runTraceService = runTraceService;
+        this.answerComposer = answerComposer;
+        this.pendingActionService = pendingActionService;
+        this.objectMapper = objectMapper;
+    }
     @Override
     public SseEmitter chat(AgentRequest request) {
-        SseEmitter emitter = new SseEmitter(0L);
         // 每次请求生成唯一 runId，后续 Trace / RunOps 可以用它串联整条执行链路。
         String runId = UUID.randomUUID().toString().replace("-", "");
-        // 异步执行，避免阻塞 Controller 请求线程。
-        CompletableFuture.runAsync(() -> doChat(request, emitter, runId));
-        return emitter;
+        AgentStreamSession stream = streamSessionFactory.create(runId, request.getStreamVersion());
+        /*
+         * 使用受控线程池执行Agent任务，
+         * 不再使用ForkJoinPool.commonPool。
+         */
+        agentChatExecutor.execute(() -> doChat(request, stream, runId));
+        return stream.getEmitter();
     }
     /**
      * 真正执行 Agent 聊天逻辑。
      *
      * 拆成单独方法是为了让 chat() 方法更清晰。
      */
-    private void doChat(AgentRequest request, SseEmitter emitter, String runId) {
+    private void doChat(AgentRequest request, AgentStreamSession stream, String runId) {
         long startTime = System.currentTimeMillis();
         try {
             // 1. 校验请求参数。
             validateRequest(request);
-            // 加载当前启用的业务能力清单，后续用于路由和规划。
-            String capabilitiesPrompt = capabilityDefinitionService.buildEnabledCapabilitiesPrompt();
             // 2. 创建运行主记录。
             runTraceService.startRun(runId, request);
             // 2. 推送开始处理事件。
-            sendEvent(emitter, "thinking", AgentStreamEvent.of(
-                    runId,
-                    "THINKING",
-                    "已创建 Agent 运行任务，正在判断用户问题类型。",
-                    capabilitiesPrompt
-            ));
+            stream.send("thinking",
+                    AgentStreamEvent.of(
+                            runId,
+                            AgentStreamEventType.THINKING.name(),
+                            "正在处理。",
+                            null
+                    )
+            );
             /*
              * 在调用 RAG 之前，先进行意图路由。
              *
@@ -127,12 +158,15 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
             //  更新路由类型。
             runTraceService.updateRouteType(runId, intentResult.getRouteType());
             // 推送路由结果，方便前端展示和后端排查。
-            sendEvent(emitter, "thinking", AgentStreamEvent.of(
-                    runId,
-                    "THINKING",
-                    "路由结果：" + intentResult.getRouteType() + "，原因：" + intentResult.getReason(),
-                    intentResult
-            ));
+            stream.send(
+                    "thinking",
+                    AgentStreamEvent.of(
+                            runId,
+                            AgentStreamEventType.THINKING.name(),
+                            "路由结果：" + intentResult.getRouteType() + "，原因：" + intentResult.getReason(),
+                            intentResult
+                    )
+            );
 
             /*
              *  根据路由结果生成运行计划。
@@ -143,13 +177,15 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
             RoutePlan routePlan = planTemplateRegistry.buildPlan(runId, request, intentResult);
 
             //  推送运行计划。
-            sendEvent(emitter, "plan", AgentStreamEvent.of(
-                    runId,
-                    "PLAN",
-                    "已生成 Agent 运行计划。",
-                    routePlan
-            ));
-
+            stream.send(
+                    "plan",
+                    AgentStreamEvent.of(
+                            runId,
+                            AgentStreamEventType.PLAN.name(),
+                            "已生成 Agent 运行计划。",
+                            routePlan
+                    )
+            );
             /*
              *  如果信息不足，需要追问用户。
              *
@@ -160,14 +196,10 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
              * 不应该继续调用 RAG 或业务接口。
              */
             if (intentResult.isNeedClarify()) {
-                sendEvent(emitter, "answer", AgentStreamEvent.of(
-                        runId,
-                        "ANSWER",
-                        intentResult.getClarifyQuestion(),
-                        routePlan
-                ));
+                // 追问也使用统一回答协议，保证 v2 前端能收到 delta 和 snapshot。
+                stream.publishAnswer(intentResult.getClarifyQuestion());
                 runTraceService.markSuccess(runId, System.currentTimeMillis() - startTime);
-                sendDoneEvent(emitter, runId);
+                stream.complete();
                 return;
             }
             /*
@@ -181,23 +213,19 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
              * 第一版 Agent 必须拒绝这类操作。
              */
             if (intentResult.getRouteType() == RouteType.REJECT) {
-                sendEvent(emitter, "answer", AgentStreamEvent.of(
-                        runId,
-                        "ANSWER",
-                        "该操作存在风险，当前版本不支持由 Agent 自动执行。",
-                        routePlan
-                ));
+                // 拒绝回答不再携带内部 RoutePlan，并复用统一回答协议。
+                stream.publishAnswer("该操作存在风险，当前版本不支持由 Agent 自动执行。");
                 runTraceService.markSuccess(runId, System.currentTimeMillis() - startTime);
-                sendDoneEvent(emitter, runId);
+                stream.complete();
                 return;
             }
             // 写操作只发送预览，当前阶段绝不进入 ToolExecutor
             if (intentResult.getRouteType() == RouteType.WORKFLOW_ACTION) {
                 PendingAction pendingAction =pendingActionService.createPendingAction( runId,request.getUserId(),
                         intentResult.getDynamicCapabilityPlan());
-                sendActionPreview(emitter,runId,intentResult.getDynamicCapabilityPlan(),pendingAction);
+                sendActionPreview(stream, runId, intentResult.getDynamicCapabilityPlan(), pendingAction);
                 runTraceService.markSuccess(runId,System.currentTimeMillis() - startTime);
-                sendDoneEvent(emitter, runId);
+                stream.complete();
                 return;
             }
             /*
@@ -205,7 +233,7 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
              * 其它业务查询类型交给 ToolExecutor 执行真实业务能力。
              */
             if (intentResult.getRouteType() == RouteType.RAG_ONLY) {
-                executeRagOnly(request, emitter, runId, routePlan);
+                executeRagOnly(request, stream, runId, routePlan);
                 runTraceService.markSuccess(runId, System.currentTimeMillis() - startTime);
                 return;
             }
@@ -214,22 +242,23 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
             if (selectedPlan != null && "WRITE".equalsIgnoreCase(selectedPlan.getSideEffect())) {
                 PendingAction pendingAction =pendingActionService.createPendingAction( runId,request.getUserId(),
                         selectedPlan);
-                sendActionPreview(emitter, runId, selectedPlan, pendingAction);
+                sendActionPreview(stream, runId, selectedPlan, pendingAction);
                 runTraceService.markSuccess(runId,System.currentTimeMillis() - startTime);
-                sendDoneEvent(emitter, runId);
+                stream.complete();
                 return;
             }
             // BUSINESS_QUERY / MIXED_QUERY / STATISTIC_QUERY 走工具执行链路。
-            executeToolPlan(request, emitter, runId, routePlan);
+            executeToolPlan(request, stream, runId, routePlan);
             runTraceService.markSuccess(runId, System.currentTimeMillis() - startTime);
 
-        } catch (Exception e) {
-            runTraceService.markFailed(runId, System.currentTimeMillis() - startTime, e.getMessage() );
-            //发生异常时，尽量通过 SSE 返回错误信息。
-            sendQuietly(emitter, "error",
-                    AgentStreamEvent.of(runId,"ERROR", e.getMessage(), null));
-            //标记 SSE 异常结束。
-            emitter.completeWithError(e);
+        } catch (Exception exception) {
+            runTraceService.markFailed(
+                    runId,
+                    System.currentTimeMillis() - startTime,
+                    exception.getMessage()
+            );
+            // Session 统一发送 ERROR 并关闭连接，避免重复完成同一个 SseEmitter。
+            stream.error(exception);
         }
     }
 
@@ -241,17 +270,20 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
      */
     private void executeToolPlan(
             AgentRequest request,
-            SseEmitter emitter,
+            AgentStreamSession stream,
             String runId,
             RoutePlan routePlan
     ) throws Exception {
         // 1. 推送工具执行开始事件。
-        sendEvent(emitter, "thinking", AgentStreamEvent.of(
-                runId,
-                "THINKING",
-                "已进入业务能力执行阶段，正在调用 ToolExecutor。",
-                routePlan
-        ));
+        stream.send(
+                "thinking",
+                AgentStreamEvent.of(
+                        runId,
+                        AgentStreamEventType.THINKING.name(),
+                        "已进入业务能力执行阶段，正在调用 ToolExecutor。",
+                        null
+                )
+        );
 
         // 2. 构建工具执行上下文。
         ToolExecutionContext toolContext = ToolExecutionContext.builder()
@@ -264,40 +296,43 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
 
         // 3. 执行完整计划。
         List<ToolResult> toolResults = toolExecutor.executePlan(toolContext, routePlan);
-
+        List<FactPreviewVO> factPreview =buildFactPreview(toolResults);
         // 4. 推送工具执行结果。
-        sendEvent(emitter, "tool_result", AgentStreamEvent.of(
-                runId,
-                "TOOL_RESULT",
-                "业务工具执行完成。",
-                toolResults
-        ));
-
+        stream.send(
+                "tool_result",
+                AgentStreamEvent.of(
+                        runId,
+                        AgentStreamEventType.TOOL_RESULT.name(),
+                        "业务工具执行完成。",
+                        null
+                )
+        );
+            /*
+             * 在调用最终回答模型之前先发送核心事实，
+             * 用户不需要一直等待AI生成完成。
+             */
+            stream.send("facts",
+                    AgentStreamEvent.of(
+                            runId,
+                            AgentStreamEventType.FACTS.name(),
+                            "已提取核心业务数据。",
+                            factPreview
+                    )
+            );
         // 5. 如果存在失败步骤，直接返回失败摘要。
         ToolResult failedResult = findFirstFailedResult(toolResults);
         if (failedResult != null) {
-            sendEvent(emitter, "answer", AgentStreamEvent.of(
-                    runId,
-                    "ANSWER",
-                    buildFailedAnswer(failedResult),
-                    toolResults
-            ));
-
-            sendDoneEvent(emitter, runId);
+            // 失败摘要同样走统一回答协议，且不泄露完整 ToolResult。
+            stream.publishAnswer(buildFailedAnswer(failedResult));
+            stream.complete();
             return;
         }
         // 基于真实业务数据生成最终回答。
         String finalAnswer = answerComposer.compose(request, routePlan, toolResults);
 
-        sendEvent(emitter, "answer", AgentStreamEvent.of(
-                runId,
-                "ANSWER",
-                finalAnswer,
-                toolResults
-        ));
-
-        // 7. 结束 SSE。
-        sendDoneEvent(emitter, runId);
+        // v1 发送完整 answer；v2 发送 start、delta 和最终 snapshot。
+        stream.publishAnswer(finalAnswer);
+        stream.complete();
     }
     /**
      * 查找第一个失败的工具结果。
@@ -357,44 +392,6 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
     }
 
     /**
-     * 发送事件
-     *
-     * @param emitter   SseEmitter
-     * @param eventName 事件名称
-     * @param event     事件数据
-     * @throws Exception 异常
-     */
-    private void sendEvent(SseEmitter emitter, String eventName, AgentStreamEvent event) throws Exception {
-        emitter.send(SseEmitter.event().name(eventName).data(event));
-    }
-
-    /**
-     * 安静发送事件
-     *
-     * @param emitter   SseEmitter
-     * @param eventName 事件名称
-     * @param event     事件数据
-     */
-    private void sendQuietly(SseEmitter emitter, String eventName, AgentStreamEvent event) {
-        try {
-            sendEvent(emitter, eventName, event);
-        } catch (Exception ignored) {
-        }
-    }
-    /**
-     * 发送结束事件，并关闭 SSE。
-     */
-    private void sendDoneEvent(SseEmitter emitter, String runId) throws Exception {
-        sendEvent(emitter, "done", AgentStreamEvent.of(
-                runId,
-                "DONE",
-                "[DONE]",
-                null
-        ));
-        emitter.complete();
-    }
-
-    /**
      * 执行纯 RAG 问答。
      *
      * 当前项目已经有 KnowledgeDocumentQueryService，
@@ -402,45 +399,48 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
      */
     private void executeRagOnly(
             AgentRequest request,
-            SseEmitter emitter,
+            AgentStreamSession stream,
             String runId,
             RoutePlan routePlan
     ) throws Exception {
         // 1. 推送 RAG 检索提示。
-        sendEvent(emitter, "thinking", AgentStreamEvent.of(
-                runId,
-                "THINKING",
-                "已确认走企业知识库 RAG 问答，正在检索相关文档。",
-                routePlan
-        ));
+        stream.send(
+                "thinking",
+                AgentStreamEvent.of(
+                        runId,
+                        AgentStreamEventType.THINKING.name(),
+                        "已确认走企业知识库 RAG 问答，正在检索相关文档。",
+                        null
+                )
+        );
 
         // 2. 调用现有 RAG 服务。
         KnowledgeDocumentQueryResponse ragResponse = executeRagQuery(request);
 
-        // 3. 推送最终回答。
-        sendEvent(emitter, "answer", AgentStreamEvent.of(
-                runId,
-                "ANSWER",
-                ragResponse.answer(),
-                routePlan
-        ));
+        // 3. RAG 回答也使用统一 v1/v2 发布协议。
+        stream.publishAnswer(ragResponse.answer());
 
         // 4. 推送引用来源。
-        sendEvent(emitter, "references", AgentStreamEvent.of(
-                runId,
-                "REFERENCES",
-                "引用来源",
-                ragResponse.references()
-        ));
+        stream.send(
+                "references",
+                AgentStreamEvent.of(
+                        runId,
+                        AgentStreamEventType.REFERENCES.name(),
+                        "引用来源",
+                        ragResponse.references()
+                )
+        );
 
         // 5. 结束 SSE。
-        sendDoneEvent(emitter, runId);
+        stream.complete();
     }
     /**
      * 向聊天端发送写操作预览。
      */
-    private void sendActionPreview(SseEmitter emitter,
-            String runId,DynamicCapabilityPlan plan, PendingAction pendingAction) throws Exception {
+    private void sendActionPreview( AgentStreamSession stream,
+                                    String runId,
+                                    DynamicCapabilityPlan plan,
+                                    PendingAction pendingAction) throws Exception {
         // 操作参数必须读取数据库中的待确认记录，
         // 避免前端依赖或修改 Agent 内部的规划对象。
         Map<String, Object> input = objectMapper.readValue(
@@ -469,8 +469,15 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
         }
         markdown.append("请确认以上操作是否继续执行。");
         // data 只返回稳定的预览 VO，不再暴露 DynamicCapabilityPlan。
-        sendEvent(emitter,"action_preview",
-                AgentStreamEvent.of(runId, "ACTION_PREVIEW", markdown.toString(), preview));
+        stream.send(
+                "action_preview",
+                AgentStreamEvent.of(
+                        runId,
+                        AgentStreamEventType.ACTION_PREVIEW.name(),
+                        markdown.toString(),
+                        preview
+                )
+        );
     }
 
     /**
@@ -484,5 +491,30 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                 .replace("|", "\\|")
                 .replace("\r", " ")
                 .replace("\n", " ");
+    }
+
+    /**
+     * 构建可安全发送给前端的核心事实预览。
+     *
+     * 最多返回12个字段，必答字段优先。
+     */
+    private List<FactPreviewVO> buildFactPreview( List<ToolResult> toolResults) {
+        if (toolResults == null
+                || toolResults.isEmpty()) {
+            return List.of();
+        }
+        return toolResults.stream() .filter(result ->
+                        result != null && result.isSuccess() && result.getFacts() != null
+                ) .flatMap(result ->
+                        result.getFacts().stream())
+                .filter(fact -> !fact.isMissing())
+                .sorted((left, right) ->
+                        Boolean.compare( right.isRequired(),left.isRequired())
+                ) .limit(12) .map(fact -> FactPreviewVO.builder()
+                        .label(fact.getLabel())
+                        .value(fact.getDisplayValue())
+                        .group(fact.getDisplayGroup())
+                        .required(fact.isRequired())
+                        .build()) .toList();
     }
 }

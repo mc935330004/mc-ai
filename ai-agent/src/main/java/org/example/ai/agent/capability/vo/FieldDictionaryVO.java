@@ -23,4 +23,29 @@ public class FieldDictionaryVO {
 
     private String description;
 
+    /**
+     * 是否为必答字段。
+     */
+    private Integer requiredOutput;
+
+    /**
+     * 是否允许展示。
+     */
+    private Integer visible;
+
+    /**
+     * 展示顺序。
+     */
+    private Integer displayOrder;
+
+    /**
+     * 展示分组。
+     */
+    private String displayGroup;
+
+    /**
+     * 空值展示文本。
+     */
+    private String nullDisplayText;
+
 }

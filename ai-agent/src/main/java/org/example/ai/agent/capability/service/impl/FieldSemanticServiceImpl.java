@@ -51,6 +51,11 @@ public class FieldSemanticServiceImpl
                             .fieldType(field.getDisplayFormat())
                             .businessMeaning(field.getBusinessMeaning())
                             .exampleValue(field.getExampleValue())
+                            .requiredOutput(field.getRequiredOutput())
+                            .visible(field.getVisible())
+                            .displayOrder(field.getDisplayOrder())
+                            .displayGroup(field.getDisplayGroup())
+                            .nullDisplayText(field.getNullDisplayText())
                             .build())
                     .toList();
             String fieldJson = objectMapper.writeValueAsString(fieldDictionaryVOS);

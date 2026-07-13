@@ -6,6 +6,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.RequiredArgsConstructor;
+import org.example.ai.agent.answer.extractor.DictionaryFactExtractor;
+import org.example.ai.agent.answer.model.AnswerFact;
 import org.example.ai.agent.capability.entity.BusinessSystem;
 import org.example.ai.agent.capability.entity.CapabilityDefinition;
 import org.example.ai.agent.capability.entity.FieldDictionary;
@@ -48,6 +50,10 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
     private final RestClient restClient;
     private final ObjectMapper objectMapper;
     private final BusinessSystemService businessSystemService;
+    /**
+     * 标准事实提取器。
+     */
+    private final DictionaryFactExtractor dictionaryFactExtractor;
 
     @Override
     public ToolResult execute(ToolExecutionContext context, PlanStep step) {
@@ -108,13 +114,20 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
             Object raw = invokeBusinessApi(capability, requestParams, idempotencyKey,context.getAuthorization());
             List<FieldMeta> fields = loadFieldMetas(capabilityCode);
             Object compactData = compactByFieldDictionary(raw, fields);
-
+            /*
+             * 新增标准事实提取。
+             *
+             * 最终回答优先使用 facts，
+             * 原有 data 暂时继续保留用于兼容。
+             */
+            List<AnswerFact> facts =dictionaryFactExtractor.extract(capabilityCode,raw,fields);
             return ToolResult.builder()
                     .success(true)
                     .capabilityCode(capabilityCode)
                     .outputKey(step.getOutputKey())
                     .data(compactData)
                     .fields(fields)
+                    .facts(facts)
                     .summary("业务能力调用成功：" + capability.getCapabilityName())
                     .raw(raw)
                     .input(requestParams)
@@ -272,10 +285,13 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
      * 加载字段语义字典。
      */
     private List<FieldMeta> loadFieldMetas(String capabilityCode) {
-        List<FieldDictionary> dictionaries = fieldDictionaryMapper.selectList(
+        List<FieldDictionary> dictionaries =  fieldDictionaryMapper.selectList(
                 new LambdaQueryWrapper<FieldDictionary>()
-                        .eq(FieldDictionary::getCapabilityCode, capabilityCode)
-        );
+                        .eq(FieldDictionary::getCapabilityCode,capabilityCode)
+                        .eq(FieldDictionary::getPublishStatus,"PUBLISHED")
+                        .orderByAsc( FieldDictionary::getDisplayOrder)
+                        .orderByAsc( FieldDictionary::getId ) );
+
         return dictionaries.stream()
                 .map(item -> FieldMeta.builder()
                         .name(item.getFieldName())
@@ -284,10 +300,21 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
                         .type(item.getFieldType())
                         .format(item.getDisplayFormat())
                         .meaning(item.getBusinessMeaning())
+                        .requiredOutput(defaultInteger(item.getRequiredOutput(), 0))
+                        .visible(defaultInteger(item.getVisible(),1))
+                        .displayOrder(defaultInteger(item.getDisplayOrder(), 0))
+                        .displayGroup(item.getDisplayGroup())
+                        .nullDisplayText(StringUtils.hasText(item.getNullDisplayText())? item.getNullDisplayText()
+                                        : "当前数据中未提供")
                         .build())
                 .toList();
     }
-
+    /**
+     * Integer 空值默认处理。
+     */
+    private int defaultInteger(Integer value, int defaultValue) {
+        return value == null ? defaultValue : value;
+    }
     /**
      * 构建失败结果。
      */

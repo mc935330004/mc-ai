@@ -59,6 +59,7 @@ public class FieldDictionaryServiceImpl extends ServiceImpl<FieldDictionaryMappe
 
     @Override
     public Boolean saveField(FieldDictionarySaveDTO dto) {
+        validateDisplayConfig(dto);
         boolean exists = lambdaQuery()
                 .eq(FieldDictionary::getCapabilityCode, dto.getCapabilityCode())
                 .eq(FieldDictionary::getFieldPath, dto.getFieldPath())
@@ -76,6 +77,14 @@ public class FieldDictionaryServiceImpl extends ServiceImpl<FieldDictionaryMappe
         if (entity.getAggregatable() == null) {
             entity.setAggregatable(0);
         }
+        entity.setRequiredOutput(dto.getRequiredOutput() == null? 0 : dto.getRequiredOutput());
+        entity.setVisible( dto.getVisible() == null? 1: dto.getVisible());
+
+        entity.setDisplayOrder( dto.getDisplayOrder() == null? 0 : dto.getDisplayOrder());
+
+        entity.setDisplayGroup(dto.getDisplayGroup());
+
+        entity.setNullDisplayText(StringUtils.hasText(dto.getNullDisplayText()) ? dto.getNullDisplayText().trim(): "当前数据中未提供");
         return saveOrUpdate(entity);
     }
 
@@ -171,7 +180,6 @@ public class FieldDictionaryServiceImpl extends ServiceImpl<FieldDictionaryMappe
 
             // 从 JSON 根节点开始递归解析。
             walkSchema(capabilityCode,"$",null,schema,detectedFields);
-
             if (detectedFields.isEmpty()) {
                 return buildGenerateResult(capabilityCode,0,0,
                         "SKIPPED",
@@ -202,7 +210,6 @@ public class FieldDictionaryServiceImpl extends ServiceImpl<FieldDictionaryMappe
     public List<FieldDictionaryGenerateResultVO> batchGenerateFromOutputSchema(List<String> capabilityCodes) {
         List<FieldDictionaryGenerateResultVO> results =
                 new ArrayList<>();
-
         for (String capabilityCode : capabilityCodes) {
             try {
                 results.add(generateFromOutputSchema(capabilityCode));
@@ -566,5 +573,26 @@ public class FieldDictionaryServiceImpl extends ServiceImpl<FieldDictionaryMappe
                 .status(status)
                 .message(message)
                 .build();
+    }
+
+    /**
+     * 校验字段展示配置。
+     */
+    private void validateDisplayConfig(FieldDictionarySaveDTO dto) {
+        if (dto == null) {
+            return;
+        }
+        /*
+         * 禁止出现“必答但不可展示”的矛盾配置。
+         */
+        if (Integer.valueOf(1).equals(dto.getRequiredOutput()) && Integer.valueOf(0).equals(dto.getVisible())) {
+            throw new BusinessException( 400, "必答字段必须允许展示" );
+        }
+        /*
+         * 展示顺序不能小于零。
+         */
+        if (dto.getDisplayOrder() != null && dto.getDisplayOrder() < 0) {
+            throw new BusinessException( 400,"字段展示顺序不能小于0");
+        }
     }
 }

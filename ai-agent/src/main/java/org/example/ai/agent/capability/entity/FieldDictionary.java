@@ -104,6 +104,40 @@ public class FieldDictionary {
      * 0：允许自动补充。
      */
     private Integer manualOverride;
+    /**
+     * 是否为最终回答必答字段。
+     *
+     * 1：只要字段允许展示，最终 Markdown 必须出现。
+     * 0：允许根据回答场景选择性展示。
+     */
+    private Integer requiredOutput;
+
+    /**
+     * 是否允许向用户和模型展示。
+     *
+     * 1：允许展示。
+     * 0：不允许展示。
+     */
+    private Integer visible;
+
+    /**
+     * 字段展示顺序。
+     *
+     * 数值越小，在 Markdown 中越靠前。
+     */
+    private Integer displayOrder;
+
+    /**
+     * 字段展示分组。
+     *
+     * 示例：基本信息、合同信息、进度信息。
+     */
+    private String displayGroup;
+
+    /**
+     * 字段值为 null 或不存在时的展示文本。
+     */
+    private String nullDisplayText;
 
     /**
      * 发布状态：DRAFT、PUBLISHED、DISABLED。

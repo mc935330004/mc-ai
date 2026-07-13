@@ -61,4 +61,13 @@ public class AgentRequest {
      */
     @JsonIgnore
     private String authorization;
+
+    /**
+     * SSE 协议版本。
+     *
+     * 该字段只能由 Controller 根据请求头写入，
+     * 不允许客户端通过 JSON 请求体直接伪造。
+     */
+    @JsonIgnore
+    private Integer streamVersion;
 }

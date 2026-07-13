@@ -65,4 +65,29 @@ public class FieldDictionarySaveDTO {
      * 是否可聚合统计：0 是，1 否。
      */
     private Integer aggregatable;
+
+    /**
+     * 是否为必答字段。
+     */
+    private Integer requiredOutput;
+
+    /**
+     * 是否允许展示。
+     */
+    private Integer visible;
+
+    /**
+     * 展示顺序。
+     */
+    private Integer displayOrder;
+
+    /**
+     * 展示分组。
+     */
+    private String displayGroup;
+
+    /**
+     * 空值展示文本。
+     */
+    private String nullDisplayText;
 }

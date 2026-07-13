@@ -29,8 +29,15 @@ public class RunTraceServiceImpl implements RunTraceService {
         trace.setUserId(request.getUserId());
         trace.setQuestion(request.getUserQuestion());
         trace.setStatus(RunStatus.RUNNING);
+
+        // 初始化 Token 汇总字段，避免旧数据库配置下出现空值。
+        trace.setPromptTokens(0);
+        trace.setCompletionTokens(0);
+        trace.setTotalTokens(0);
+        trace.setModelCallCount(0);
         trace.setCreatedAt(LocalDateTime.now());
         trace.setUpdatedAt(LocalDateTime.now());
+
         // 插入主运行记录。
         runTraceMapper.insert(trace);
     }
@@ -40,11 +47,8 @@ public class RunTraceServiceImpl implements RunTraceService {
         RunTrace trace = new RunTrace();
         trace.setRouteType(routeType == null ? null : routeType.name());
         // 根据 run_id 更新路由类型。
-        runTraceMapper.update(
-                trace,
-                new LambdaUpdateWrapper<RunTrace>()
-                        .eq(RunTrace::getRunId, runId)
-        );
+        runTraceMapper.update(trace,new LambdaUpdateWrapper<RunTrace>()
+                        .eq(RunTrace::getRunId, runId));
     }
 
     @Override

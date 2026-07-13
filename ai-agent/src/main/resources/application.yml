@@ -31,9 +31,9 @@ spring:
         api-key: ${GLM_API_KEY}
         model: deepseek-v4-flash
 #        model: glm-5.2
-        temperature: 0.7 # 聊天温度参数
-        max-tokens: 4096 # 最大生成 tokens 数
-        top-p: 0.8 # 贪心采样参数
+        temperature: 0.2 # 企业数据回答强调稳定性，降低随机性和无关扩写
+        max-tokens: 2048 # 最大生成 tokens 数
+        top-p: 0.8 # 适度保留候选词范围
       embedding:
         # 百炼 DashScope Embedding，维度必须与 PGVector 配置保持一致
         base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
@@ -93,7 +93,20 @@ app:
     recover-delay-ms: 60000
     # 单个向量化任务最大处理时间，超过后进入恢复或失败流程
     timeout-minutes: 30
-
+  agent:
+    stream:
+      # 单次SSE连接最长保留3分钟
+      timeout-ms: 180000
+      # 最终Markdown每个增量事件建议字符数
+      chunk-size: 200
+      # 默认保持v1，前端适配完成后再调整为2
+      default-version: 1
+      # v2必须发送最终快照，用于前端完整性修复
+      snapshot-enabled: true
+      # Agent异步执行线程池配置
+      executor-core-size: 4
+      executor-max-size: 16
+      executor-queue-capacity: 200
 mybatis-plus:
   # MyBatis Plus XML Mapper 扫描路径
   mapper-locations: classpath*:mapper/**/*.xml

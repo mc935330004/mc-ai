@@ -2,6 +2,7 @@ package org.example.ai.agent.tool;
 
 import lombok.Builder;
 import lombok.Data;
+import org.example.ai.agent.answer.model.AnswerFact;
 import org.example.ai.agent.plan.PlanStep;
 
 import java.util.List;
@@ -72,4 +73,11 @@ public class ToolResult {
      */
     private Object input;
 
+    /**
+     * 根据字段字典从真实接口响应中提取出的标准事实。
+     *
+     * AnswerComposer 优先使用 facts，
+     * 不再直接依赖 raw 原始响应。
+     */
+    private List<AnswerFact> facts;
 }

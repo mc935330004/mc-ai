@@ -89,4 +89,24 @@ public class RunTrace {
     @TableField(fill = FieldFill.INSERT_UPDATE)
     @JsonFormat(pattern = "yyyy-MM-dd HH:mm:ss", timezone = "GMT+8")
     private LocalDateTime updatedAt;
+
+    /**
+     * 本次运行累计输入 Token。
+     */
+    private Integer promptTokens;
+
+    /**
+     * 本次运行累计输出 Token。
+     */
+    private Integer completionTokens;
+
+    /**
+     * 本次运行累计总 Token。
+     */
+    private Integer totalTokens;
+
+    /**
+     * 本次运行累计模型调用次数。
+     */
+    private Integer modelCallCount;
 }
