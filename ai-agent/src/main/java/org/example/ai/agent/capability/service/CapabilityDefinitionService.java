@@ -65,4 +65,14 @@ public interface CapabilityDefinitionService extends IService<CapabilityDefiniti
      */
     CapabilityPublishResultVO publishCapabilities(List<String> capabilityCodes);
 
+    /**
+     * 查询 Agent 当前允许调用的能力。
+     *
+     * 只返回：
+     * 1. enabled = 1
+     * 2. publishStatus = PUBLISHED
+     *
+     * 为了兼容历史数据，publishStatus 为空时也暂时视为已发布。
+     */
+    List<CapabilityDefinition> listAgentCallableCapabilities();
 }

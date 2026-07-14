@@ -1,8 +1,11 @@
 package org.example.ai.agent.plan;
 
 import lombok.Data;
+import org.example.ai.agent.capability.routing.CapabilityAlternative;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -58,4 +61,20 @@ public class DynamicCapabilityPlan {
      * 是否需要用户确认，由数据库配置决定。
      */
     private boolean requireConfirm;
+
+    /**
+     * 大模型对最终能力选择结果的置信度。
+     *
+     * 范围建议为 0～1。
+     * 该值不能直接决定是否执行，还需要经过 CapabilitySelectionGuard。
+     */
+    private double confidence;
+
+    /**
+     * 其他可能的候选能力。
+     *
+     * 当候选数量大于 1 时，要求模型至少返回第二名，
+     * 以便后端判断第一名与第二名是否过于接近。
+     */
+    private List<CapabilityAlternative> alternatives =new ArrayList<>();
 }

@@ -14,7 +14,13 @@ public enum ModelCallType {
      * 动态能力规划。
      */
     PLANNER,
-
+    /**
+     * 业务能力参数提取。
+     *
+     * 能力选择完成后，单独调用模型，
+     * 只根据该能力的 inputSchemaJson 提取接口参数。
+     */
+    PARAMETER_EXTRACTOR,
     /**
      * 最终业务回答。
      */

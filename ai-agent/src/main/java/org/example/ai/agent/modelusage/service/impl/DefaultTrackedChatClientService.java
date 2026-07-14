@@ -9,6 +9,7 @@ import org.example.ai.agent.modelusage.service.ModelUsageService;
 import org.example.ai.agent.modelusage.support.TokenUsageExtractor;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.ai.chat.prompt.ChatOptions;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 import reactor.core.publisher.Flux;
@@ -26,8 +27,7 @@ import java.util.concurrent.atomic.AtomicReference;
 @Slf4j
 @Service
 @RequiredArgsConstructor
-public class DefaultTrackedChatClientService
-        implements TrackedChatClientService {
+public class DefaultTrackedChatClientService implements TrackedChatClientService {
 
     private static final String PROVIDER_NAME = "openai-compatible";
 
@@ -40,45 +40,7 @@ public class DefaultTrackedChatClientService
      */
     @Override
     public ChatResponse call(ModelCallContext context,String systemPrompt, String userPrompt ) {
-        long startTime = System.currentTimeMillis();
-        TokenUsageData observedUsage = TokenUsageData.unknown();
-        String observedModelName = null;
-        try {
-            ChatResponse response = chatClient.prompt()
-                    .system(safePrompt(systemPrompt))
-                    .user(safePrompt(userPrompt))
-                    .call()
-                    .chatResponse();
-            /*
-             * 即使后续内容检查失败，
-             * 也先保留供应商已经返回的 Usage。
-             */
-            observedUsage = tokenUsageExtractor.extract(response);
-            observedModelName = extractModelName(response);
-            if (response == null || response.getResult() == null) {
-                throw new IllegalStateException("模型没有返回有效响应");
-            }
-
-            String content = response.getResult().getOutput().getText();
-            if (!StringUtils.hasText(content)) {
-                throw new IllegalStateException("模型返回内容为空");
-            }
-            recordSuccessSafely(context, observedModelName,
-                    extractRequestId(response),
-                    observedUsage,
-                    System.currentTimeMillis() - startTime,
-                    extractFinishReason(response));
-
-            return response;
-        } catch (Exception exception) {
-            recordFailureSafely(
-                    context,
-                    observedModelName,
-                    observedUsage,
-                    System.currentTimeMillis() - startTime,
-                    exception.getMessage());
-            throw exception;
-        }
+        return call(context, systemPrompt, userPrompt,null );
     }
 
     /**
@@ -212,6 +174,63 @@ public class DefaultTrackedChatClientService
                         }
                     });
         });
+    }
+
+    @Override
+    public ChatResponse call(ModelCallContext context, String systemPrompt, String userPrompt, ChatOptions.Builder<?> optionsBuilder) {
+        long startTime = System.currentTimeMillis();
+        TokenUsageData observedUsage = TokenUsageData.unknown();
+        String observedModelName = null;
+        try {
+            ChatClient.ChatClientRequestSpec requestSpec =chatClient.prompt();
+            /*
+             * Planner 可以指定 temperature=0，
+             * 普通答案生成仍然使用 application.yml 中的全局参数。
+             */
+            if (optionsBuilder != null) {
+                requestSpec = requestSpec.options(optionsBuilder);
+            }
+            ChatResponse response = requestSpec
+                    .system(safePrompt(systemPrompt))
+                    .user(safePrompt(userPrompt))
+                    .call()
+                    .chatResponse();
+            observedUsage = tokenUsageExtractor.extract(response);
+            observedModelName = extractModelName(response);
+
+            if (response == null || response.getResult() == null) {
+                throw new IllegalStateException(
+                        "模型没有返回有效响应"
+                );
+            }
+
+            String content =response.getResult()
+                            .getOutput()
+                            .getText();
+
+            if (!StringUtils.hasText(content)) {
+                throw new IllegalStateException("模型返回内容为空");
+            }
+
+            recordSuccessSafely(
+                    context,
+                    observedModelName,
+                    extractRequestId(response),
+                    observedUsage,
+                    System.currentTimeMillis() - startTime,
+                    extractFinishReason(response));
+
+            return response;
+        } catch (Exception exception) {
+            recordFailureSafely(
+                    context,
+                    observedModelName,
+                    observedUsage,
+                    System.currentTimeMillis() - startTime,
+                    exception.getMessage()
+            );
+            throw exception;
+        }
     }
 
     /**

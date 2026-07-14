@@ -10,6 +10,7 @@ import org.example.ai.agent.capability.dto.CapabilityTestRequestDTO;
 import org.example.ai.agent.capability.entity.BusinessSystem;
 import org.example.ai.agent.capability.entity.CapabilityDefinition;
 import org.example.ai.agent.capability.entity.FieldDictionary;
+import org.example.ai.agent.capability.index.CapabilityIndexChangedEvent;
 import org.example.ai.agent.capability.mapper.CapabilityDefinitionMapper;
 import org.example.ai.agent.capability.service.BusinessSystemService;
 import org.example.ai.agent.capability.service.CapabilityDefinitionService;
@@ -25,6 +26,7 @@ import org.example.ai.agent.tool.ToolExecutionContext;
 import org.example.ai.agent.tool.ToolResult;
 import org.springframework.beans.BeanUtils;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -48,6 +50,7 @@ public class CapabilityDefinitionServiceImpl extends ServiceImpl<CapabilityDefin
     private final FieldDictionaryService fieldDictionaryService;
     private final ObjectMapper objectMapper;
     private final BusinessSystemService businessSystemService;
+    private final ApplicationEventPublisher eventPublisher;
     /**
      * 根据能力编码查询启用状态的能力。
      */
@@ -70,6 +73,7 @@ public class CapabilityDefinitionServiceImpl extends ServiceImpl<CapabilityDefin
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public Boolean saveCapability(CapabilitySaveDTO dto) {
 //        checkRequired(dto);
         // 标准化副作用级别，未填写时默认为只读能力
@@ -120,7 +124,15 @@ public class CapabilityDefinitionServiceImpl extends ServiceImpl<CapabilityDefin
         if (StringUtils.hasText(entity.getSystemCode())) {
             entity.setSystemCode(entity.getSystemCode().trim().toUpperCase());
         }
-        return saveOrUpdate(entity);
+        boolean saved = saveOrUpdate(entity);
+        if (saved) {
+            CapabilityDefinition persisted =getById(entity.getId());
+
+            if (persisted != null) {
+                eventPublisher.publishEvent(new CapabilityIndexChangedEvent(persisted.getCapabilityCode()));
+            }
+        }
+        return saved;
     }
 
     @Override
@@ -141,7 +153,12 @@ public class CapabilityDefinitionServiceImpl extends ServiceImpl<CapabilityDefin
         update.setId(id);
         update.setEnabled(enabled);
         update.setUpdatedAt(LocalDateTime.now());
-        return updateById(update);
+        boolean updated = updateById(update);
+
+        if (updated) {
+            eventPublisher.publishEvent( new CapabilityIndexChangedEvent( entity.getCapabilityCode()));
+        }
+        return updated;
     }
 
     @Override
@@ -188,12 +205,7 @@ public class CapabilityDefinitionServiceImpl extends ServiceImpl<CapabilityDefin
 
     @Override
     public String buildEnabledCapabilitiesPrompt() {
-        List<CapabilityDefinition> capabilities = lambdaQuery()
-                .eq(CapabilityDefinition::getEnabled, 1)
-                .orderByAsc(CapabilityDefinition::getDomain)
-                .orderByAsc(CapabilityDefinition::getCapabilityCode)
-                .list();
-
+        List<CapabilityDefinition> capabilities =listAgentCallableCapabilities();
         if (capabilities.isEmpty()) {
             return "当前没有可用业务能力。";
         }
@@ -252,11 +264,31 @@ public class CapabilityDefinitionServiceImpl extends ServiceImpl<CapabilityDefin
             capability.setUpdatedAt(now);
         });
         updateBatchById(capabilities);
+        capabilities.forEach(capability ->
+                eventPublisher.publishEvent(new CapabilityIndexChangedEvent(capability.getCapabilityCode())
+                )
+        );
+
         return CapabilityPublishResultVO.builder()
                 .submittedCount(uniqueCodes.size())
                 .publishedCount(capabilities.size())
                 .capabilityCodes(uniqueCodes)
                 .build();
+    }
+
+    @Override
+    public List<CapabilityDefinition> listAgentCallableCapabilities() {
+        return lambdaQuery()
+                .eq(CapabilityDefinition::getEnabled, 1)
+                .and(wrapper -> wrapper
+                        .eq(CapabilityDefinition::getPublishStatus, "PUBLISHED")
+                        // 兼容升级前没有 publish_status 值的历史数据。
+                        .or()
+                        .isNull(CapabilityDefinition::getPublishStatus)
+                ).orderByAsc(CapabilityDefinition::getDomain)
+                .orderByAsc(CapabilityDefinition::getCapabilityCode)
+                .list();
+
     }
 
     /**

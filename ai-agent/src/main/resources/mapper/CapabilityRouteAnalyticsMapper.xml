@@ -1,0 +1,70 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="org.example.ai.agent.capability.evaluation.mapper.CapabilityRouteAnalyticsMapper">
+
+    <select id="selectDecisionMetrics"
+            resultType="org.example.ai.agent.capability.evaluation.vo.CapabilityRouteMetricsVO">
+        SELECT
+            COUNT(*) AS totalDecisionCount,
+            SUM(CASE
+                    WHEN decision_status = 'SELECTED'
+                        THEN 1 ELSE 0
+                END) AS selectedCount,
+            SUM(CASE
+                    WHEN decision_status = 'CLARIFY'
+                        THEN 1 ELSE 0
+                END) AS clarifyCount,
+            SUM(CASE
+                    WHEN decision_status = 'NO_CANDIDATE'
+                        THEN 1 ELSE 0
+                END) AS noCandidateCount,
+            AVG(confidence) AS averageConfidence,
+            AVG(duration_ms) AS averageDurationMs
+        FROM ai_capability_route_log
+        WHERE created_at <![CDATA[ >= ]]> #{startTime}
+          AND created_at <![CDATA[ < ]]> #{endTime}
+    </select>
+
+    <select id="selectFeedbackMetrics"
+            resultType="org.example.ai.agent.capability.evaluation.vo.CapabilityRouteMetricsVO">
+        SELECT
+            COUNT(*) AS reviewedCount,
+            SUM(CASE
+                    WHEN correct_flag = 1
+                        THEN 1 ELSE 0
+                END) AS reviewedCorrectCount,
+            SUM(CASE
+                    WHEN correct_flag = 0
+                        THEN 1 ELSE 0
+                END) AS reviewedWrongCount,
+            CASE
+                WHEN COUNT(*) = 0 THEN 0
+                ELSE SUM(CASE
+                             WHEN correct_flag = 1
+                                 THEN 1 ELSE 0
+                    END) / COUNT(*)
+                END AS reviewedAccuracy
+        FROM ai_capability_route_feedback
+        WHERE feedback_status = 'APPROVED'
+          AND reviewed_at <![CDATA[ >= ]]> #{startTime}
+          AND reviewed_at <![CDATA[ < ]]> #{endTime}
+    </select>
+
+    <select id="selectTopConfusions"
+            resultType="org.example.ai.agent.capability.evaluation.vo.CapabilityConfusionVO">
+        SELECT
+            original_capability_code AS originalCapabilityCode,
+            expected_capability_code AS expectedCapabilityCode,
+            COUNT(*) AS errorCount
+        FROM ai_capability_route_feedback
+        WHERE feedback_status = 'APPROVED'
+          AND correct_flag = 0
+          AND reviewed_at <![CDATA[ >= ]]> #{startTime}
+          AND reviewed_at <![CDATA[ < ]]> #{endTime}
+        GROUP BY
+            original_capability_code,
+            expected_capability_code
+        ORDER BY errorCount DESC
+            LIMIT #{limit}
+    </select>
+</mapper>

@@ -77,8 +77,8 @@ document:
     # Docling 文件解析接口路径，环境不同优先只覆盖 url
     path: /api/parse/sync
     # Docling 服务地址，生产环境建议通过 DOCLING_URL 注入
-#    url: http://localhost:8001
-    url: http://192.168.12.84:8001
+    url: http://localhost:8001
+#    url: http://192.168.12.84:8001
     # 连接 Docling 的超时时间，单位毫秒
     connect-timeout-ms: 10000
     # 等待 Docling 解析结果的超时时间，单位毫秒
@@ -142,3 +142,22 @@ management:
   metrics:
     tags:
       application: mc-ai
+agent:
+  capability-routing:
+    # 最终交给大模型精排的能力数量
+    top-k: 5
+    # 是否启用关键词 + PGVector 混合召回
+    hybrid-enabled: true
+    # 两种召回通道的初始候选数量
+    keyword-top-k: 10
+    vector-top-k: 10
+    # 向量召回最低相似度
+    min-vector-score: 0.45
+    # 混合评分权重
+    keyword-weight: 0.40
+    vector-weight: 0.60
+    dual-hit-bonus: 0.05
+
+    min-recall-score: 0.06
+    min-confidence: 0.75
+    min-score-margin: 0.12
