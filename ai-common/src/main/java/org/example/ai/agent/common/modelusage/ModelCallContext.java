@@ -1,4 +1,4 @@
-package org.example.ai.agent.modelusage.model;
+package org.example.ai.agent.common.modelusage;
 
 import lombok.Builder;
 import lombok.Data;
@@ -7,7 +7,7 @@ import org.example.ai.agent.common.enums.ModelCallType;
 /**
  * 模型调用上下文。
  *
- * 每次调用模型前构建，用来关联 runId、用户、会话和调用类型。
+ * 每次调用模型前构建，用于关联 Agent 运行、会话、用户和调用阶段。
  */
 @Data
 @Builder
@@ -15,6 +15,8 @@ public class ModelCallContext {
 
     /**
      * Agent 本次运行 ID。
+     *
+     * 字段语义生成、独立聊天等非 Agent 请求可以为空。
      */
     private String runId;
 
@@ -35,8 +37,6 @@ public class ModelCallContext {
 
     /**
      * 同一调用类型下的调用序号。
-     *
-     * 第一阶段最终回答通常只有一次，因此默认传 1。
      */
     @Builder.Default
     private int callSequence = 1;

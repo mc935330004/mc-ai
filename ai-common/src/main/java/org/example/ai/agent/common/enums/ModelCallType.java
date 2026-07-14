@@ -33,5 +33,10 @@ public enum ModelCallType {
     /**
      * 回答格式或内容修复。
      */
-    REPAIR
+    REPAIR,
+
+    /**
+     * 直接聊天。
+     */
+    DIRECT_CHAT
 }

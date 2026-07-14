@@ -3,6 +3,8 @@ package org.example.ai.agent.router;
 import cn.hutool.core.collection.CollectionUtil;
 import lombok.RequiredArgsConstructor;
 import org.example.ai.agent.chat.entity.AgentRequest;
+import org.example.ai.agent.common.enums.ModelCallType;
+import org.example.ai.agent.common.modelusage.ModelCallContext;
 import org.example.ai.agent.plan.DynamicCapabilityPlan;
 import org.example.ai.agent.plan.DynamicCapabilityPlanner;
 import org.springframework.stereotype.Component;
@@ -95,9 +97,15 @@ public class RuleBasedIntentRouter implements IntentRouter {
      * @return 路由结果
      */
     @Override
-    public IntentResult route(AgentRequest request) {
+    public IntentResult route(AgentRequest request, String runId) {
         String question = normalizeQuestion(request);
-
+        ModelCallContext plannerContext = ModelCallContext.builder()
+                .runId(runId)
+                .conversationId(request == null ? null : request.getConversationId())
+                .userId(request == null ? null : request.getUserId())
+                .callType(ModelCallType.PLANNER)
+                .callSequence(1)
+                .build();
         // 用户问题为空时，不继续执行任何链路，直接要求用户补充问题。
         if (!StringUtils.hasText(question)) {
             return clarify("请先输入你要咨询的问题。");
@@ -119,7 +127,7 @@ public class RuleBasedIntentRouter implements IntentRouter {
         // 2. 判断是否为写操作或工作流动作。
         List<String> actionHits = matchKeywords(question, ACTION_KEYWORDS);
         if (!actionHits.isEmpty()) {
-            return routeAction(question, actionHits);
+            return routeAction(question, actionHits, plannerContext);
         }
 
         // 3. 判断统计分析类问题。
@@ -130,7 +138,7 @@ public class RuleBasedIntentRouter implements IntentRouter {
                     RouteType.STATISTIC_QUERY,
                     statisticHits,
                     "用户问题包含统计、汇总、排名或趋势意图",
-                    0.8
+                    0.8,plannerContext
             );
         }
 
@@ -146,7 +154,7 @@ public class RuleBasedIntentRouter implements IntentRouter {
                     RouteType.MIXED_QUERY,
                     mergeKeywords(businessHits, ragHits, analysisHits),
                     "用户问题同时包含业务数据和分析意图",
-                    0.85
+                    0.85,plannerContext
             );
         }
 
@@ -157,7 +165,7 @@ public class RuleBasedIntentRouter implements IntentRouter {
                     RouteType.BUSINESS_QUERY,
                     businessHits,
                     "用户问题属于业务数据查询",
-                    0.75
+                    0.75,plannerContext
             );
         }
 
@@ -181,7 +189,7 @@ public class RuleBasedIntentRouter implements IntentRouter {
                 RouteType.BUSINESS_QUERY,
                 List.of(),
                 "未命中固定关键词，尝试从已启用能力目录动态匹配",
-                0.65
+                0.65,plannerContext
         );
     }
 
@@ -242,8 +250,8 @@ public class RuleBasedIntentRouter implements IntentRouter {
      * 根据已启用能力目录判断问题是否属于业务查询。
      */
     private IntentResult routeBusiness(String question, RouteType routeType,List<String> matchedKeywords,String routeReason,
-            double confidence) {
-        DynamicCapabilityPlan dynamicPlan = dynamicCapabilityPlanner.plan(question);
+            double confidence,ModelCallContext plannerContext) {
+        DynamicCapabilityPlan dynamicPlan =dynamicCapabilityPlanner.plan(question, plannerContext);
         // 没有匹配能力时不能调用业务接口，转为追问用户
         if (!dynamicPlan.isMatched()) {
             String clarifyQuestion = StringUtils.hasText(dynamicPlan.getClarifyQuestion()) ? dynamicPlan.getClarifyQuestion()
@@ -290,8 +298,8 @@ public class RuleBasedIntentRouter implements IntentRouter {
     /**
      * 根据能力目录匹配写操作能力。
      */
-    private IntentResult routeAction(String question, List<String> actionHits) {
-        DynamicCapabilityPlan dynamicPlan = dynamicCapabilityPlanner.plan(question);
+    private IntentResult routeAction(String question, List<String> actionHits,ModelCallContext plannerContext) {
+        DynamicCapabilityPlan dynamicPlan = dynamicCapabilityPlanner.plan(question, plannerContext);
         if (!dynamicPlan.isMatched()) {
             return clarify(dynamicPlan.getClarifyQuestion());
         }

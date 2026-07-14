@@ -17,10 +17,8 @@ import org.example.ai.agent.chat.entity.AgentRequest;
 public interface IntentRouter {
 
     /**
-     * 根据用户请求判断路由类型。
-     *
-     * @param request Agent 聊天请求
-     * @return 路由判断结果
+     * @param request Agent 请求
+     * @param runId 本次 Agent 运行 ID
      */
-    IntentResult route(AgentRequest request);
+    IntentResult route(AgentRequest request, String runId);
 }

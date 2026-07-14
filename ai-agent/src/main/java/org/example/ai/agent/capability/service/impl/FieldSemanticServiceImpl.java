@@ -12,8 +12,12 @@ import org.example.ai.agent.capability.mapper.FieldDictionaryMapper;
 import org.example.ai.agent.capability.service.FieldSemanticService;
 import org.example.ai.agent.capability.vo.FieldDictionaryVO;
 import org.example.ai.agent.capability.vo.FieldSemanticSuggestionVO;
+import org.example.ai.agent.common.enums.ModelCallType;
 import org.example.ai.agent.common.exception.BusinessException;
+import org.example.ai.agent.common.modelusage.ModelCallContext;
+import org.example.ai.agent.common.modelusage.TrackedChatClientService;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
@@ -29,10 +33,10 @@ import java.util.List;
 public class FieldSemanticServiceImpl
         implements FieldSemanticService {
 
-    private final ChatClient chatClient;
     private final ObjectMapper objectMapper;
     private final FieldDictionaryMapper fieldDictionaryMapper;
     private final CapabilityDefinitionMapper capabilityDefinitionMapper;
+    private final TrackedChatClientService trackedChatClientService;
 
     @Override
     public List<FieldSemanticSuggestionVO> suggest(FieldSemanticSuggestDTO dto) {
@@ -59,46 +63,56 @@ public class FieldSemanticServiceImpl
                             .build())
                     .toList();
             String fieldJson = objectMapper.writeValueAsString(fieldDictionaryVOS);
-            String content = chatClient.prompt()
-                    .system("""
-                            你是企业PM项目管理系统字段字典助手。
-                            只能根据接口名称、字段名、字段路径、类型和示例值生成候选解释。
+            String systemPrompt = """
+                        你是企业PM项目管理系统字段字典助手。
+                        只能根据接口名称、字段名、字段路径、类型和示例值生成候选解释。
+                
+                        要求：
+                        1. 输出纯JSON字符串，不要输出Markdown代码块。
+                        2. 不确定金额单位、状态含义时，不得猜测。
+                        3. 中文名应简短，通常不超过15个汉字。
+                        4. displayFormat只能是：
+                           text、number、amount、percent、date、
+                           status、boolean。
+                        5. 必须保证字符串、对象和数组全部完整闭合。
+                        6. 无法确定时，businessMeaning写“含义待确认”。
+                        """;
+            String userPrompt = """
+                        能力名称：%s
+                        能力说明：%s
+                
+                        字段列表：
+                        %s
+                
+                        返回格式：
+                        [
+                          {
+                            "fieldId": 1,
+                            "fieldName": "projectCode",
+                            "fieldPath": "$.data.records[].projectCode",
+                            "suggestedCnName": "项目编码",
+                            "suggestedMeaning": "项目唯一编号",
+                            "suggestedFormat": "text",
+                            "uncertain": false
+                          }
+                        ]
+                        """.formatted(capability.getCapabilityName(),capability.getDescription(),fieldJson);
 
-                            要求：
-                            1. 输出纯JSON字符串，不要输出Markdown代码块。
-                            2. 不确定金额单位、状态含义时，不得猜测。
-                            3. 中文名应简短，通常不超过15个汉字。
-                            4. displayFormat只能是：
-                               text、number、amount、percent、date、
-                               status、boolean。
-                            5.必须保证字符串、对象和数组全部完整闭合。
-                            6. 无法确定时，businessMeaning写“含义待确认”。
-                            """)
-                    .user("""
-                            能力名称：%s
-                            能力说明：%s
-
-                            字段列表：
-                            %s
-                            返回格式：
-                            [
-                                  {
-                                    "fieldId": 1,
-                                    "fieldName": "projectCode",
-                                    "fieldPath": "$.data.records[].projectCode",
-                                    "suggestedCnName": "项目编码",
-                                    "suggestedMeaning": "项目唯一编号",
-                                    "suggestedFormat": "text",
-                                    "uncertain": false
-                                  }
-                            ]
-                            """.formatted(
-                            capability.getCapabilityName(),
-                            capability.getDescription(),
-                            fieldJson
-                    )).call().content();
-            // content字符串转json字符串
-            return objectMapper.readValue(content, new TypeReference<List<FieldSemanticSuggestionVO>>() {});
+            ModelCallContext context = ModelCallContext.builder()
+                    /*
+                     * 字段语义生成不是一次 Agent 聊天运行，
+                     * 因此没有 runId，不汇总到 ai_run_trace。
+                     */
+                    .callType(ModelCallType.FIELD_SEMANTIC)
+                    .callSequence(1)
+                    .build();
+            ChatResponse response = trackedChatClientService.call(
+                    context,
+                    systemPrompt,
+                    userPrompt
+            );
+            String content = response.getResult().getOutput().getText();
+            return objectMapper.readValue(cleanJson(content),new TypeReference<List<FieldSemanticSuggestionVO>>() {});
         } catch (Exception e) {
             throw new BusinessException( 500,"字段语义生成失败：" + e.getMessage());
         }

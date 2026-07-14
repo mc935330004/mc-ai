@@ -6,7 +6,10 @@ import lombok.RequiredArgsConstructor;
 import org.example.ai.agent.capability.entity.CapabilityDefinition;
 import org.example.ai.agent.capability.service.CapabilityDefinitionService;
 import org.example.ai.agent.common.exception.BusinessException;
+import org.example.ai.agent.common.modelusage.ModelCallContext;
+import org.example.ai.agent.common.modelusage.TrackedChatClientService;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 import java.util.LinkedHashMap;
@@ -24,10 +27,10 @@ import java.util.LinkedHashMap;
 public class DynamicCapabilityPlanner {
 
     private final CapabilityDefinitionService capabilityDefinitionService;
-    private final ChatClient chatClient;
     private final ObjectMapper objectMapper;
+    private final TrackedChatClientService trackedChatClientService;
 
-    public DynamicCapabilityPlan plan(String userQuestion) {
+    public DynamicCapabilityPlan plan(String userQuestion, ModelCallContext callContext) {
         String capabilitiesPrompt = capabilityDefinitionService.buildEnabledCapabilitiesPrompt();
 
         String systemPrompt = """
@@ -65,11 +68,11 @@ public class DynamicCapabilityPlanner {
                 
                 %s
                 """.formatted(userQuestion, capabilitiesPrompt);
-        String content = chatClient.prompt()
-                .system(systemPrompt)
-                .user(userPrompt)
-                .call()
-                .content();
+        ChatResponse response = trackedChatClientService.call(
+                callContext,
+                systemPrompt,
+                userPrompt);
+        String content = response.getResult().getOutput().getText();
         try {
             // 解析 JSON
             DynamicCapabilityPlan plan = objectMapper.readValue(content, DynamicCapabilityPlan.class);

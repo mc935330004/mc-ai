@@ -11,6 +11,8 @@ import org.example.ai.agent.chat.support.AgentStreamSession;
 import org.example.ai.agent.chat.support.AgentStreamSessionFactory;
 import org.example.ai.agent.chat.vo.FactPreviewVO;
 import org.example.ai.agent.common.enums.AgentStreamEventType;
+import org.example.ai.agent.common.enums.ModelCallType;
+import org.example.ai.agent.common.modelusage.ModelCallContext;
 import org.example.ai.agent.modules.knowledgebase.dto.KnowledgeDocumentQueryRequest;
 import org.example.ai.agent.modules.knowledgebase.dto.KnowledgeDocumentQueryResponse;
 import org.example.ai.agent.modules.knowledgebase.service.impl.KnowledgeDocumentQueryService;
@@ -154,7 +156,7 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
              * - “查询 A 项目回款并分析风险”     -> MIXED_QUERY
              * - “本月合同金额统计一下”          -> STATISTIC_QUERY
              */
-            IntentResult intentResult = intentRouter.route(request);
+            IntentResult intentResult = intentRouter.route(request, runId);
             //  更新路由类型。
             runTraceService.updateRouteType(runId, intentResult.getRouteType());
             // 推送路由结果，方便前端展示和后端排查。
@@ -353,17 +355,28 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
      *
      * 这里把 AgentRequest 转换成你现有 RAG 服务需要的 KnowledgeDocumentQueryRequest。
      */
-    private KnowledgeDocumentQueryResponse executeRagQuery(AgentRequest request) {
-        // 构造现有 RAG 服务的请求对象。
-        KnowledgeDocumentQueryRequest ragRequest = new KnowledgeDocumentQueryRequest(
-                request.getCategoryIds(),
-                request.getDocumentIds(),
-                request.getUserQuestion(),
-                request.getTopK(),
-                request.getMinScore()
+    private KnowledgeDocumentQueryResponse executeRagQuery(AgentRequest request, String runId) {
+        KnowledgeDocumentQueryRequest ragRequest =
+                new KnowledgeDocumentQueryRequest(
+                        request.getCategoryIds(),
+                        request.getDocumentIds(),
+                        request.getUserQuestion(),
+                        request.getTopK(),
+                        request.getMinScore()
+                );
+
+        ModelCallContext ragContext = ModelCallContext.builder()
+                .runId(runId)
+                .conversationId(request.getConversationId())
+                .userId(request.getUserId())
+                .callType(ModelCallType.RAG)
+                .callSequence(1)
+                .build();
+
+        return knowledgeDocumentQueryService.query(
+                ragRequest,
+                ragContext
         );
-        // 调用现有企业知识库问答服务。
-        return knowledgeDocumentQueryService.query(ragRequest);
     }
 
     /**
@@ -415,7 +428,7 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
         );
 
         // 2. 调用现有 RAG 服务。
-        KnowledgeDocumentQueryResponse ragResponse = executeRagQuery(request);
+        KnowledgeDocumentQueryResponse ragResponse =executeRagQuery(request, runId);
 
         // 3. RAG 回答也使用统一 v1/v2 发布协议。
         stream.publishAnswer(ragResponse.answer());

@@ -1,10 +1,14 @@
 package org.example.ai.agent.chat.support;
 
 import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
 import org.example.ai.agent.chat.entity.AgentStreamEvent;
 import org.example.ai.agent.chat.vo.AnswerCompleteData;
 import org.example.ai.agent.common.config.AgentStreamProperties;
 import org.example.ai.agent.common.enums.AgentStreamEventType;
+import org.example.ai.agent.common.exception.BusinessException;
+import org.example.ai.agent.observability.AgentMetrics;
+import org.flywaydb.core.internal.util.StringUtils;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.util.List;
@@ -18,12 +22,22 @@ import java.util.concurrent.atomic.AtomicLong;
  * 每个聊天请求创建一个实例，
  * 统一管理 sequence、messageId、快照和连接关闭。
  */
+@Slf4j
 public class AgentStreamSession {
 
+    /**
+     * -- GETTER --
+     *  Controller 最终需要返回底层 SseEmitter。
+     */
+    @Getter
     private final SseEmitter emitter;
     private final AgentStreamProperties properties;
     private final MarkdownChunker markdownChunker;
-
+    private final AgentMetrics agentMetrics;
+    /**
+     * 是否已经记录首个有效内容。
+     */
+    private final AtomicBoolean firstContentRecorded =  new AtomicBoolean(false);
     @Getter
     private final String runId;
 
@@ -34,7 +48,10 @@ public class AgentStreamSession {
     private final int protocolVersion;
 
     private final AtomicLong sequence = new AtomicLong(0);
-
+    /**
+     * SSE会话创建时间。
+     */
+    private final long startedAt = System.currentTimeMillis();
     private final AtomicBoolean completed = new AtomicBoolean(false);
 
     /**
@@ -47,13 +64,15 @@ public class AgentStreamSession {
             String runId,
             Integer requestedVersion,
             AgentStreamProperties properties,
-            MarkdownChunker markdownChunker ) {
+            MarkdownChunker markdownChunker ,AgentMetrics agentMetrics) {
         this.emitter = emitter;
         this.runId = runId;
         this.properties = properties;
         this.markdownChunker = markdownChunker;
         this.messageId = UUID.randomUUID().toString() .replace("-", "");
         this.protocolVersion =normalizeVersion( requestedVersion, properties.getDefaultVersion());
+        this.agentMetrics = agentMetrics;
+        this.agentMetrics.recordSseOpened(protocolVersion);
     }
 
     /**
@@ -75,6 +94,21 @@ public class AgentStreamSession {
         event.setSequence(currentSequence);
         event.setTimestamp(System.currentTimeMillis());
         emitter.send(SseEmitter.event().id(eventId).name(eventName) .data(event));
+        agentMetrics.recordSseEvent( protocolVersion,event.getType());
+        boolean firstVisibleContent =AgentStreamEventType.FACTS.name()
+                        .equalsIgnoreCase(event.getType())
+                        || AgentStreamEventType.ANSWER_DELTA.name()
+                        .equalsIgnoreCase(event.getType())
+                        || "ANSWER".equalsIgnoreCase(event.getType());
+        /*
+         * FACTS或ANSWER_DELTA是用户首次看到有效结果的时间点。
+         */
+        if (firstVisibleContent && firstContentRecorded.compareAndSet(false, true)) {
+            agentMetrics.recordFirstContentDuration(
+                    protocolVersion,
+                    System.currentTimeMillis() - startedAt
+            );
+        }
     }
 
     /**
@@ -86,13 +120,19 @@ public class AgentStreamSession {
     public void publishAnswer(String markdown) throws Exception {
         finalMarkdown = markdown == null ? "" : markdown;
 
+        /*
+         * 必须在v1/v2分支前记录，
+         * 保证两个协议都能统计回答长度。
+         */
+        agentMetrics.recordAnswerLength(protocolVersion,finalMarkdown.length());
         if (protocolVersion == 1) {
             send("answer",
-                    AgentStreamEvent.of(
-                            runId,
-                            "ANSWER",
-                            finalMarkdown,
-                            null ));
+                AgentStreamEvent.of(
+                        runId,
+                        "ANSWER",
+                        finalMarkdown,
+                        null)
+            );
             return;
         }
 
@@ -128,59 +168,65 @@ public class AgentStreamSession {
     /**
      * 正常完成回答并关闭连接。
      */
-    public synchronized void complete()
-            throws Exception {
-        if (!completed.compareAndSet( false,true)) {
+    public synchronized void complete()throws Exception {
+        if (!completed.compareAndSet(false, true)) {
             return;
         }
+        String closeReason = "SUCCESS";
+        try {
+            String contentHash = ContentHashUtils.sha256(finalMarkdown);
 
-        String contentHash = ContentHashUtils.sha256(finalMarkdown);
+            long currentSequence =sequence.incrementAndGet();
 
-        /*
-         * completed 已设置为 true，
-         * 因此不能再调用 send()。
-         * 结束事件需要在此处直接构建并发送。
-         */
-        long currentSequence =sequence.incrementAndGet();
+            String eventId =runId + "-" + currentSequence;
 
-        String eventId =runId + "-" + currentSequence;
+            String eventName = protocolVersion == 1 ? "done"
+                    : "answer_done";
+            String eventType = protocolVersion == 1  ? "DONE"
+                    : AgentStreamEventType.ANSWER_DONE.name();
 
-        String eventName =protocolVersion == 1
-                        ? "done"
-                        : "answer_done";
+            AnswerCompleteData completeData =
+                    AnswerCompleteData.builder()
+                            .protocolVersion(protocolVersion)
+                            .contentLength(finalMarkdown.length())
+                            .contentHash(contentHash)
+                            .finishReason("STOP")
+                            .build();
 
-        String eventType = protocolVersion == 1
-                        ? "DONE"
-                        : AgentStreamEventType
-                        .ANSWER_DONE
-                        .name();
+            AgentStreamEvent event = AgentStreamEvent.builder()
+                            .runId(runId)
+                            .messageId(messageId)
+                            .eventId(eventId)
+                            .sequence(currentSequence)
+                            .type(eventType)
+                            .content(protocolVersion == 1? "[DONE]": null)
+                            .data(completeData)
+                            .finishReason("STOP")
+                            .contentLength(finalMarkdown.length())
+                            .contentHash(contentHash)
+                            .timestamp(System.currentTimeMillis())
+                            .build();
 
-        AnswerCompleteData completeData =AnswerCompleteData.builder()
-                        .protocolVersion( protocolVersion)
-                        .contentLength( finalMarkdown.length())
-                        .contentHash(contentHash)
-                        .finishReason("STOP")
-                        .build();
+            emitter.send(SseEmitter.event()
+                            .id(eventId)
+                            .name(eventName)
+                            .data(event) );
 
-        AgentStreamEvent event = AgentStreamEvent.builder()
-                        .runId(runId)
-                        .messageId(messageId)
-                        .eventId(eventId)
-                        .sequence(currentSequence)
-                        .type(eventType)
-                        .content(protocolVersion == 1? "[DONE]": null)
-                        .data(completeData)
-                        .finishReason("STOP")
-                        .contentLength(finalMarkdown.length())
-                        .contentHash(contentHash)
-                        .timestamp(System.currentTimeMillis())
-                        .build();
+            agentMetrics.recordSseEvent( protocolVersion,eventType );
 
-        emitter.send(SseEmitter.event()
-                        .id(eventId)
-                        .name(eventName)
-                        .data(event));
-        emitter.complete();
+            emitter.complete();
+        } catch (Exception exception) {
+            closeReason = "ERROR";
+
+            /*
+             * complete()已经取得结束权，
+             * 这里直接通知容器异常关闭，不能再次调用error()。
+             */
+            emitter.completeWithError(exception);
+            throw exception;
+        } finally {
+            agentMetrics.recordSseClosed(protocolVersion,closeReason );
+        }
     }
 
     /**
@@ -215,6 +261,9 @@ public class AgentStreamSession {
              * 客户端已经断开时，错误事件可能无法发送。
              * 此处不覆盖原始业务异常。
              */
+        }finally {
+            agentMetrics.recordSseEvent(protocolVersion,AgentStreamEventType.ERROR.name());
+            agentMetrics.recordSseClosed(protocolVersion,"ERROR");
         }
         emitter.completeWithError(throwable);
     }
@@ -241,15 +290,28 @@ public class AgentStreamSession {
      * 获取安全错误信息。
      */
     private String safeErrorMessage( Throwable throwable) {
-        if (throwable == null  || throwable.getMessage() == null) {
-            return "Agent处理失败";
+        if (throwable instanceof BusinessException && StringUtils.hasText(throwable.getMessage())) {
+            return throwable.getMessage();
         }
-        return throwable.getMessage();
+        /*
+         * 详细异常只写服务端日志，
+         * 前端不能看到SQL、URL或内部组件信息。
+         */
+        log.error(
+                "Agent SSE处理失败，runId={}",
+                runId,
+                throwable
+        );
+        return "Agent处理失败，请稍后重试。";
     }
+
     /**
-     * Controller 最终需要返回底层 SseEmitter。
+     * 客户端或容器提前关闭连接。
      */
-    public SseEmitter getEmitter() {
-        return emitter;
+    public void connectionClosed() {
+        if (!completed.compareAndSet(false, true)) {
+            return;
+        }
+        agentMetrics.recordSseClosed( protocolVersion,"CANCELLED");
     }
 }

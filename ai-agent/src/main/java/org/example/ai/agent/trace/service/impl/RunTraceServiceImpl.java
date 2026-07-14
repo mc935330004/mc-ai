@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import lombok.RequiredArgsConstructor;
 import org.example.ai.agent.chat.entity.AgentRequest;
 import org.example.ai.agent.common.model.RunStatus;
+import org.example.ai.agent.observability.AgentMetrics;
 import org.example.ai.agent.router.RouteType;
 import org.example.ai.agent.trace.entity.RunTrace;
 import org.example.ai.agent.trace.mapper.RunTraceMapper;
@@ -20,7 +21,7 @@ import java.time.LocalDateTime;
 public class RunTraceServiceImpl implements RunTraceService {
 
     private final RunTraceMapper runTraceMapper;
-
+    private final AgentMetrics agentMetrics;
     @Override
     public void startRun(String runId, AgentRequest request) {
         RunTrace trace = new RunTrace();
@@ -59,6 +60,7 @@ public class RunTraceServiceImpl implements RunTraceService {
 
         // 标记整次运行成功。
         runTraceMapper.update(trace, new LambdaUpdateWrapper<RunTrace>().eq(RunTrace::getRunId, runId));
+        agentMetrics.recordRun(RunStatus.SUCCESS,totalDurationMs);
     }
 
     @Override
@@ -70,5 +72,6 @@ public class RunTraceServiceImpl implements RunTraceService {
 
         // 标记整次运行失败。
         runTraceMapper.update(trace, new LambdaUpdateWrapper<RunTrace>().eq(RunTrace::getRunId, runId));
+        agentMetrics.recordRun(RunStatus.FAILED,totalDurationMs);
     }
 }

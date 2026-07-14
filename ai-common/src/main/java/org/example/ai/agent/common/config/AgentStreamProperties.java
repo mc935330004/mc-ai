@@ -4,6 +4,9 @@ import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.stereotype.Component;
 
+import java.util.HashSet;
+import java.util.Set;
+
 /**
  * Agent SSE 流配置。
  */
@@ -49,4 +52,29 @@ public class AgentStreamProperties {
      * Agent 后台执行队列容量。
      */
     private int executorQueueCapacity = 200;
+
+    /**
+     * 是否允许使用 SSE v2。
+     *
+     * 紧急回滚时设为 false，
+     * 所有请求都会回退到 v1。
+     */
+    private boolean v2Enabled = true;
+
+    /**
+     * SSE v2 灰度百分比，范围为0～100。
+     */
+    private int v2RolloutPercentage = 100;
+
+    /**
+     * 强制使用 v2 的用户。
+     *
+     * 适合开发人员和测试人员提前验证。
+     */
+    private Set<String> v2AllowUsers = new HashSet<>();
+
+    /**
+     * 强制回退 v1 的用户。
+     */
+    private Set<String> v2DenyUsers = new HashSet<>();
 }

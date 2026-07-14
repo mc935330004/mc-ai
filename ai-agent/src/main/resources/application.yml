@@ -34,6 +34,9 @@ spring:
         temperature: 0.2 # 企业数据回答强调稳定性，降低随机性和无关扩写
         max-tokens: 2048 # 最大生成 tokens 数
         top-p: 0.8 # 适度保留候选词范围
+        # 要求 OpenAI 兼容供应商在流式响应结束时返回 Token Usage。
+        stream-options:
+          include-usage: true
       embedding:
         # 百炼 DashScope Embedding，维度必须与 PGVector 配置保持一致
         base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
@@ -61,6 +64,7 @@ spring:
     enabled: false
     locations: classpath:db/migration
     baseline-on-migrate: true
+    baseline-version: 4
   servlet:
     multipart:
       max-file-size: 100MB
@@ -73,8 +77,8 @@ document:
     # Docling 文件解析接口路径，环境不同优先只覆盖 url
     path: /api/parse/sync
     # Docling 服务地址，生产环境建议通过 DOCLING_URL 注入
-    url: http://localhost:8001
-#    url: http://192.168.12.84:8001
+#    url: http://localhost:8001
+    url: http://192.168.12.84:8001
     # 连接 Docling 的超时时间，单位毫秒
     connect-timeout-ms: 10000
     # 等待 Docling 解析结果的超时时间，单位毫秒
@@ -107,9 +111,34 @@ app:
       executor-core-size: 4
       executor-max-size: 16
       executor-queue-capacity: 200
+      # SSE v2总开关，false时全部回退v1
+      v2-enabled: true
+      # v2灰度比例，生产环境从5开始
+      v2-rollout-percentage: 100
+      # 强制进入v2的用户，使用英文逗号分隔
+      v2-allow-users: ""
+      # 强制回退v1的用户
+      v2-deny-users: ""
+    answer:
+      # 标准事实模型开关，紧急回滚时可设为false
+      structured-enabled: true
+      # Java确定性Markdown开关
+      deterministic-markdown-enabled: true
 mybatis-plus:
   # MyBatis Plus XML Mapper 扫描路径
   mapper-locations: classpath*:mapper/**/*.xml
   configuration:
     # 数据库下划线字段自动映射 Java 驼峰字段
     map-underscore-to-camel-case: true
+management:
+  endpoints:
+    web:
+      exposure:
+        # 不要暴露env、configprops等敏感端点
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: when-authorized
+  metrics:
+    tags:
+      application: mc-ai

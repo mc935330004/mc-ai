@@ -9,8 +9,10 @@ import org.example.ai.agent.answer.model.*;
 import org.example.ai.agent.answer.render.DeterministicMarkdownRenderer;
 import org.example.ai.agent.answer.validator.FactCompletenessValidator;
 import org.example.ai.agent.chat.entity.AgentRequest;
+import org.example.ai.agent.common.config.AgentAnswerProperties;
 import org.example.ai.agent.common.enums.ModelCallType;
-import org.example.ai.agent.modelusage.model.ModelCallContext;
+import org.example.ai.agent.common.modelusage.ModelCallContext;
+import org.example.ai.agent.common.modelusage.TrackedChatClientService;
 import org.example.ai.agent.modelusage.model.TokenUsageData;
 import org.example.ai.agent.modelusage.service.ModelUsageService;
 import org.example.ai.agent.modelusage.support.TokenUsageExtractor;
@@ -37,13 +39,13 @@ import java.util.Set;
 @Service
 @RequiredArgsConstructor
 public class DefaultAnswerComposer implements AnswerComposer {
-    private static final String PROVIDER_NAME = "openai-compatible";
-    private final ChatClient chatClient;
+
     private final ObjectMapper objectMapper;
-    private final ModelUsageService modelUsageService;
-    private final TokenUsageExtractor tokenUsageExtractor;
     private final FactCompletenessValidator factCompletenessValidator;
     private final DeterministicMarkdownRenderer markdownRenderer;
+    private final AgentAnswerProperties answerProperties;
+
+    private final TrackedChatClientService trackedChatClientService;
     @Override
     public String compose(AgentRequest request, RoutePlan routePlan, List<ToolResult> toolResults) {
         // 如果工具结果为空，直接返回兜底回答，避免让模型凭空发挥。
@@ -61,14 +63,29 @@ public class DefaultAnswerComposer implements AnswerComposer {
         /*
          * 收集标准事实并执行完整性检查。
          */
-        List<AnswerFact> facts =collectFacts(toolResults);
-        FactValidationResult validation =factCompletenessValidator.validate(facts);
-        /*
-         * 模型只接收精简事实，不接收 raw、data 和字段路径。
-         */
-        List<AnswerModelFact> modelFacts = buildModelFacts(facts);
+//        List<AnswerFact> facts =collectFacts(toolResults);
+//        FactValidationResult validation =factCompletenessValidator.validate(facts);
+//        /*
+//         * 模型只接收精简事实，不接收 raw、data 和字段路径。
+//         */
+//        List<AnswerModelFact> modelFacts = buildModelFacts(facts);
+//
+//        String businessDataJson = toJson(modelFacts);
+        List<AnswerFact> facts = collectFacts(toolResults);
 
-        String businessDataJson = toJson(modelFacts);
+        FactValidationResult validation = factCompletenessValidator.validate(facts);
+        /*
+         * structuredEnabled=false 时回退到历史精简上下文，
+         * 但仍然禁止发送 raw 和完整 ToolResult。
+         */
+        boolean useFactMode =answerProperties.isStructuredEnabled()
+                        && facts != null
+                        && !facts.isEmpty();
+
+        Object modelContext = useFactMode
+                ? buildModelFacts(facts)
+                : buildAnswerContexts(toolResults);
+        String businessDataJson = toJson(modelContext);
 //        // 字段字典解释：告诉大模型业务接口返回字段分别是什么意思。
 //        String fieldDictionaryText = buildFieldDictionaryText(toolResults);
         String systemPrompt = """
@@ -112,79 +129,29 @@ public class DefaultAnswerComposer implements AnswerComposer {
                 .callType(ModelCallType.ANSWER)
                 .callSequence(1)
                 .build();
-        long startTime = System.currentTimeMillis();
         /*
-         * 防止已经成功记录 Token 后，因为 LENGTH 等质量问题抛出异常，
-         * catch 中再次写入一条重复失败记录。
+         * 模型调用、Token、耗时、异常记录统一由
+         * TrackedChatClientService 完成。
          */
-        boolean usageRecorded = false;
-        try {
-            /*
-             * 兼容尚未产生标准事实的旧工具结果。
-             *
-             * 业务查询正常情况下应该存在 facts；
-             * 如果 facts 为空，暂时回退到第一阶段精简上下文，
-             * 避免一次性改造影响现有功能。
-             */
-            boolean useFactMode =facts != null && !facts.isEmpty();
-            /*
-             * 必须获取 ChatResponse，而不是只调用 content()，
-             * 因为 Token Usage 位于响应 metadata 中。
-             */
-            ChatResponse response = chatClient.prompt()
-                    .system(systemPrompt)
-                    .user(userPrompt)
-                    .call()
-                    .chatResponse();
-            long durationMs = System.currentTimeMillis() - startTime;
-            if (response == null || response.getResult() == null) {
-                throw new IllegalStateException("模型没有返回有效响应");
-            }
-            String content = response.getResult().getOutput().getText();
-            /*
-             * 空文本也不能当作一次成功回答。
-             */
-            if (!StringUtils.hasText(content)) {
-                throw new IllegalStateException("模型返回内容为空");
-            }
-            TokenUsageData usage = tokenUsageExtractor.extract(response);
-
-            String modelName = response.getMetadata() == null ? null: response.getMetadata().getModel();
-
-            String requestId = response.getMetadata() == null ? null : response.getMetadata().getId();
-
-            String finishReason = extractFinishReason(response);
-
-            recordSuccessSafely(callContext, modelName,requestId, usage,durationMs,finishReason );
-            usageRecorded = true;
-            /*
-             * LENGTH 表示达到最大输出 Token，
-             * 回答和 Markdown 很可能已经被截断，不能标记为正常完成。
-             */
-            if ("LENGTH".equalsIgnoreCase(finishReason)) {
-                throw new IllegalStateException("模型回答达到最大输出长度，内容可能不完整");
-            }
-            /*
-             * AI 只生成结论。
-             * 关键数据、明细表格和缺失字段由 Java 确定性生成。
-             */
-            if (useFactMode) {
-                return markdownRenderer.render(content,facts,validation );
-            }
-            return content;
-        } catch (Exception e) {
-            long durationMs = System.currentTimeMillis() - startTime;
-            /*
-             * 如果模型响应尚未成功记录，保存一次失败调用。
-             *
-             * 如果已记录真实 Token，例如 finishReason=LENGTH，
-             * 不再重复写入失败明细。
-             */
-            if (!usageRecorded) {
-                recordFailureSafely( callContext, durationMs, e.getMessage() );
-            }
-            throw e;
+        ChatResponse response = trackedChatClientService.call(
+                callContext,
+                systemPrompt,
+                userPrompt);
+        String content = response.getResult().getOutput().getText();
+        String finishReason = extractFinishReason(response);
+        /*
+         * LENGTH 表示模型输出可能被截断。
+         *
+         * Token 已经由统一调用服务记录，
+         * 此处只负责回答质量判断，不重复写入失败记录。
+         */
+        if ("LENGTH".equalsIgnoreCase(finishReason)) {
+            throw new IllegalStateException( "模型回答达到最大输出长度，内容可能不完整" );
         }
+        if (useFactMode && answerProperties.isDeterministicMarkdownEnabled()) {
+            return markdownRenderer.render(content, facts, validation);
+        }
+        return content;
     }
 
     /**
@@ -257,39 +224,6 @@ public class DefaultAnswerComposer implements AnswerComposer {
         }
         return String.valueOf(response.getResult().getMetadata().getFinishReason());
     }
-
-    /**
-     * 安全保存成功调用。
-     *
-     * Token 统计属于辅助功能，保存失败不能影响用户正常获得回答。
-     */
-    private void recordSuccessSafely( ModelCallContext context,String modelName,
-                                      String requestId,TokenUsageData usage,long durationMs,String finishReason ) {
-        try {
-            modelUsageService.recordSuccess(context, PROVIDER_NAME, modelName,
-                    requestId,usage,durationMs,finishReason );
-        } catch (Exception exception) {
-            log.error(
-                    "保存模型Token使用量失败，runId={}，错误={}",
-                    context.getRunId(),
-                    exception.getMessage(),
-                    exception
-            );
-        }
-    }
-    /**
-     * 安全保存失败调用。
-     */
-    private void recordFailureSafely( ModelCallContext context, long durationMs,String errorMessage) {
-        try {
-            modelUsageService.recordFailure( context, PROVIDER_NAME,null,durationMs,errorMessage);
-        } catch (Exception exception) {
-            log.error("保存模型失败调用记录异常，runId={}，错误={}", context.getRunId(), exception.getMessage(),exception );
-        }
-    }
-
-
-
 
     /**
      * 查找第一个失败的工具结果。

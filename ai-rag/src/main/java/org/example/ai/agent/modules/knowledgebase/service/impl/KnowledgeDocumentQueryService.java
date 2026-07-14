@@ -1,8 +1,11 @@
 package org.example.ai.agent.modules.knowledgebase.service.impl;
 
 import lombok.RequiredArgsConstructor;
+import org.example.ai.agent.common.enums.ModelCallType;
 import org.example.ai.agent.common.exception.BusinessException;
 import org.example.ai.agent.common.exception.ErrorCode;
+import org.example.ai.agent.common.modelusage.ModelCallContext;
+import org.example.ai.agent.common.modelusage.TrackedChatClientService;
 import org.example.ai.agent.modules.KnowledgeLog.entity.KnowledgeQueryLog;
 import org.example.ai.agent.modules.KnowledgeLog.entity.KnowledgeQueryReference;
 import org.example.ai.agent.modules.KnowledgeLog.service.KnowledgeQueryLogService;
@@ -14,6 +17,7 @@ import org.example.ai.agent.modules.knowledgebase.entity.KnowledgeDocument;
 import org.example.ai.agent.modules.knowledgebase.service.KnowledgeChunkService;
 import org.example.ai.agent.modules.knowledgebase.service.KnowledgeDocumentService;
 import org.springframework.ai.chat.client.ChatClient;
+import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.document.Document;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
@@ -44,10 +48,11 @@ public class KnowledgeDocumentQueryService {
 
     private final KnowledgeDocumentService documentService;
     private final ObjectProvider<KnowledgeBaseVectorService> vectorServiceProvider;
-    private final ObjectProvider<ChatClient.Builder> chatClientBuilderProvider;
     private final KnowledgeQueryLogService queryLogService;
     private final KnowledgeQueryReferenceService queryReferenceService;
     private final KnowledgeChunkService chunkService;
+
+    private final TrackedChatClientService trackedChatClientService;
 
     /**
      * 企业文档流式问答。
@@ -59,12 +64,17 @@ public class KnowledgeDocumentQueryService {
      * error：异常信息
      */
     public SseEmitter streamQuery(KnowledgeDocumentQueryRequest request) {
+        ModelCallContext context = ModelCallContext.builder()
+                .callType(ModelCallType.RAG)
+                .callSequence(1)
+                .build();
+
         SseEmitter emitter = new SseEmitter(0L);
-        CompletableFuture.runAsync(() -> doStreamQuery(request, emitter));
+        CompletableFuture.runAsync(() -> doStreamQuery(request, emitter, context));
         return emitter;
     }
 
-    private void doStreamQuery(KnowledgeDocumentQueryRequest request, SseEmitter emitter) {
+    private void doStreamQuery( KnowledgeDocumentQueryRequest request, SseEmitter emitter,ModelCallContext modelCallContext) {
         long start = System.currentTimeMillis();
         String question = normalizeQuestion(request);
         int topK = normalizeTopK(request);
@@ -85,12 +95,13 @@ public class KnowledgeDocumentQueryService {
                 return;
             }
 
-            requireChatClient()
-                    .prompt()
-                    .system(buildSystemPrompt())
-                    .user(buildUserPrompt(question,buildContext(hits)))
-                    .stream()
-                    .content()
+            trackedChatClientService.stream(
+                            modelCallContext,
+                            buildSystemPrompt(),
+                            buildUserPrompt(question, buildContext(hits))
+                    )
+                    .map(this::extractStreamContent)
+                    .filter(StringUtils::hasText)
                     .doOnNext(content -> {
                         if (StringUtils.hasText(content)) {
                             answerBuilder.append(content);
@@ -130,39 +141,71 @@ public class KnowledgeDocumentQueryService {
      * 企业文档普通问答。
      */
     public KnowledgeDocumentQueryResponse query(KnowledgeDocumentQueryRequest request) {
+        ModelCallContext context = ModelCallContext.builder()
+                .callType(ModelCallType.RAG)
+                .callSequence(1)
+                .build();
+        return query(request, context);
+    }
+
+    /**
+     * Agent 内部 RAG 调用。
+     *
+     * Agent 编排器可以传入 runId、conversationId、userId，
+     * 从而把 RAG Token 汇总到 ai_run_trace。
+     */
+    public KnowledgeDocumentQueryResponse query(KnowledgeDocumentQueryRequest request,ModelCallContext modelCallContext) {
         long start = System.currentTimeMillis();
         String question = normalizeQuestion(request);
         int topK = normalizeTopK(request);
         double minScore = normalizeMinScore(request);
         try {
             if (!StringUtils.hasText(question)) {
-                throw new BusinessException(ErrorCode.BAD_REQUEST, "问题不能为空");
+                throw new BusinessException( ErrorCode.BAD_REQUEST, "问题不能为空" );
             }
 
-            List<Document> hits = retrieveHits(request, question, topK, minScore);
+            List<Document> hits =retrieveHits(request, question, topK, minScore);
+
             if (hits.isEmpty()) {
-                saveQueryLog(question, NO_RESULT_RESPONSE, topK, minScore, "NO_RESULT", null, start);
+                saveQueryLog( question, NO_RESULT_RESPONSE, topK,
+                        minScore, "NO_RESULT",
+                        null, start);
                 return new KnowledgeDocumentQueryResponse(NO_RESULT_RESPONSE, List.of());
             }
 
-            String answer = requireChatClient()
-                    .prompt()
-                    .system(buildSystemPrompt())
-                    .user(buildUserPrompt(question,buildContext(hits)))
-                    .call()
-                    .content();
+            ChatResponse response = trackedChatClientService.call(
+                    modelCallContext,
+                    buildSystemPrompt(),
+                    buildUserPrompt(question, buildContext(hits)));
 
-            KnowledgeQueryLog queryLog = saveQueryLog(question, answer, topK, minScore, "SUCCESS", null, start);
+            String answer = response.getResult().getOutput().getText();
+            KnowledgeQueryLog queryLog = saveQueryLog(question,
+                    answer,
+                    topK,
+                    minScore,
+                    "SUCCESS",
+                    null,
+                    start );
+
             saveQueryReferences(queryLog.getId(), hits);
+
             return new KnowledgeDocumentQueryResponse(
-                    StringUtils.hasText(answer) ? answer.trim() : NO_RESULT_RESPONSE,
-                    buildReferences(hits)
-            );
-        } catch (Exception e) {
-            saveQueryLog(question, null, topK, minScore, "FAILED", e.getMessage(), start);
-            throw e;
+                    StringUtils.hasText(answer)
+                            ? answer.trim()
+                            : NO_RESULT_RESPONSE,
+                    buildReferences(hits) );
+        } catch (Exception exception) {
+            saveQueryLog( question,
+                    null,
+                    topK,
+                    minScore,
+                    "FAILED",
+                    exception.getMessage(),
+                    start );
+            throw exception;
         }
     }
+
 
     private List<Document> retrieveHits(KnowledgeDocumentQueryRequest request, String question, int topK, double minScore) {
         List<KnowledgeDocument> documents = findPublishedDocuments(request);
@@ -199,14 +242,6 @@ public class KnowledgeDocumentQueryService {
             throw new BusinessException(ErrorCode.KNOWLEDGE_BASE_QUERY_FAILED, "向量检索服务未启用");
         }
         return vectorService;
-    }
-
-    private ChatClient requireChatClient() {
-        ChatClient.Builder builder = chatClientBuilderProvider.getIfAvailable();
-        if (builder == null) {
-            throw new BusinessException(ErrorCode.AI_SERVICE_UNAVAILABLE, "AI 对话服务未启用");
-        }
-        return builder.build();
     }
 
     private String buildContext(List<Document> documents) {
@@ -372,5 +407,21 @@ public class KnowledgeDocumentQueryService {
 
     private double normalizeMinScore(KnowledgeDocumentQueryRequest request) {
         return request.minScore() == null ? DEFAULT_MIN_SCORE : request.minScore();
+    }
+
+    /**
+     * 从流式 ChatResponse 中安全读取增量文本。
+     */
+    private String extractStreamContent(ChatResponse response) {
+        if (response == null
+                || response.getResult() == null
+                || response.getResult().getOutput() == null
+                || response.getResult().getOutput().getText() == null) {
+            return "";
+        }
+
+        return response.getResult()
+                .getOutput()
+                .getText();
     }
 }

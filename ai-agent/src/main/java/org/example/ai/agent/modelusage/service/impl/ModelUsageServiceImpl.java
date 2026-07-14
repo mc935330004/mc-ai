@@ -3,11 +3,12 @@ package org.example.ai.agent.modelusage.service.impl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import lombok.RequiredArgsConstructor;
 import org.example.ai.agent.common.enums.TokenMeasureType;
+import org.example.ai.agent.common.modelusage.ModelCallContext;
 import org.example.ai.agent.modelusage.entity.ModelUsageRecord;
 import org.example.ai.agent.modelusage.mapper.ModelUsageMapper;
-import org.example.ai.agent.modelusage.model.ModelCallContext;
 import org.example.ai.agent.modelusage.model.TokenUsageData;
 import org.example.ai.agent.modelusage.service.ModelUsageService;
+import org.example.ai.agent.observability.AgentMetrics;
 import org.example.ai.agent.trace.mapper.RunTraceMapper;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
@@ -26,7 +27,7 @@ public class ModelUsageServiceImpl implements ModelUsageService {
 
     private final ModelUsageMapper modelUsageMapper;
     private final RunTraceMapper runTraceMapper;
-
+    private final AgentMetrics agentMetrics;
     /**
      * 使用独立事务保存 Token。
      *
@@ -36,8 +37,8 @@ public class ModelUsageServiceImpl implements ModelUsageService {
      */
     @Override
     @Transactional(propagation = Propagation.REQUIRES_NEW)
-    public void recordSuccess( ModelCallContext context, String provider,String modelName, String requestId,
-                               TokenUsageData usage,long durationMs,String finishReason) {
+    public void recordSuccess(ModelCallContext context, String provider, String modelName, String requestId,
+                              TokenUsageData usage, long durationMs, String finishReason) {
         TokenUsageData safeUsage = usage == null ? TokenUsageData.unknown() : usage;
         ModelUsageRecord record = buildBaseRecord(context);
         record.setProvider(provider);
@@ -63,6 +64,10 @@ public class ModelUsageServiceImpl implements ModelUsageService {
             runTraceMapper.incrementTokenUsage( context.getRunId(),safeUsage.getPromptTokens(),
                     safeUsage.getCompletionTokens(),safeUsage.getTotalTokens());
         }
+        String callType = context == null|| context.getCallType() == null ? "UNKNOWN"
+                : context.getCallType().name();
+
+        agentMetrics.recordModelCall( callType, true,durationMs,safeUsage.getTotalTokens());
     }
 
     /**
@@ -73,8 +78,15 @@ public class ModelUsageServiceImpl implements ModelUsageService {
      */
     @Override
     @Transactional(propagation = Propagation.REQUIRES_NEW)
-    public void recordFailure( ModelCallContext context, String provider,String modelName,
-                               long durationMs, String errorMessage) {
+    public void recordFailure( ModelCallContext context,
+                               String provider,
+                               String modelName,
+                               TokenUsageData usage,
+                               long durationMs,
+                               String errorMessage) {
+        TokenUsageData safeUsage = usage == null
+                ? TokenUsageData.unknown()
+                : usage;
         ModelUsageRecord record = buildBaseRecord(context);
         record.setProvider(provider);
         record.setModelName(modelName);
@@ -97,8 +109,15 @@ public class ModelUsageServiceImpl implements ModelUsageService {
          * Token 暂时按 0 累加，避免将未知 Token 伪造成真实值。
          */
         if (context != null && StringUtils.hasText(context.getRunId())) {
-            runTraceMapper.incrementTokenUsage(context.getRunId(),0,0,0 );
+            runTraceMapper.incrementTokenUsage(
+                    context.getRunId(),
+                    safeUsage.getPromptTokens(),
+                    safeUsage.getCompletionTokens(),
+                    safeUsage.getTotalTokens());
         }
+        String callType = context == null|| context.getCallType() == null ? "UNKNOWN"
+                : context.getCallType().name();
+        agentMetrics.recordModelCall(callType,false,durationMs,safeUsage.getTotalTokens());
     }
 
     @Override
