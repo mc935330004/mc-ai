@@ -33,8 +33,7 @@ import java.util.UUID;
 @ConditionalOnBean(VectorStore.class)
 public class CapabilityVectorIndexService {
 
-    private static final String DOCUMENT_TYPE =
-            "CAPABILITY";
+    private static final String DOCUMENT_TYPE = "CAPABILITY";
 
     private final VectorStore vectorStore;
     private final CapabilitySemanticTextBuilder semanticTextBuilder;
@@ -115,13 +114,11 @@ public class CapabilityVectorIndexService {
         if (!StringUtils.hasText(capabilityCode)) {
             return;
         }
-
         vectorStore.delete(
                 List.of(
                         buildDocumentId(capabilityCode)
                 )
         );
-
         log.info(
                 "能力向量索引已删除: capabilityCode={}",
                 capabilityCode

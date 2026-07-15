@@ -38,8 +38,7 @@ public class CapabilityRouteEvaluationServiceImpl
     private final ObjectMapper objectMapper;
 
     @Override
-    public CapabilityRouteEvalResultVO run(
-            CapabilityRouteEvalRequest request) {
+    public CapabilityRouteEvalResultVO run( CapabilityRouteEvalRequest request) {
 
         int limit =
                 request == null
@@ -63,14 +62,10 @@ public class CapabilityRouteEvaluationServiceImpl
                                 .last("LIMIT " + limit)
                 );
 
-        String evalRunId =
-                "eval-"
-                        + UUID.randomUUID()
-                        .toString()
+        String evalRunId ="eval-"+ UUID.randomUUID().toString()
                         .replace("-", "");
 
-        CapabilityRouteEvalRun evalRun =
-                new CapabilityRouteEvalRun();
+        CapabilityRouteEvalRun evalRun = new CapabilityRouteEvalRun();
 
         evalRun.setEvalRunId(evalRunId);
         evalRun.setStatus("RUNNING");
@@ -79,37 +74,23 @@ public class CapabilityRouteEvaluationServiceImpl
         evalRun.setFailedCount(0);
         evalRun.setAccuracy(BigDecimal.ZERO);
         evalRun.setStartedAt(LocalDateTime.now());
-
         evalRunMapper.insert(evalRun);
-
         int passedCount = 0;
-
         try {
             for (CapabilityRouteCase routeCase : cases) {
-                boolean passed =
-                        evaluateCase(
-                                evalRunId,
-                                routeCase
-                        );
-
+                boolean passed =evaluateCase(evalRunId,routeCase);
                 if (passed) {
                     passedCount++;
                 }
             }
 
-            int failedCount =
-                    cases.size() - passedCount;
+            int failedCount =cases.size() - passedCount;
 
-            BigDecimal accuracy =
-                    cases.isEmpty()
+            BigDecimal accuracy = cases.isEmpty()
                             ? BigDecimal.ZERO
-                            : BigDecimal.valueOf(
-                                    (double) passedCount
-                                            / cases.size()
-                            ).setScale(
+                            : BigDecimal.valueOf((double) passedCount/ cases.size() ).setScale(
                                     6,
-                                    RoundingMode.HALF_UP
-                            );
+                                    RoundingMode.HALF_UP);
 
             evalRun.setStatus("SUCCESS");
             evalRun.setPassedCount(passedCount);
@@ -128,9 +109,7 @@ public class CapabilityRouteEvaluationServiceImpl
                     .build();
         } catch (Exception exception) {
             evalRun.setStatus("FAILED");
-            evalRun.setErrorMessage(
-                    exception.getMessage()
-            );
+            evalRun.setErrorMessage(exception.getMessage());
             evalRun.setFinishedAt(LocalDateTime.now());
             evalRunMapper.updateById(evalRun);
 
@@ -138,36 +117,23 @@ public class CapabilityRouteEvaluationServiceImpl
         }
     }
 
-    private boolean evaluateCase(
-            String evalRunId,
-            CapabilityRouteCase routeCase) {
+    private boolean evaluateCase(String evalRunId,CapabilityRouteCase routeCase) {
 
-        long startTime =
-                System.currentTimeMillis();
+        long startTime =System.currentTimeMillis();
 
-        AgentRequest request =
-                new AgentRequest();
+        AgentRequest request =new AgentRequest();
 
         request.setConversationId(evalRunId);
         request.setUserId("ROUTE_EVALUATOR");
-        request.setUserQuestion(
-                routeCase.getUserQuestion()
-        );
+        request.setUserQuestion(routeCase.getUserQuestion());
 
-        String caseRunId =
-                evalRunId + "-case-" + routeCase.getId();
+        String caseRunId =evalRunId + "-case-" + routeCase.getId();
 
-        IntentResult actual =
-                intentRouter.route(
-                        request,
-                        caseRunId
-                );
+        IntentResult actual =intentRouter.route(request,caseRunId);
 
-        DynamicCapabilityPlan actualPlan =
-                actual.getDynamicCapabilityPlan();
+        DynamicCapabilityPlan actualPlan =actual.getDynamicCapabilityPlan();
 
-        String actualCapabilityCode =
-                actualPlan == null
+        String actualCapabilityCode =actualPlan == null
                         ? null
                         : actualPlan.getCapabilityCode();
 
@@ -297,12 +263,8 @@ public class CapabilityRouteEvaluationServiceImpl
             String actual) {
 
         try {
-            JsonNode expectedNode =
-                    objectMapper.readTree(expected);
-
-            JsonNode actualNode =
-                    objectMapper.readTree(actual);
-
+            JsonNode expectedNode =objectMapper.readTree(expected);
+            JsonNode actualNode =objectMapper.readTree(actual);
             return expectedNode.equals(actualNode);
         } catch (Exception exception) {
             return false;

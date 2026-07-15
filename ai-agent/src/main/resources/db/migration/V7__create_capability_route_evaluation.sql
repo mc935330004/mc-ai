@@ -124,62 +124,71 @@ COMMENT='AI能力路由回归测试样本';
 -- ============================================================
 -- 4. 一次评测任务
 -- ============================================================
-CREATE TABLE ai_capability_route_eval_run (
-  id BIGINT PRIMARY KEY AUTO_INCREMENT,
+CREATE TABLE `ai_capability_route_eval_run` (
+`id` BIGINT NOT NULL AUTO_INCREMENT COMMENT '主键ID',
 
-  eval_run_id VARCHAR(64) NOT NULL COMMENT '评测任务ID',
+`eval_run_id` VARCHAR(64) NOT NULL COMMENT '评测任务唯一标识',
 
-  status VARCHAR(32) NOT NULL
-      COMMENT 'RUNNING/SUCCESS/FAILED',
+`status` VARCHAR(32) NOT NULL
+    COMMENT '评测任务状态：RUNNING执行中，SUCCESS执行成功，FAILED执行失败',
 
-  total_count INT NOT NULL DEFAULT 0,
-  passed_count INT NOT NULL DEFAULT 0,
-  failed_count INT NOT NULL DEFAULT 0,
+`total_count` INT NOT NULL DEFAULT 0 COMMENT '评测用例总数量',
+`passed_count` INT NOT NULL DEFAULT 0 COMMENT '评测通过数量',
+`failed_count` INT NOT NULL DEFAULT 0 COMMENT '评测失败数量',
 
-  accuracy DECIMAL(8, 6) NOT NULL DEFAULT 0,
+`accuracy` DECIMAL(8, 6) NOT NULL DEFAULT 0
+    COMMENT '评测准确率，取值范围0到1，例如0.950000表示95%',
 
-  error_message VARCHAR(1000) DEFAULT NULL,
+`error_message` VARCHAR(1000) DEFAULT NULL COMMENT '任务执行失败错误信息',
 
-  started_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  finished_at DATETIME DEFAULT NULL,
+`started_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '任务开始时间',
+`finished_at` DATETIME DEFAULT NULL COMMENT '任务完成时间',
 
-  UNIQUE KEY uk_route_eval_run_id (eval_run_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-COMMENT='AI能力路由评测任务';
+PRIMARY KEY (`id`),
+
+UNIQUE KEY `uk_route_eval_run_id` (`eval_run_id`)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4
+  COLLATE = utf8mb4_unicode_ci
+  COMMENT = 'AI能力路由评测任务表';
 
 
 -- ============================================================
 -- 5. 每条样本的评测明细
 -- ============================================================
-CREATE TABLE ai_capability_route_eval_detail (
-     id BIGINT PRIMARY KEY AUTO_INCREMENT,
+CREATE TABLE `ai_capability_route_eval_detail` (
+   `id` BIGINT NOT NULL AUTO_INCREMENT COMMENT '主键ID',
 
-     eval_run_id VARCHAR(64) NOT NULL,
-     case_id BIGINT NOT NULL,
+   `eval_run_id` VARCHAR(64) NOT NULL COMMENT '评测运行批次ID',
+   `case_id` BIGINT NOT NULL COMMENT '评测用例ID',
 
-     user_question TEXT NOT NULL,
+   `user_question` TEXT NOT NULL COMMENT '用户原始问题',
 
-     expected_route_type VARCHAR(64) DEFAULT NULL,
-     actual_route_type VARCHAR(64) DEFAULT NULL,
+   `expected_route_type` VARCHAR(64) DEFAULT NULL COMMENT '预期路由类型',
+   `actual_route_type` VARCHAR(64) DEFAULT NULL COMMENT '实际路由类型',
 
-     expected_capability_code VARCHAR(128) DEFAULT NULL,
-     actual_capability_code VARCHAR(128) DEFAULT NULL,
+   `expected_capability_code` VARCHAR(128) DEFAULT NULL COMMENT '预期能力编码',
+   `actual_capability_code` VARCHAR(128) DEFAULT NULL COMMENT '实际能力编码',
 
-     expected_clarify TINYINT NOT NULL DEFAULT 0,
-     actual_clarify TINYINT NOT NULL DEFAULT 0,
+   `expected_clarify` TINYINT NOT NULL DEFAULT 0 COMMENT '预期是否需要澄清：0否，1是',
+   `actual_clarify` TINYINT NOT NULL DEFAULT 0 COMMENT '实际是否需要澄清：0否，1是',
 
-     expected_input_json JSON DEFAULT NULL,
-     actual_input_json JSON DEFAULT NULL,
+   `expected_input_json` JSON DEFAULT NULL COMMENT '预期能力调用入参JSON',
+   `actual_input_json` JSON DEFAULT NULL COMMENT '实际能力调用入参JSON',
 
-     passed TINYINT NOT NULL DEFAULT 0,
-     failure_reason VARCHAR(1000) DEFAULT NULL,
+   `passed` TINYINT NOT NULL DEFAULT 0 COMMENT '评测是否通过：0未通过，1通过',
+   `failure_reason` VARCHAR(1000) DEFAULT NULL COMMENT '评测失败原因',
 
-     duration_ms BIGINT NOT NULL DEFAULT 0,
+   `duration_ms` BIGINT NOT NULL DEFAULT 0 COMMENT '路由评测耗时，单位毫秒',
 
-     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+   `created_at` DATETIME NOT NULL  DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
 
-     KEY idx_route_eval_detail_run (eval_run_id),
-     KEY idx_route_eval_detail_case (case_id),
-     KEY idx_route_eval_detail_passed (passed)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-COMMENT='AI能力路由评测明细';
+   PRIMARY KEY (`id`),
+
+   KEY `idx_route_eval_detail_run` (`eval_run_id`),
+   KEY `idx_route_eval_detail_case` (`case_id`),
+   KEY `idx_route_eval_detail_passed` (`passed`)
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4
+  COLLATE = utf8mb4_unicode_ci
+  COMMENT = 'AI能力路由评测明细表';

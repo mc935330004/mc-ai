@@ -57,8 +57,7 @@ public class CapabilityRouteEvaluationController {
      */
     @PostMapping("/run")
     public Result<CapabilityRouteEvalResultVO> runEvaluation(
-            @RequestBody(required = false)
-            CapabilityRouteEvalRequest request) {
+            @RequestBody(required = false)CapabilityRouteEvalRequest request) {
 
         return Result.success( evaluationService.run(request));
     }
