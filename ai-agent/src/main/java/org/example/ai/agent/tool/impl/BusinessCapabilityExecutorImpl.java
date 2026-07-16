@@ -11,6 +11,7 @@ import org.example.ai.agent.answer.model.AnswerFact;
 import org.example.ai.agent.capability.entity.BusinessSystem;
 import org.example.ai.agent.capability.entity.CapabilityDefinition;
 import org.example.ai.agent.capability.entity.FieldDictionary;
+import org.example.ai.agent.capability.invocation.runtime.*;
 import org.example.ai.agent.capability.mapper.FieldDictionaryMapper;
 import org.example.ai.agent.capability.service.BusinessSystemService;
 import org.example.ai.agent.capability.service.CapabilityDefinitionService;
@@ -50,6 +51,10 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
     private final RestClient restClient;
     private final ObjectMapper objectMapper;
     private final BusinessSystemService businessSystemService;
+    private final CapabilityInvocationContextFactory invocationContextFactory;
+    private final CapabilityHttpRequestBuilder httpRequestBuilder;
+    private final CapabilityHttpInvoker httpInvoker;
+    private final CapabilityResponseInterpreter responseInterpreter;
     /**
      * 标准事实提取器。
      */
@@ -81,7 +86,7 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
                                        boolean adminReadTest) {
         String capabilityCode = step.getCapabilityCode();
         try {
-
+            try{
             CapabilityDefinition capability;
             if (adminReadTest) {
                 // 管理端允许读取尚未发布的草稿能力。
@@ -93,192 +98,123 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
             }
 
             if (capability == null) {
-                return fail(step,context,"CAPABILITY_NOT_FOUND",
+                return fail(step,safePublicInput(step),"CAPABILITY_NOT_FOUND",
                         "能力不存在或未启用：" + capabilityCode);
             }
 
             String sideEffect = capability.getSideEffect();
             // 危险能力当前始终禁止自动执行
             if ("DANGEROUS".equalsIgnoreCase(sideEffect)) {
-                return fail(step,context,"DANGEROUS_CAPABILITY_NOT_ALLOWED","危险能力禁止执行：" + capabilityCode);
+                return fail(step,safePublicInput(step),"DANGEROUS_CAPABILITY_NOT_ALLOWED","危险能力禁止执行：" + capabilityCode);
             }
             // WRITE 能力必须经过待确认操作入口
             if ("WRITE".equalsIgnoreCase(sideEffect) && !confirmedWrite) {
-                return fail(step,context,"WRITE_CONFIRM_REQUIRED","写操作必须经过用户确认：" + capabilityCode);
+                return fail(step,safePublicInput(step),"WRITE_CONFIRM_REQUIRED","写操作必须经过用户确认：" + capabilityCode);
             }
             // 防止错误配置绕过安全检查
             if (!"READ".equalsIgnoreCase(sideEffect) && !"WRITE".equalsIgnoreCase(sideEffect)) {
-                return fail(step, context,"INVALID_SIDE_EFFECT", "不支持的能力副作用类型：" + sideEffect);
+                return fail(step, safePublicInput(step),"INVALID_SIDE_EFFECT", "不支持的能力副作用类型：" + sideEffect);
             }
-            Map<String, Object> requestParams = resolveInput(context, step);
-            Object raw = invokeBusinessApi(capability, requestParams, idempotencyKey,context.getAuthorization());
-            List<FieldMeta> fields = loadFieldMetas(capabilityCode);
-            Object compactData = compactByFieldDictionary(raw, fields);
+            CapabilityInvocationContext invocationContext = invocationContextFactory.create(context,
+                            step);
+
+            CapabilityHttpRequest httpRequest =httpRequestBuilder.build(
+                            capability,
+                            invocationContext,
+                            idempotencyKey);
+            Object raw = httpInvoker.invoke(httpRequest);
+
             /*
-             * 新增标准事实提取。
-             *
-             * 最终回答优先使用 facts，
-             * 原有 data 暂时继续保留用于兼容。
+             * HTTP 2xx只表示传输成功。
+             * 继续根据responseBindingJson判断业务是否成功。
              */
-            List<AnswerFact> facts =dictionaryFactExtractor.extract(capabilityCode,raw,fields);
+            ResponseInterpretationResult interpreted =responseInterpreter.interpret(
+                            capability,
+                            raw,
+                            adminReadTest);
+
+            if (!interpreted.success()) {
+                return ToolResult.builder()
+                        .success(false)
+                        .capabilityCode(capabilityCode)
+                        .outputKey(step.getOutputKey())
+                        .businessCode(interpreted.businessCode())
+                        .businessMessage(interpreted.businessMessage())
+                        .errorCode(interpreted.errorCode())
+                        .errorMessage(interpreted.errorMessage())
+                        .summary("业务能力调用失败：" +interpreted.errorMessage())
+                        .input(httpRequest.getAuditInput())
+                        /*
+                         * 管理端测试需要查看原始响应。
+                         * 普通Agent运行不保存完整raw，
+                         * 防止敏感业务数据写入运行轨迹。
+                         */
+                        .raw(adminReadTest ? raw : null)
+                        .build();
+            }
+            List<FieldMeta> fields = loadFieldMetas(capabilityCode);
+            /*
+             * 没有字段字典时返回dataPath提取后的数据；
+             * 配置字段字典后，继续按原始响应绝对路径压缩。
+             */
+            Object compactData =compactByFieldDictionary(raw,interpreted.data(),fields);
+
+            List<AnswerFact> facts =dictionaryFactExtractor.extract(
+                            capabilityCode,
+                            raw,
+                            fields);
             return ToolResult.builder()
                     .success(true)
                     .capabilityCode(capabilityCode)
                     .outputKey(step.getOutputKey())
+                    .businessCode(interpreted.businessCode())
+                    .businessMessage(interpreted.businessMessage() )
+                    .emptyData(interpreted.emptyData())
                     .data(compactData)
                     .fields(fields)
                     .facts(facts)
-                    .summary("业务能力调用成功：" + capability.getCapabilityName())
-                    .raw(raw)
-                    .input(requestParams)
+                    .summary(interpreted.emptyData()
+                                    ? "业务能力调用成功，但未查询到数据：" +
+                                    capability.getCapabilityName()
+                                    : "业务能力调用成功：" +
+                                    capability.getCapabilityName())
+                    /*
+                     * 管理端测试保留raw，普通Agent不保留。
+                     */
+                    .raw(adminReadTest ? raw : null)
+                    .input(httpRequest.getAuditInput())
                     .build();
+                    } catch (CapabilityInvocationException exception) {
+                        /*
+                         * CapabilityInvocationException中的消息
+                         * 必须保证不包含Token、Cookie和完整响应正文。
+                         */
+                        return fail(
+                                step,
+                                safePublicInput(step),
+                                exception.getErrorCode(),
+                                exception.getMessage()
+                        );
+                    }
+
         } catch (Exception e) {
-            // 异常必须结构化返回，避免整个 Agent 链路直接中断。
-            return fail(step, context, "BUSINESS_API_ERROR", e.getMessage());
-        }
-    }
-    /**
-     * 合并当前步骤的直接入参和上游变量引用。
-     */
-    private Map<String, Object> resolveInput(ToolExecutionContext context, PlanStep step) {
-        Map<String, Object> params = new LinkedHashMap<>();
-
-        if (!CollectionUtils.isEmpty(step.getInput())) {
-            params.putAll(step.getInput());
-        }
-
-        if (!CollectionUtils.isEmpty(step.getInputRef())) {
-            step.getInputRef().forEach((paramName, expression) ->
-                    params.put(paramName, resolveVariable(context, expression))
+            /*
+             * 未知异常不能直接返回 exception.getMessage()，
+             * 其中可能包含URL Query、Header或业务响应正文。
+             */
+            return fail(
+                    step,
+                    safePublicInput(step),
+                    "BUSINESS_API_ERROR",
+                    "业务能力调用失败"
             );
         }
-
-        return params;
     }
-
-    /**
-     * 解析简单变量表达式。
-     *
-     * 当前只支持 $.变量名.字段名，例如 $.project.id。
-     */
-    private Object resolveVariable(ToolExecutionContext context, String expression) {
-        if (context == null || context.getVariables() == null) {
-            return null;
+    private Map<String, Object> safePublicInput(PlanStep step) {
+         if (step == null|| CollectionUtils.isEmpty(step.getInput())) {
+            return Map.of();
         }
-        if (!StringUtils.hasText(expression) || !expression.startsWith("$.")) {
-            return null;
-        }
-        String[] parts = expression.substring(2).split("\\.");
-        Object current = context.getVariables().get(parts[0]);
-        for (int i = 1; i < parts.length; i++) {
-            if (current instanceof Map<?, ?> map) {
-                current = map.get(parts[i]);
-            } else {
-                return null;
-            }
-        }
-        return current;
-    }
-
-    /**
-     * 调用真实业务系统接口。
-     */
-    private Object invokeBusinessApi(CapabilityDefinition capability, Map<String, Object> params,
-                                     String idempotencyKey,String authorization) {
-        if (!StringUtils.hasText(authorization)) {
-            throw new IllegalArgumentException("调用业务系统缺少 Authorization");
-        }
-        String url = resolveCapabilityUrl(capability);
-        String method = capability.getMethod();
-        if (!StringUtils.hasText(method)) {
-            throw new IllegalArgumentException("能力未配置请求方法：" + capability.getCapabilityCode());
-        }
-        if ("GET".equalsIgnoreCase(method)) {
-            UriComponentsBuilder uriBuilder = UriComponentsBuilder.fromUriString(url);
-            if (!CollectionUtils.isEmpty(params)) {
-                params.forEach((name, value) -> {
-                    if (value != null) {
-                        uriBuilder.queryParam(name, value);
-                    }
-                });
-            }
-            URI requestUri = uriBuilder.build().encode().toUri();
-
-            return restClient.get()
-                    // 使用URI对象后，不会与RestClient默认baseUrl重复拼接。
-                    .uri(requestUri)
-                    .header("Authorization", authorization)
-                    .retrieve()
-                    .body(Object.class);
-        }
-
-        if ("POST".equalsIgnoreCase(method)) {
-            URI requestUri = URI.create(url);
-            RestClient.RequestBodySpec request = restClient.post()
-                    // 绝对URI直接覆盖RestClient默认baseUrl。
-                    .uri(requestUri)
-                    .header("Authorization", authorization);
-            if (StringUtils.hasText(idempotencyKey)) {
-                request.header("Idempotency-Key",idempotencyKey);
-            }
-
-            return request.body(params == null ? Map.of() : params)
-                    .retrieve()
-                    .body(Object.class);
-        }
-        throw new IllegalArgumentException("不支持的请求方法：" + capability.getMethod());
-    }
-
-    /**
-     * 根据能力所属业务系统解析真实地址。
-     *
-     * 没有 systemCode 的旧能力继续使用默认 baseUrl。
-     */
-    private String resolveCapabilityUrl(CapabilityDefinition capability) {
-        String capabilityUrl = capability.getUrl();
-        if (!StringUtils.hasText(capabilityUrl)) {
-            throw new IllegalArgumentException("能力接口地址不能为空");
-        }
-        capabilityUrl = capabilityUrl.trim();
-        if (capabilityUrl.startsWith("http://") || capabilityUrl.startsWith("https://")) {
-            return capabilityUrl;
-        }
-        String targetBaseUrl = null;
-
-        if (StringUtils.hasText(capability.getSystemCode())) {
-            BusinessSystem system =businessSystemService.getEnabledByCode(capability.getSystemCode());
-
-            if (system == null) {
-                throw new IllegalArgumentException(
-                        "能力所属业务系统不存在或未启用：" + capability.getSystemCode());
-            }
-            targetBaseUrl = system.getBaseUrl();
-        }
-
-        // 历史能力没有systemCode时使用原来的默认配置。
-        if (!StringUtils.hasText(targetBaseUrl)) {
-            targetBaseUrl =businessApiProperties.getBaseUrl();
-        }
-
-        if (!StringUtils.hasText(targetBaseUrl)) {
-            throw new IllegalArgumentException("业务系统基础地址未配置");
-        }
-        return joinUrl(targetBaseUrl, capabilityUrl);
-    }
-    /**
-     * 拼接基础地址与接口相对路径。
-     */
-    private String joinUrl(String baseUrl,String path) {
-        String normalizedBaseUrl = baseUrl.trim();
-        String normalizedPath = path.trim();
-        if (normalizedBaseUrl.endsWith("/")
-                && normalizedPath.startsWith("/")) {
-            return normalizedBaseUrl.substring(0,normalizedBaseUrl.length() - 1) + normalizedPath;
-        }
-        if (!normalizedBaseUrl.endsWith("/") && !normalizedPath.startsWith("/")) {
-            return normalizedBaseUrl+ "/"+ normalizedPath;
-        }
-        return normalizedBaseUrl + normalizedPath;
+        return new LinkedHashMap<>(step.getInput());
     }
 
     /**
@@ -335,27 +271,44 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
      *
      * raw 保留原始接口返回；data 只保留字段字典配置过的字段。
      */
-    private Object compactByFieldDictionary(Object raw, List<FieldMeta> fields) {
-        if (raw == null || fields == null || fields.isEmpty()) {
-            return raw;
+    private Object compactByFieldDictionary(Object raw,Object interpretedData, List<FieldMeta> fields) {
+        /*
+         * 没有字段字典时，必须返回dataPath提取的数据，
+         * 不能再次返回完整raw。
+         */
+        if (fields == null || fields.isEmpty()) {
+            return interpretedData;
         }
-        JsonNode root = objectMapper.valueToTree(raw);
-        ObjectNode result = objectMapper.createObjectNode();
+        if (raw == null) {
+            return interpretedData;
+        }
+
+        JsonNode root =objectMapper.valueToTree(raw);
+
+        ObjectNode result =objectMapper.createObjectNode();
+
         for (FieldMeta field : fields) {
             if (!StringUtils.hasText(field.getPath())) {
                 continue;
             }
+
             if (field.getPath().contains("[]")) {
-                compactArrayField(root, result, field);
+                compactArrayField(
+                        root,
+                        result,
+                        field );
                 continue;
             }
-            JsonNode value = readBySimplePath(root, field.getPath());
+
+            JsonNode value =readBySimplePath(root, field.getPath());
+
             if (value == null || value.isMissingNode() || value.isNull()) {
                 continue;
             }
-            result.set(displayName(field), value);
+            result.set(displayName(field),value);
         }
-        return objectMapper.convertValue(result, Object.class);
+
+        return objectMapper.convertValue( result, Object.class );
     }
 
     /**

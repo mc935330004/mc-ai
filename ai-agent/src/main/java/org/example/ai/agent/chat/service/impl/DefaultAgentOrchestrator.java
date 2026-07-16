@@ -29,6 +29,11 @@ import org.example.ai.agent.tool.ToolExecutor;
 import org.example.ai.agent.tool.ToolResult;
 import org.example.ai.agent.trace.service.RunTraceService;
 import org.example.ai.agent.vo.ActionPreviewVO;
+import org.example.ai.agent.workflow.answer.WorkflowAnswerComposer;
+import org.example.ai.agent.workflow.plan.WorkflowPlan;
+import org.example.ai.agent.workflow.runtime.WorkflowExecutionCommand;
+import org.example.ai.agent.workflow.runtime.WorkflowExecutionFacade;
+import org.example.ai.agent.workflow.runtime.WorkflowExecutionOutcome;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
@@ -46,7 +51,9 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
     private final KnowledgeDocumentQueryService knowledgeDocumentQueryService;
 
     private final Executor agentChatExecutor;
+    private final WorkflowExecutionFacade workflowExecutionFacade;
 
+    private final WorkflowAnswerComposer workflowAnswerComposer;
     /**
      * 意图路由器。
      *
@@ -98,7 +105,9 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
             RunTraceService runTraceService,
             AnswerComposer answerComposer,
             PendingActionService pendingActionService,
-            ObjectMapper objectMapper
+            ObjectMapper objectMapper,
+            WorkflowExecutionFacade workflowExecutionFacade,
+            WorkflowAnswerComposer workflowAnswerComposer
     ) {
         this.streamSessionFactory = streamSessionFactory;
         this.knowledgeDocumentQueryService = knowledgeDocumentQueryService;
@@ -110,6 +119,9 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
         this.answerComposer = answerComposer;
         this.pendingActionService = pendingActionService;
         this.objectMapper = objectMapper;
+        this.workflowExecutionFacade = workflowExecutionFacade;
+        this.workflowAnswerComposer = workflowAnswerComposer;
+
     }
     @Override
     public SseEmitter chat(AgentRequest request) {
@@ -221,6 +233,36 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                 stream.complete();
                 return;
             }
+
+            if (intentResult.getRouteType() == RouteType.WORKFLOW_QUERY) {
+
+                WorkflowExecutionOutcome outcome = executeWorkflowQuery(
+                                request,
+                                stream,
+                                runId,
+                                intentResult );
+
+                long duration =System.currentTimeMillis() - startTime;
+
+                if (outcome.success()) {
+                    /*
+                     * 部分成功仍属于一次有效业务查询，
+                     * 具体失败项目已经写入批量摘要。
+                     */
+                    runTraceService.markSuccess(
+                            runId,
+                            duration
+                    );
+                } else {
+                    runTraceService.markFailed(
+                            runId,
+                            duration,
+                            outcome.errorMessage()
+                    );
+                }
+                return;
+            }
+
             // 写操作只发送预览，当前阶段绝不进入 ToolExecutor
             if (intentResult.getRouteType() == RouteType.WORKFLOW_ACTION) {
                 PendingAction pendingAction =pendingActionService.createPendingAction( runId,request.getUserId(),
@@ -529,5 +571,92 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                         .group(fact.getDisplayGroup())
                         .required(fact.isRequired())
                         .build()) .toList();
+    }
+
+    private WorkflowExecutionOutcome executeWorkflowQuery(
+            AgentRequest request,
+            AgentStreamSession stream,
+            String runId,
+            IntentResult intentResult) throws Exception {
+
+        WorkflowPlan plan =
+                intentResult.getWorkflowPlan();
+
+        if (plan == null || !plan.isReady()) {
+            throw new IllegalStateException(
+                    "缺少可执行工作流计划"
+            );
+        }
+
+        stream.send(
+                "thinking",
+                AgentStreamEvent.of(
+                        runId,
+                        AgentStreamEventType
+                                .THINKING
+                                .name(),
+                        "正在执行工作流："
+                                + plan.getWorkflowName(),
+                        null
+                )
+        );
+
+        WorkflowExecutionCommand command =WorkflowExecutionCommand.builder()
+                        .runId(runId)
+                        .userId(request.getUserId())
+                        .workflowCode(
+                                plan.getWorkflowCode()
+                        )
+                        .expectedVersionId(
+                                plan.getVersionId()
+                        )
+                        /*
+                         * 这里只允许使用Planner清洗后的input。
+                         * 不读取request.extra中的workflowCode或input。
+                         */
+                        .input(plan.getInput())
+                        .userContext(
+                                request.getPageContext()
+                                        == null
+                                        ? new LinkedHashMap<>()
+                                        : new LinkedHashMap<>(
+                                        request.getPageContext()
+                                )
+                        )
+                        .authorization(
+                                request.getAuthorization()
+                        )
+                        .secureContext(
+                                new LinkedHashMap<>()
+                        )
+                        .build();
+
+        WorkflowExecutionOutcome outcome =
+                workflowExecutionFacade.execute(
+                        command
+                );
+
+        stream.send(
+                "workflow_result",
+                AgentStreamEvent.of(
+                        runId,
+                        AgentStreamEventType.WORKFLOW_RESULT.name(),
+                        outcome.partialSuccess()
+                                ? "工作流执行完成，部分项目查询失败。"
+                                : "工作流执行完成。",
+                        outcome
+                )
+        );
+
+        String answer =
+                workflowAnswerComposer.compose(
+                        request,
+                        outcome
+                );
+
+        stream.publishAnswer(answer);
+        stream.complete();
+
+        return outcome;
     }
 }

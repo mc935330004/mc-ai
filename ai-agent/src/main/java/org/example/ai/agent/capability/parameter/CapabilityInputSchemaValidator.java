@@ -463,13 +463,42 @@ public class CapabilityInputSchemaValidator {
             errors.add(path + " 必须是数组");
             return INVALID_VALUE;
         }
+        /*
+         * 数组长度确定性校验。
+         */
+        if (schema.has("minItems") && collection.size() < schema.get("minItems").asInt()) {
+            errors.add(path + " 至少需要 "+ schema.get("minItems").asInt() + " 项");
+            return INVALID_VALUE;
+        }
 
-        JsonNode itemSchema =
-                schema.path("items");
+        if (schema.has("maxItems")&& collection.size() > schema.get("maxItems").asInt()) {
+            errors.add(path + " 最多允许 "+ schema.get("maxItems").asInt()+ " 项" );
+            return INVALID_VALUE;
+        }
+        /*
+         * uniqueItems=true时不允许重复项目。
+         */
+        if (schema.path("uniqueItems")
+                .asBoolean(false)) {
 
-        List<Object> result =
-                new ArrayList<>();
+            Set<JsonNode> uniqueValues =
+                    new LinkedHashSet<>();
 
+            for (Object item : collection) {
+                JsonNode itemNode =
+                        objectMapper.valueToTree(item);
+
+                if (!uniqueValues.add(itemNode)) {
+                    errors.add(
+                            path + " 不允许包含重复项"
+                    );
+
+                    return INVALID_VALUE;
+                }
+            }
+        }
+        JsonNode itemSchema =schema.path("items");
+        List<Object> result = new ArrayList<>();
         int index = 0;
 
         for (Object item : collection) {

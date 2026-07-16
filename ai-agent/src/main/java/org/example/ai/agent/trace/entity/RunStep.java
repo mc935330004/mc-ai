@@ -79,7 +79,15 @@ public class RunStep {
      * 步骤耗时，单位毫秒。
      */
     private Long durationMs;
+    /**
+     * 节点 ID。
+     */
+    private String nodeId;
 
+    /**
+     * 执行路径。
+     */
+    private String executionPath;
     /**
      * 创建时间。
      */

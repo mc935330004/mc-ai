@@ -77,8 +77,8 @@ document:
     # Docling 文件解析接口路径，环境不同优先只覆盖 url
     path: /api/parse/sync
     # Docling 服务地址，生产环境建议通过 DOCLING_URL 注入
-    url: http://localhost:8001
-#    url: http://192.168.12.84:8001
+#    url: http://localhost:8001
+    url: http://192.168.12.84:8001
     # 连接 Docling 的超时时间，单位毫秒
     connect-timeout-ms: 10000
     # 等待 Docling 解析结果的超时时间，单位毫秒
@@ -161,3 +161,21 @@ agent:
     min-recall-score: 0.06
     min-confidence: 0.75
     min-score-margin: 0.12
+ai:
+  graph:
+    runtime:
+      # DAG普通分支执行线程数。
+      # FOREACH并发限制将在L1-3单独控制。
+      worker-threads: 8
+      # 项目级并发线程数，最大5
+      foreach-worker-threads: 5
+  workflow:
+    run-recovery:
+      # 是否开启卡死运行自动恢复
+      enabled: true
+      # RUNNING 超过 30 分钟仍未完成，自动标记为 FAILED
+      timeout-minutes: 30
+      # 服务启动 30 秒后执行第一次恢复
+      initial-delay-ms: 30000
+      # 此后每 60 秒检查一次
+      fixed-delay-ms: 60000

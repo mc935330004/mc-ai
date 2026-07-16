@@ -19,4 +19,8 @@ public class CapabilityPublishResultVO {
      * 本次成功发布的能力编码。
      */
     private List<String> capabilityCodes;
+
+    private Integer createdVersionCount;
+    private Integer reusedVersionCount;
+    private List<CapabilityPublishedVersionVO> versions;
 }

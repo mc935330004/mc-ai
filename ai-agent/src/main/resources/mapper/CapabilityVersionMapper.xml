@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="org.example.ai.agent.capability.mapper.CapabilityVersionMapper">
+
+    <select id="selectLatestByCapabilityId"
+            resultType="org.example.ai.agent.capability.entity.CapabilityVersion">
+        SELECT * FROM ai_capability_version
+        WHERE capability_id = #{capabilityId}
+        ORDER BY version_no DESC
+         LIMIT 1
+    </select>
+
+    <update id="retireActiveVersions">
+        UPDATE ai_capability_version SET status = 'RETIRED', retired_at = NOW()
+        WHERE capability_id = #{capabilityId} AND status = 'ACTIVE'
+    </update>
+</mapper>

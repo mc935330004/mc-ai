@@ -109,4 +109,14 @@ public class RunTrace {
      * 本次运行累计模型调用次数。
      */
     private Integer modelCallCount;
+
+    /**
+     * 工作流代码。
+     */
+    private String workflowCode;
+
+    /**
+     * 工作流版本 ID。
+     */
+    private Long workflowVersionId;
 }

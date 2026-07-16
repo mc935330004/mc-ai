@@ -74,4 +74,21 @@ public class RunTraceServiceImpl implements RunTraceService {
         runTraceMapper.update(trace, new LambdaUpdateWrapper<RunTrace>().eq(RunTrace::getRunId, runId));
         agentMetrics.recordRun(RunStatus.FAILED,totalDurationMs);
     }
+
+    @Override
+    public void bindWorkflow(String runId, String workflowCode, Long workflowVersionId) {
+        RunTrace update = new RunTrace();
+
+        update.setWorkflowCode(workflowCode);
+        update.setWorkflowVersionId( workflowVersionId);
+        update.setUpdatedAt(LocalDateTime.now());
+
+        int affected = runTraceMapper.update(
+                update,new LambdaUpdateWrapper<RunTrace>()
+                        .eq(RunTrace::getRunId, runId));
+
+        if (affected != 1) {
+            throw new IllegalStateException("绑定工作流运行版本失败，runId=" + runId );
+        }
+    }
 }

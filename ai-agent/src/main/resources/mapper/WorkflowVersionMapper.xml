@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="org.example.ai.agent.workflow.mapper.WorkflowVersionMapper">
+
+    <select id="selectLatestByWorkflowId"
+            resultType="org.example.ai.agent.workflow.entity.WorkflowVersion">
+        SELECT *  FROM ai_workflow_version
+        WHERE workflow_id = #{workflowId}
+        ORDER BY version_no DESC
+         LIMIT 1
+    </select>
+
+    <update id="retireActiveVersions">
+        UPDATE ai_workflow_version SET status = 'RETIRED', retired_at = NOW()
+        WHERE workflow_id = #{workflowId} AND status = 'ACTIVE'
+    </update>
+</mapper>

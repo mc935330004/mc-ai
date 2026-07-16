@@ -19,4 +19,22 @@
         </where>
         order by updated_at desc
     </select>
+    <select id="selectByIdForUpdate"
+            resultType="org.example.ai.agent.capability.entity.CapabilityDefinition">
+        SELECT *
+        FROM ai_capability_definition
+        WHERE id = #{id}
+        FOR UPDATE
+    </select>
+
+    <select id="selectByCodesForUpdate"
+            resultType="org.example.ai.agent.capability.entity.CapabilityDefinition">
+        SELECT * FROM ai_capability_definition
+        WHERE capability_code IN
+        <foreach collection="codes" item="code" open="(" separator="," close=")">
+            #{code}
+        </foreach>
+        ORDER BY id desc
+        FOR UPDATE
+    </select>
 </mapper>

@@ -54,5 +54,12 @@ public enum RouteType {
     /**
      * 危险或超出范围的问题，直接拒绝。
      */
-    REJECT
+    REJECT,
+    /**
+     * 已发布GraphSpec查询工作流。
+     *
+     * 和WORKFLOW_ACTION不同：
+     * WORKFLOW_QUERY只允许READ能力，可以自动执行。
+     */
+    WORKFLOW_QUERY,
 }

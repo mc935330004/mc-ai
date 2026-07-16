@@ -86,6 +86,13 @@ public class CapabilitySaveDTO {
     private String requestContentType;
 
     /**
+     * 单次业务 API 调用超时时间，单位毫秒。
+     *
+     * 如果为空，Service 中默认使用 5000 毫秒。
+     */
+    private Integer timeoutMs;
+
+    /**
      * 是否需要用户确认。
      */
     private Boolean requireConfirm;
@@ -109,4 +116,24 @@ public class CapabilitySaveDTO {
      * 发布状态：DRAFT 草稿、PUBLISHED 已发布、DISABLED 已停用。
      */
     private String publishStatus;
+
+    /**
+     * 请求参数绑定配置 JSON。
+     *
+     * 草稿阶段可以为空；
+     * 正式发布前必须配置并通过校验。
+     */
+    private String requestBindingJson;
+
+    /**
+     * 响应解释配置 JSON。
+     *
+     * L0-4 阶段将增加完整语义校验。
+     */
+    private String responseBindingJson;
+
+    /**
+     * 管理备注。
+     */
+    private String remark;
 }

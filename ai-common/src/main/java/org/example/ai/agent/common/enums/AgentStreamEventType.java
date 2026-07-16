@@ -70,5 +70,9 @@ public enum AgentStreamEventType {
     /**
      * 处理失败。
      */
-    ERROR
+    ERROR,
+    /**
+     * 已发布工作流执行结果。
+     */
+    WORKFLOW_RESULT,
 }

@@ -6,6 +6,8 @@ import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 import org.example.ai.agent.capability.entity.CapabilityDefinition;
 
+import java.util.List;
+
 /**
  * AI 能力定义 Mapper。
  *
@@ -21,4 +23,8 @@ public interface CapabilityDefinitionMapper extends BaseMapper<CapabilityDefinit
                                                 @Param("keyword") String keyword,
                                                 @Param("domain") String domain,
                                                 @Param("enabled") Integer enabled);
+
+    CapabilityDefinition selectByIdForUpdate(@Param("id") Long id );
+
+    List<CapabilityDefinition> selectByCodesForUpdate(@Param("codes") List<String> codes);
 }

@@ -104,4 +104,19 @@ public class PlanStep {
      * 当 stepType = LLM_SUMMARY 时常用。
      */
     private List<String> inputKeys;
+
+    /**
+     * stepType=WORKFLOW时使用。
+     */
+    private String workflowCode;
+
+    /**
+     * Graph节点ID。
+     */
+    private String nodeId;
+
+    /**
+     * Graph节点执行路径。
+     */
+    private String executionPath;
 }

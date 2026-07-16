@@ -73,8 +73,7 @@ public class DynamicCapabilityPlanner {
          *
          * 不再把数据库中全部能力直接交给大模型。
          */
-         candidates =
-                candidateRetriever.retrieve(userQuestion);
+         candidates = candidateRetriever.retrieve(userQuestion);
 
         if (candidates.isEmpty()) {
             DynamicCapabilityPlan result = unmatched("没有召回到相关业务能力",

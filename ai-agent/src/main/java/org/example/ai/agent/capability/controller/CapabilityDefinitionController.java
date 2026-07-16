@@ -110,9 +110,12 @@ public class CapabilityDefinitionController {
                 .outputKey("testResult")
                 .build();
 
-        ToolExecutionContext context = ToolExecutionContext.builder()
-                .variables(new LinkedHashMap<>())
-                .build();
+        ToolExecutionContext context =ToolExecutionContext.builder()
+                        .userId(currentUserProvider.getRequiredUserId())
+                        .authorization(currentUserProvider.getRequiredAuthorization())
+                        .variables(new LinkedHashMap<>())
+                        .secureContext(new LinkedHashMap<>())
+                        .build();
 
         ToolResult result = businessCapabilityExecutor.execute(context, step);
         fieldDictionaryService.generateFromJson(FieldDictionaryGenerateDTO.builder()
@@ -210,7 +213,8 @@ public class CapabilityDefinitionController {
      */
     @PostMapping("/publish")
     public Result<CapabilityPublishResultVO> publish(@RequestBody CapabilityBatchPublishDTO dto) {
-        return Result.success(capabilityDefinitionService.publishCapabilities(dto.getCapabilityCodes()));
+        return Result.success(capabilityDefinitionService.publishCapabilities(dto.getCapabilityCodes(),
+                currentUserProvider.getRequiredUserId()));
     }
 
     /**

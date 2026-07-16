@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="org.example.ai.agent.workflow.run.mapper.WorkflowRunMapper">
+
+    <select id="selectByRunIdForUpdate"
+            resultType="org.example.ai.agent.workflow.run.entity.WorkflowRun">
+        SELECT * FROM ai_workflow_run
+        WHERE run_id = #{runId}
+         FOR UPDATE
+    </select>
+
+    <select id="pageRuns"
+            resultType="org.example.ai.agent.workflow.run.entity.WorkflowRun">
+        SELECT * FROM ai_workflow_run
+        <where>
+            <!-- 当前阶段只能查看自己的运行记录。 -->
+            user_id = #{userId}
+            <if test="workflowCode != null and workflowCode != ''">
+                AND workflow_code = #{workflowCode}
+            </if>
+
+            <if test="status != null and status != ''">
+                AND status = #{status}
+            </if>
+
+            <if test="origin != null and origin != ''">
+                AND origin = #{origin}
+            </if>
+        </where>
+        ORDER BY started_at DESC
+    </select>
+    <update id="failStaleRunningRuns">
+        UPDATE ai_workflow_run
+        SET status = 'FAILED',
+            error_code = #{errorCode},
+            error_message = #{errorMessage},
+            duration_ms = GREATEST(0,TIMESTAMPDIFF( MICROSECOND, started_at,#{finishedAt} ) DIV 1000 ),
+            finished_at = #{finishedAt}
+        WHERE status = 'RUNNING'
+          AND started_at &lt; #{cutoff}
+    </update>
+</mapper>

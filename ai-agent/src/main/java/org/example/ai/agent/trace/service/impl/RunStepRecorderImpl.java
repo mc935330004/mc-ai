@@ -52,6 +52,8 @@ public class RunStepRecorderImpl implements RunStepRecorder {
         runStep.setCapabilityCode(step.getCapabilityCode());
         runStep.setInputJson(toJson(input));
         runStep.setDurationMs(durationMs);
+        runStep.setNodeId(step.getNodeId());
+        runStep.setExecutionPath(step.getExecutionPath());
         return runStep;
     }
 

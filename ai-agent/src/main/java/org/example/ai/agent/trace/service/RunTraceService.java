@@ -29,4 +29,9 @@ public interface RunTraceService {
      * 标记运行失败。
      */
     void markFailed(String runId, long totalDurationMs, String errorMessage);
+
+    /**
+     * 绑定本次实际执行的工作流版本。
+     */
+    void bindWorkflow(String runId,String workflowCode, Long workflowVersionId);
 }

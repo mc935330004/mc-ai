@@ -4,6 +4,7 @@ import lombok.RequiredArgsConstructor;
 import org.example.ai.agent.chat.entity.AgentRequest;
 import org.example.ai.agent.router.IntentResult;
 import org.example.ai.agent.router.RouteType;
+import org.example.ai.agent.workflow.plan.WorkflowPlan;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
@@ -22,12 +23,26 @@ public class PlanTemplateRegistry {
      */
     public RoutePlan buildPlan(String runId, AgentRequest request, IntentResult intentResult) {
         RouteType routeType = intentResult.getRouteType();
+        if (routeType == RouteType.WORKFLOW_QUERY) {
+            return buildWorkflowQueryPlan(
+                    runId,
+                    request,
+                    intentResult
+            );
+        }
+        if (routeType == RouteType.BUSINESS_QUERY
+                || routeType == RouteType.MIXED_QUERY
+                || routeType == RouteType.STATISTIC_QUERY) {
 
+            return buildDynamicBusinessPlan(
+                    runId,
+                    request,
+                    routeType,
+                    intentResult
+            );
+        }
         if (routeType == RouteType.RAG_ONLY) {
             return buildRagOnlyPlan(runId, request);
-        }
-        if (routeType == RouteType.BUSINESS_QUERY) {
-            return buildDynamicBusinessPlan( runId, request,routeType,intentResult);
         }
         if (routeType == RouteType.WORKFLOW_ACTION) {
             return buildWorkflowActionPlan(runId, request, intentResult);
@@ -37,7 +52,37 @@ public class PlanTemplateRegistry {
         }
         return buildClarifyPlan(runId, request, intentResult);
     }
+    private RoutePlan buildWorkflowQueryPlan(
+            String runId,
+            AgentRequest request,
+            IntentResult intentResult) {
 
+        WorkflowPlan workflowPlan =intentResult.getWorkflowPlan();
+
+        if (workflowPlan == null || !workflowPlan.isReady()) {
+            throw new IllegalStateException("工作流路由缺少有效WorkflowPlan");
+        }
+
+        return RoutePlan.builder()
+                .runId(runId)
+                .routeType(RouteType.WORKFLOW_QUERY)
+                .userQuestion( request.getUserQuestion())
+                .goal("执行已发布工作流：" + workflowPlan.getWorkflowName())
+                .steps(List.of(PlanStep.builder()
+                                .stepNo(1)
+                                .stepType( StepType.WORKFLOW)
+                                .stepName("执行工作流：" + workflowPlan.getWorkflowName())
+                                .workflowCode(workflowPlan.getWorkflowCode() )
+                                .input(workflowPlan.getInput())
+                                .outputKey("workflowResult" )
+                                .build(),
+                        PlanStep.builder() .stepNo(2).stepType(StepType.LLM_SUMMARY)
+                                .stepName("总结工作流查询结果")
+                                .inputKeys( List.of("workflowResult"))
+                                .outputKey("finalAnswer")
+                                .build()
+                )).build();
+    }
     /**
      * 纯知识库问答计划。
      */

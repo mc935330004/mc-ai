@@ -63,7 +63,7 @@ public interface CapabilityDefinitionService extends IService<CapabilityDefiniti
      *
      * 全部能力校验通过后才会统一发布。
      */
-    CapabilityPublishResultVO publishCapabilities(List<String> capabilityCodes);
+    CapabilityPublishResultVO publishCapabilities(List<String> capabilityCodes,String publishedBy);
 
     /**
      * 查询 Agent 当前允许调用的能力。

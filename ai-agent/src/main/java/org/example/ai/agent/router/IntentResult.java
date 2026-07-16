@@ -3,7 +3,7 @@ package org.example.ai.agent.router;
 import lombok.Builder;
 import lombok.Data;
 import org.example.ai.agent.plan.DynamicCapabilityPlan;
-
+import org.example.ai.agent.workflow.plan.WorkflowPlan;
 import java.util.List;
 import java.util.Map;
 
@@ -68,4 +68,11 @@ public class IntentResult {
      * 避免同一次请求重复选择能力导致结果不一致。
      */
     private DynamicCapabilityPlan dynamicCapabilityPlan;
+
+
+
+    /**
+     * 已选中的工作流计划。
+     */
+    private WorkflowPlan workflowPlan;
 }

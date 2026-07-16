@@ -4,6 +4,7 @@ import lombok.Builder;
 import lombok.Data;
 
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
@@ -48,4 +49,25 @@ public class ToolExecutionContext {
      * 调用业务系统使用的认证信息，不允许写入日志和数据库
      */
     private String authorization;
+
+    /**
+     * ForEach 当前循环项。
+     *
+     * 普通能力调用可以为空；
+     * 后续多项目循环时通过 $item 访问。
+     */
+    private Object currentItem;
+
+    /**
+     * 服务端生成的安全上下文。
+     *
+     * 只能由后端写入，不能直接接受前端或大模型赋值。
+     *
+     * 示例：
+     * tenantId
+     * organizationId
+     * deptId
+     */
+    @Builder.Default
+    private Map<String, Object> secureContext = new LinkedHashMap<>();
 }

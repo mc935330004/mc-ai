@@ -55,4 +55,12 @@ public enum StepType {
      * 该步骤只展示操作内容，不调用业务系统。
      */
     ACTION_PREVIEW,
+    /**
+     * 执行已发布GraphSpec工作流。
+     */
+    WORKFLOW,
+    /**
+     * START、FOREACH、MERGE、END等Graph节点。
+     */
+    GRAPH_NODE,
 }

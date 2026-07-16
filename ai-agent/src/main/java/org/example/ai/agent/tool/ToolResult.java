@@ -38,6 +38,26 @@ public class ToolResult {
     private Object data;
 
     /**
+     * 业务系统返回的业务状态码。
+     *
+     * 例如：200、0、SUCCESS。
+     */
+    private String businessCode;
+
+    /**
+     * 业务系统返回的消息。
+     */
+    private String businessMessage;
+
+    /**
+     * 是否为空数据。
+     *
+     * 空数组、空对象、null都为true。
+     * 后续GraphSpec可以通过这个字段进行条件判断。
+     */
+    private boolean emptyData;
+
+    /**
      * 字段语义说明。
      */
     private List<FieldMeta> fields;

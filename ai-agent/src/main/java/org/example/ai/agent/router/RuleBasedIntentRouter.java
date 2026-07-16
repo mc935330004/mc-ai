@@ -4,9 +4,12 @@ import cn.hutool.core.collection.CollectionUtil;
 import lombok.RequiredArgsConstructor;
 import org.example.ai.agent.chat.entity.AgentRequest;
 import org.example.ai.agent.common.enums.ModelCallType;
+import org.example.ai.agent.common.enums.WorkflowPlanStatus;
 import org.example.ai.agent.common.modelusage.ModelCallContext;
 import org.example.ai.agent.plan.DynamicCapabilityPlan;
 import org.example.ai.agent.plan.DynamicCapabilityPlanner;
+import org.example.ai.agent.workflow.plan.WorkflowPlan;
+import org.example.ai.agent.workflow.plan.WorkflowPlanner;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
@@ -35,6 +38,7 @@ public class RuleBasedIntentRouter implements IntentRouter {
      * 根据数据库中的已启用能力匹配用户问题。
      */
     private final DynamicCapabilityPlanner dynamicCapabilityPlanner;
+    private final WorkflowPlanner workflowPlanner;
     /**
      * 业务数据类关键词。
      *
@@ -251,6 +255,53 @@ public class RuleBasedIntentRouter implements IntentRouter {
      */
     private IntentResult routeBusiness(String question, RouteType routeType,List<String> matchedKeywords,String routeReason,
             double confidence,ModelCallContext plannerContext) {
+        WorkflowPlan workflowPlan =
+                workflowPlanner.plan(
+                        question,
+                        plannerContext
+                );
+
+        if (workflowPlan.getStatus()== WorkflowPlanStatus.NEED_CLARIFY) {
+            return IntentResult.builder()
+                    .routeType(RouteType.CLARIFY)
+                    .confidence(
+                            workflowPlan.getConfidence()
+                    )
+                    .reason(workflowPlan.getReason())
+                    .needClarify(true)
+                    .clarifyQuestion(
+                            workflowPlan
+                                    .getClarifyQuestion()
+                    )
+                    .matchedKeywords(
+                            matchedKeywords
+                    )
+                    .entities(Map.of())
+                    .workflowPlan(workflowPlan)
+                    .build();
+        }
+
+        if (workflowPlan.isReady()) {
+            return IntentResult.builder()
+                    .routeType(
+                            RouteType.WORKFLOW_QUERY
+                    )
+                    .confidence(
+                            workflowPlan.getConfidence()
+                    )
+                    .reason(
+                            routeReason + "；命中已发布工作流："
+                                    + workflowPlan
+                                    .getWorkflowName()
+                    )
+                    .needClarify(false)
+                    .matchedKeywords(
+                            matchedKeywords
+                    )
+                    .entities(Map.of())
+                    .workflowPlan(workflowPlan)
+                    .build();
+        }
         DynamicCapabilityPlan dynamicPlan =dynamicCapabilityPlanner.plan(question, plannerContext);
         // 没有匹配能力时不能调用业务接口，转为追问用户
         if (!dynamicPlan.isMatched()) {

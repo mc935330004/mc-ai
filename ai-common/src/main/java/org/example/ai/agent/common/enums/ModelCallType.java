@@ -44,5 +44,15 @@ public enum ModelCallType {
     /**
      * 直接聊天。
      */
-    DIRECT_CHAT
+    DIRECT_CHAT,
+
+    /**
+     * 已发布工作流选择。
+     */
+    WORKFLOW_PLANNER,
+
+/**
+ * 已选工作流参数提取。
+ */
+    WORKFLOW_PARAMETER_EXTRACTOR,
 }
