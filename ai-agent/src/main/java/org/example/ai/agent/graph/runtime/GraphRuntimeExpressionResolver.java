@@ -60,25 +60,16 @@ public class GraphRuntimeExpressionResolver {
         );
     }
 
-    public Map<String, Object> resolveMap(
-            Map<String, Object> source,
-            GraphExecutionContext context) {
+    public Map<String, Object> resolveMap(Map<String, Object> source,GraphExecutionContext context) {
 
-        Map<String, Object> result =
-                new LinkedHashMap<>();
+        Map<String, Object> result = new LinkedHashMap<>();
 
         if (source == null) {
             return result;
         }
 
         source.forEach((key, value) ->
-                result.put(
-                        key,
-                        resolveConfiguredValue(
-                                value,
-                                context
-                        )
-                )
+                result.put(key, resolveConfiguredValue( value,context ))
         );
 
         return result;

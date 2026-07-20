@@ -155,17 +155,11 @@ public class WorkflowDefinitionController {
         );
     }
     @PostMapping("/{id}/debug")
-    public Result<WorkflowExecutionOutcome> debug(@PathVariable Long id,
-                                                  @RequestBody(required = false) WorkflowDebugRequestDTO request) {
+    public Result<WorkflowExecutionOutcome> debug(@PathVariable Long id, @RequestBody(required = false) WorkflowDebugRequestDTO request) {
         return Result.success(
-                workflowDebugService.debug(
-                        id,
-                        request,
-                        currentUserProvider
-                                .getRequiredUserId(),
-                        currentUserProvider
-                                .getRequiredAuthorization()
-                )
+                workflowDebugService.debug(id, request,
+                        currentUserProvider.getRequiredUserId(),
+                        currentUserProvider.getRequiredAuthorization())
         );
     }
 }

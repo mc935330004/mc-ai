@@ -209,8 +209,7 @@ public class GraphSpecCompiler {
                 endNodeIds.add(node.getId());
             }
 
-            GraphNodeConfig config =
-                    compileNodeConfig(
+            GraphNodeConfig config = compileNodeConfig(
                             node,
                             graphPath,
                             depth,
@@ -602,9 +601,7 @@ public class GraphSpecCompiler {
         }
 
         try {
-            if (!capabilityCatalog.isCallable(
-                    config.capabilityCode())) {
-
+            if (!capabilityCatalog.isCallable( config.capabilityCode())) {
                 addNodeError(
                         errors,
                         "GRAPH_CAPABILITY_NOT_CALLABLE",

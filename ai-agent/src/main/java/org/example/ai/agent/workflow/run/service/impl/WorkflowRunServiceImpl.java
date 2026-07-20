@@ -44,8 +44,7 @@ public class WorkflowRunServiceImpl extends ServiceImpl<WorkflowRunMapper,Workfl
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public WorkflowRun start(
-            WorkflowRunStartCommand command) {
+    public WorkflowRun start( WorkflowRunStartCommand command) {
 
         if (command == null
                 || !StringUtils.hasText(
@@ -64,13 +63,10 @@ public class WorkflowRunServiceImpl extends ServiceImpl<WorkflowRunMapper,Workfl
                 command.agentRunId()
         );
 
-        run.setRootRunId(
-                StringUtils.hasText(
-                        command.rootRunId()
-                )
+        run.setRootRunId( StringUtils.hasText(
+                        command.rootRunId() )
                         ? command.rootRunId()
-                        : command.runId()
-        );
+                        : command.runId());
 
         run.setSourceRunId(
                 command.sourceRunId()

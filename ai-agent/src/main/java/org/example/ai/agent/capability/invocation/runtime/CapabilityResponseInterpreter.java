@@ -37,10 +37,7 @@ public class CapabilityResponseInterpreter {
      * @param raw                         原始HTTP响应
      * @param allowMissingBindingForDraft 是否允许草稿没有响应绑定
      */
-    public ResponseInterpretationResult interpret(
-            CapabilityDefinition capability,
-            Object raw,
-            boolean allowMissingBindingForDraft) {
+    public ResponseInterpretationResult interpret(CapabilityDefinition capability,Object raw,boolean allowMissingBindingForDraft) {
 
         ResponseBindingSpec spec =
                 loadResponseBinding(
@@ -61,7 +58,6 @@ public class CapabilityResponseInterpreter {
         String businessCode = null;
         boolean codeAccepted = true;
         boolean flagAccepted = true;
-
         /*
          * 读取并验证业务状态码。
          */
@@ -103,14 +99,9 @@ public class CapabilityResponseInterpreter {
         /*
          * 读取并验证成功标记。
          */
-        if (StringUtils.hasText(
-                spec.getSuccessFlagPath())) {
+        if (StringUtils.hasText(spec.getSuccessFlagPath())) {
 
-            SimpleJsonPathReader.ReadResult flagResult =
-                    jsonPathReader.read(
-                            root,
-                            spec.getSuccessFlagPath()
-                    );
+            SimpleJsonPathReader.ReadResult flagResult =jsonPathReader.read(root,spec.getSuccessFlagPath());
 
             if (!isReadableScalar(flagResult)) {
                 return ResponseInterpretationResult.failure(
@@ -132,8 +123,7 @@ public class CapabilityResponseInterpreter {
          * 同时配置code和flag时使用AND关系。
          */
         if (!codeAccepted || !flagAccepted) {
-            String errorMessage =
-                    StringUtils.hasText(businessMessage)
+            String errorMessage =StringUtils.hasText(businessMessage)
                             ? businessMessage
                             : "业务系统返回失败";
 
@@ -284,15 +274,8 @@ public class CapabilityResponseInterpreter {
      * 数字200可以匹配字符串"200"；
      * 数字200.0也可以匹配数字200。
      */
-    private boolean scalarEquals(
-            JsonNode actual,
-            JsonNode expected) {
-
-        if (actual == null
-                || expected == null
-                || actual.isNull()
-                || expected.isNull()) {
-
+    private boolean scalarEquals(JsonNode actual,JsonNode expected) {
+        if (actual == null || expected == null || actual.isNull() || expected.isNull()) {
             return false;
         }
 
@@ -305,25 +288,16 @@ public class CapabilityResponseInterpreter {
             BigDecimal expectedNumber =
                     parseNumber(expected);
 
-            if (actualNumber != null
-                    && expectedNumber != null) {
-
-                return actualNumber.compareTo(
-                        expectedNumber
-                ) == 0;
+            if (actualNumber != null && expectedNumber != null) {
+                return actualNumber.compareTo(expectedNumber ) == 0;
             }
         }
-
-        return actual.asText()
-                .trim()
-                .equals(
-                        expected.asText().trim()
-                );
+        return actual.asText().trim()
+                .equals(expected.asText().trim());
     }
 
     private BigDecimal parseNumber(
             JsonNode value) {
-
         try {
             if (value.isNumber()) {
                 return value.decimalValue();
@@ -337,7 +311,6 @@ public class CapabilityResponseInterpreter {
         } catch (NumberFormatException ignored) {
             // 不是数字时回退到普通字符串比较。
         }
-
         return null;
     }
 

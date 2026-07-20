@@ -20,30 +20,21 @@ public class CapabilityInvocationContextFactory {
 
     private final RestrictedExpressionResolver expressionResolver;
 
-    public CapabilityInvocationContext create(
-            ToolExecutionContext toolContext,
-            PlanStep step) {
+    public CapabilityInvocationContext create( ToolExecutionContext toolContext, PlanStep step) {
 
-        Map<String, Object> input =
-                new LinkedHashMap<>();
+        Map<String, Object> input = new LinkedHashMap<>();
 
-        if (step != null
-                && !CollectionUtils.isEmpty(step.getInput())) {
+        if (step != null && !CollectionUtils.isEmpty(step.getInput())) {
             input.putAll(step.getInput());
         }
 
-        Map<String, Object> variables =
-                toolContext == null
-                        || toolContext.getVariables() == null
+        Map<String, Object> variables = toolContext == null || toolContext.getVariables() == null
                         ? Map.of()
                         : toolContext.getVariables();
 
-        Object item = toolContext == null
-                ? null
-                : toolContext.getCurrentItem();
+        Object item = toolContext == null ? null : toolContext.getCurrentItem();
 
-        Map<String, Object> secure =
-                buildSecureContext(toolContext);
+        Map<String, Object> secure = buildSecureContext(toolContext);
 
         CapabilityInvocationContext initialContext =
                 CapabilityInvocationContext.builder()
@@ -59,18 +50,9 @@ public class CapabilityInvocationContextFactory {
          * 后面的 GraphSpec 能直接通过 $vars 引用，
          * 但旧 Planner 仍可能把变量引用放入 inputRef。
          */
-        if (step != null
-                && !CollectionUtils.isEmpty(step.getInputRef())) {
-
-            step.getInputRef().forEach(
-                    (parameterName, expression) -> {
-
-                        Object value =
-                                expressionResolver.resolve(
-                                        expression,
-                                        initialContext
-                                );
-
+        if (step != null && !CollectionUtils.isEmpty(step.getInputRef())) {
+            step.getInputRef().forEach((parameterName, expression) -> {
+                        Object value =expressionResolver.resolve(expression,initialContext );
                         input.put(parameterName, value);
                     }
             );
@@ -84,11 +66,9 @@ public class CapabilityInvocationContextFactory {
                 .build();
     }
 
-    private Map<String, Object> buildSecureContext(
-            ToolExecutionContext context) {
+    private Map<String, Object> buildSecureContext( ToolExecutionContext context) {
 
-        Map<String, Object> secure =
-                new LinkedHashMap<>();
+        Map<String, Object> secure = new LinkedHashMap<>();
 
         if (context == null) {
             return secure;
@@ -106,13 +86,8 @@ public class CapabilityInvocationContextFactory {
             secure.put("userId", context.getUserId());
         }
 
-        if (StringUtils.hasText(
-                context.getAuthorization()
-        )) {
-            secure.put(
-                    "authorization",
-                    context.getAuthorization()
-            );
+        if (StringUtils.hasText(context.getAuthorization())) {
+            secure.put( "authorization", context.getAuthorization());
         }
 
         return secure;

@@ -61,10 +61,7 @@ public class CapabilityInputSchemaValidator {
             JsonNode rootSchema =objectMapper.readTree(inputSchemaJson);
 
             if (!rootSchema.isObject()) {
-                throw new BusinessException(
-                        400,
-                        "能力 inputSchemaJson 必须是 JSON 对象"
-                );
+                throw new BusinessException( 400,"能力 inputSchemaJson 必须是 JSON 对象");
             }
 
             /*

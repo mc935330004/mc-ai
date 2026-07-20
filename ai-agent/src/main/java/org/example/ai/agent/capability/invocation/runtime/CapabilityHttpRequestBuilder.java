@@ -93,34 +93,20 @@ public class CapabilityHttpRequestBuilder {
 
         JsonNode bodyNode = null;
 
-        for (ParameterBindingSpec binding
-                : spec.getParameters()) {
+        for (ParameterBindingSpec binding : spec.getParameters()) {
 
-            Object value = resolveValue(
-                    binding,
-                    context
-            );
+            Object value = resolveValue(binding, context);
 
             boolean missing = isMissing(value);
 
-            if (missing
-                    && binding.getDefaultValue() != null
-                    && !binding.getDefaultValue().isNull()) {
+            if (missing && binding.getDefaultValue() != null && !binding.getDefaultValue().isNull()) {
 
-                value = objectMapper.convertValue(
-                        binding.getDefaultValue(),
-                        Object.class
-                );
-
+                value = objectMapper.convertValue( binding.getDefaultValue(),Object.class);
                 missing = isMissing(value);
             }
 
             if (missing && binding.isRequired()) {
-                throw invalid(
-                        "CAPABILITY_PARAMETER_REQUIRED",
-                        "能力必填参数缺失：" +
-                                safeTarget(binding)
-                );
+                throw invalid("CAPABILITY_PARAMETER_REQUIRED", "能力必填参数缺失：" + safeTarget(binding));
             }
 
             if (missing && binding.isOmitIfNull()) {
@@ -314,26 +300,13 @@ public class CapabilityHttpRequestBuilder {
                 .build();
     }
 
-    private Object resolveValue(
-            ParameterBindingSpec binding,
-            CapabilityInvocationContext context) {
+    private Object resolveValue( ParameterBindingSpec binding, CapabilityInvocationContext context) {
 
-        if (binding.getSourceType()
-                == ParameterSourceType.FIXED) {
-
-            return binding.getFixedValue() == null
-                    || binding.getFixedValue().isNull()
-                    ? null
-                    : objectMapper.convertValue(
-                            binding.getFixedValue(),
-                            Object.class
-                    );
+        if (binding.getSourceType()== ParameterSourceType.FIXED) {
+            return binding.getFixedValue() == null || binding.getFixedValue().isNull()
+                    ? null: objectMapper.convertValue( binding.getFixedValue(),Object.class);
         }
-
-        return expressionResolver.resolve(
-                binding.getSourceExpression(),
-                context
-        );
+        return expressionResolver.resolve(binding.getSourceExpression(),context);
     }
 
     private void validateRootBodyBinding(

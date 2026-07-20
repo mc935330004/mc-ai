@@ -46,7 +46,7 @@ public class FieldDictionaryServiceImpl extends ServiceImpl<FieldDictionaryMappe
      * ponytail: 先用固定集合，够用再说；以后真需要再做成配置表。
      */
     private static final Set<String> IGNORE_FIELD_NAMES = Set.of(
-            "id","createBy","createTime", "updateBy", "updateTime",
+            "createBy","createTime", "updateBy", "updateTime",
             "delFlag",
             "version",
             "sort","optimizeCountSql","code","pages","searchCount","msg",

@@ -152,10 +152,7 @@ public class RequestBindingSpecParser {
         try {
             spec = requestBindingReader.readValue(bindingJson);
         } catch (JsonProcessingException exception) {
-            throw new BusinessException(
-                    400,
-                    "请求绑定配置JSON解析失败：" +
-                            buildSafeJsonErrorMessage(exception) );
+            throw new BusinessException(400,"请求绑定配置JSON解析失败：" + buildSafeJsonErrorMessage(exception) );
         }
 
         validateVersion(spec);

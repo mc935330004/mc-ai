@@ -91,12 +91,8 @@ public class CapabilityBindingConfigurationService {
     public void validateForPublish(CapabilityDefinition capability) {
 
         if (!StringUtils.hasText(capability.getRequestBindingJson())) {
-
-            throw new BusinessException(
-                    400,
-                    "能力发布前必须配置requestBindingJson：" +
-                            capability.getCapabilityCode()
-            );
+            throw new BusinessException(400, "能力发布前必须配置requestBindingJson：" +
+                            capability.getCapabilityCode());
         }
 
         if (!StringUtils.hasText(

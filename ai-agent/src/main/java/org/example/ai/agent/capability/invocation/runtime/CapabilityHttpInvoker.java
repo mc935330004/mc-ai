@@ -30,13 +30,10 @@ public class CapabilityHttpInvoker {
         }
 
         RestClient client =
-                clientFactory.create(
-                        request.getTimeoutMs()
-                );
+                clientFactory.create( request.getTimeoutMs());
 
         try {
-            RestClient.RequestHeadersSpec<?> requestSpec =
-                    createRequest(client, request);
+            RestClient.RequestHeadersSpec<?> requestSpec =createRequest(client, request);
 
             return requestSpec
                     .retrieve()
@@ -124,8 +121,6 @@ public class CapabilityHttpInvoker {
                                 )
                         );
 
-        return request.getBody() == null
-                ? prepared
-                : prepared.body(request.getBody());
+        return request.getBody() == null ? prepared : prepared.body(request.getBody());
     }
 }

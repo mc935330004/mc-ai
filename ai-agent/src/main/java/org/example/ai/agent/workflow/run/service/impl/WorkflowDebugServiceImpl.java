@@ -52,10 +52,7 @@ public class WorkflowDebugServiceImpl implements WorkflowDebugService {
             String userId,
             String authorization) {
 
-        WorkflowDefinition definition =
-                workflowService.getById(
-                        workflowId
-                );
+        WorkflowDefinition definition =workflowService.getById( workflowId);
 
         if (definition == null) {
             throw new BusinessException(
@@ -64,8 +61,7 @@ public class WorkflowDebugServiceImpl implements WorkflowDebugService {
             );
         }
 
-        WorkflowGraphMaterial material =
-                snapshotFactory.analyzeDraft(
+        WorkflowGraphMaterial material =snapshotFactory.analyzeDraft(
                         definition.getWorkflowCode(),
                         definition.getWorkflowName(),
                         definition.getGraphSpecJson()
@@ -81,22 +77,14 @@ public class WorkflowDebugServiceImpl implements WorkflowDebugService {
             );
         }
 
-        JsonNode inputSchema =
-                snapshotFactory.readInputSchema(
-                        definition.getGraphSpecJson()
-                );
+        JsonNode inputSchema =snapshotFactory.readInputSchema(definition.getGraphSpecJson());
 
-        Map<String, Object> rawInput =
-                request == null
+        Map<String, Object> rawInput = request == null
                         || request.getInput() == null
                         ? Map.of()
                         : request.getInput();
 
-        CapabilityInputValidationResult validation =
-                inputValidator.validate(
-                        writeJson(inputSchema),
-                        rawInput
-                );
+        CapabilityInputValidationResult validation = inputValidator.validate( writeJson(inputSchema), rawInput);
 
         if (!validation.isValid()) {
             throw new BusinessException(
@@ -107,8 +95,7 @@ public class WorkflowDebugServiceImpl implements WorkflowDebugService {
             );
         }
 
-        String runId =
-                UUID.randomUUID()
+        String runId =UUID.randomUUID()
                         .toString()
                         .replace("-", "");
 

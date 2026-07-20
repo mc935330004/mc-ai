@@ -18,18 +18,13 @@ public class DefaultGraphCapabilityCatalog
             capabilityDefinitionService;
 
     @Override
-    public boolean isCallable(
-            String capabilityCode) {
+    public boolean isCallable(String capabilityCode) {
 
         if (!StringUtils.hasText(capabilityCode)) {
             return false;
         }
 
-        CapabilityDefinition capability =
-                capabilityDefinitionService
-                        .getEnabledByCode(
-                                capabilityCode
-                        );
+        CapabilityDefinition capability =capabilityDefinitionService.getEnabledByCode( capabilityCode);
 
         /*
          * 当前阶段的Workflow只允许查询。

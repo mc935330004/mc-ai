@@ -43,21 +43,12 @@ public class CapabilityGraphNodeExecutor implements GraphNodeExecutor {
             );
         }
 
-        Map<String, Object> resolvedInput =
-                expressionResolver.resolveMap(
-                        config.inputMapping(),
-                        context
-                );
+        Map<String, Object> resolvedInput =expressionResolver.resolveMap( config.inputMapping(), context );
 
         PlanStep step =
-                PlanStep.builder()
-                        .stepType(
-                                StepType.BUSINESS_TOOL
-                        )
+                PlanStep.builder().stepType(StepType.BUSINESS_TOOL)
                         .stepName(node.name())
-                        .capabilityCode(
-                                config.capabilityCode()
-                        )
+                        .capabilityCode( config.capabilityCode())
                         .input(resolvedInput)
                         .outputKey(node.outputKey())
                         .build();

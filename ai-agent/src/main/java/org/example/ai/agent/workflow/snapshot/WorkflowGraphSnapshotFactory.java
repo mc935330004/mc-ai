@@ -363,11 +363,9 @@ public class WorkflowGraphSnapshotFactory {
     /**
      * 从发布快照读取输入Schema。
      */
-    public JsonNode readInputSchema(
-            String snapshotJson) {
+    public JsonNode readInputSchema(String snapshotJson) {
 
-        GraphSpec graph =
-                graphSpecParser.parse(snapshotJson);
+        GraphSpec graph = graphSpecParser.parse(snapshotJson);
 
         JsonNode inputSchema =graph.getInputSchema();
 
