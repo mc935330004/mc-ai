@@ -65,6 +65,18 @@ public class GraphSpecCompiler {
                             "(?:\\.[\\p{L}\\p{N}_-]+)*$"
             );
 
+    /**
+     * 工作流业务状态码格式。
+     *
+     * 示例：
+     * SKIPPED_NO_ID
+     * SKIPPED_MISSING_PROJECT_CODE
+     */
+    private static final Pattern RESULT_CODE_PATTERN =
+            Pattern.compile(
+                    "^[A-Z][A-Z0-9_]{2,63}$"
+            );
+
     private final ObjectMapper objectMapper;
     private final GraphCapabilityCatalog capabilityCatalog;
 
@@ -914,19 +926,26 @@ public class GraphSpecCompiler {
                 "itemsExpression",
                 errors
         );
+        /*
+         * 普通用户输入循环继续使用 maxItems 限制。
+         *
+         * 业务接口返回的 records 可以配置 processAllItems=true，
+         * 此时不限制总记录数，但并发数仍然最多为 5。
+         */
+        boolean processAllItems =Boolean.TRUE.equals(config.processAllItems() );
 
         int maxItems =
                 config.maxItems() == null
                         ? 5
                         : config.maxItems();
 
-        if (maxItems < 1 || maxItems > 5) {
+        if (!processAllItems && (maxItems < 1 || maxItems > 5)) {
             addNodeError(
                     errors,
                     "GRAPH_FOREACH_MAX_ITEMS_INVALID",
                     graphPath,
                     node.getId(),
-                    "FOREACH的maxItems必须在1到5之间"
+                    "普通FOREACH的maxItems必须在1到5之间"
             );
         }
 
@@ -935,17 +954,14 @@ public class GraphSpecCompiler {
                         ? Math.min(2, maxItems)
                         : config.concurrency();
 
-        if (concurrency < 1
-                || concurrency > 5
-                || concurrency > maxItems) {
-
+        if (concurrency < 1|| concurrency > 5 || (!processAllItems && concurrency > maxItems)) {
             addNodeError(
                     errors,
                     "GRAPH_FOREACH_CONCURRENCY_INVALID",
                     graphPath,
                     node.getId(),
-                    "FOREACH的concurrency必须在1到5之间，" +
-                            "且不能大于maxItems"
+                    "FOREACH的concurrency必须在1到5之间，"
+                            + "普通限量循环的并发数不能超过maxItems"
             );
         }
 
@@ -985,15 +1001,89 @@ public class GraphSpecCompiler {
                     counter
             );
         }
-
+        ForEachMissingValueSkip missingValueSkip = compileMissingValueSkip(
+                        node,
+                        config.missingValueSkip(),
+                        graphPath,
+                        errors );
         return new CompiledForEachNodeConfig(
                 config.itemsExpression(),
                 maxItems,
                 concurrency,
                 continueOnItemError,
+                processAllItems,
+                missingValueSkip,
                 body
         );
     }
+
+    /**
+     * 编译并校验 FOREACH 缺值跳过策略。
+     */
+    private ForEachMissingValueSkip compileMissingValueSkip(
+            GraphNodeSpec node,
+            ForEachMissingValueSkip source,
+            String graphPath,
+            List<GraphValidationError> errors) {
+
+        if (source == null) {
+            return null;
+        }
+
+        String expression =
+                StringUtils.hasText(source.expression())
+                        ? source.expression().trim()
+                        : null;
+
+        /*
+         * 继续复用 GraphSpec 现有受限表达式规则，
+         * 禁止 SpEL、脚本和方法调用。
+         */
+        validateExpression(
+                expression,
+                graphPath,
+                node.getId(),
+                "missingValueSkip.expression",
+                errors
+        );
+
+        String code =
+                StringUtils.hasText(source.code())
+                        ? source.code().trim()
+                        : "SKIPPED_MISSING_VALUE";
+
+        if (!RESULT_CODE_PATTERN.matcher(code).matches()) {
+            addNodeError(
+                    errors,
+                    "GRAPH_FOREACH_SKIP_CODE_INVALID",
+                    graphPath,
+                    node.getId(),
+                    "missingValueSkip.code格式不正确：" + code
+            );
+        }
+
+        String message =
+                StringUtils.hasText(source.message())
+                        ? source.message().trim()
+                        : "当前记录缺少必要值，已跳过子图执行";
+
+        if (message.length() > 200) {
+            addNodeError(
+                    errors,
+                    "GRAPH_FOREACH_SKIP_MESSAGE_TOO_LONG",
+                    graphPath,
+                    node.getId(),
+                    "missingValueSkip.message最多允许200个字符"
+            );
+        }
+
+        return new ForEachMissingValueSkip(
+                expression,
+                code,
+                message
+        );
+    }
+
 
     private MergeNodeConfig compileMergeConfig(
             GraphNodeSpec node,

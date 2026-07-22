@@ -1,12 +1,15 @@
 package org.example.ai.agent.graph.runtime.executor;
 
+import org.example.ai.agent.common.enums.ForEachItemStatus;
 import org.example.ai.agent.common.enums.GraphNodeType;
 import org.example.ai.agent.graph.compiler.CompiledGraphNode;
 import org.example.ai.agent.graph.config.CompiledForEachNodeConfig;
+import org.example.ai.agent.graph.config.ForEachMissingValueSkip;
 import org.example.ai.agent.graph.runtime.*;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
+import org.springframework.util.StringUtils;
 
 import java.lang.reflect.Array;
 import java.util.ArrayList;
@@ -93,8 +96,7 @@ public class ForEachGraphNodeExecutor
             );
         }
 
-        List<Object> items =
-                convertToList(source);
+        List<Object> items = convertToList(source);
 
         if (items == null) {
             return GraphNodeResult.failure(
@@ -105,23 +107,21 @@ public class ForEachGraphNodeExecutor
         }
 
         /*
-         * 运行时必须再次限制数量。
+         * projectKeys 等用户输入集合继续限制为最多 5 条。
          *
-         * 编译器只能验证maxItems配置，
-         * 无法预先知道用户实际传入多少个项目。
+         * 当 processAllItems=true 时，表示数据来自可信的上游业务能力，
+         * 必须处理全部记录，不能因为记录超过 5 条而截断或失败。
+         *
+         * 无论是否处理全部记录，并发数仍然最多为 5。
          */
-        if (items.size() > config.maxItems()
-                || items.size() > 5) {
+        if (!config.processAllItems() && (items.size() > config.maxItems() || items.size() > 5)) {
 
             return GraphNodeResult.failure(
                     node,
                     "GRAPH_FOREACH_ITEM_LIMIT_EXCEEDED",
-                    "单次最多查询" +
-                            Math.min(
-                                    config.maxItems(),
-                                    5
-                            ) +
-                            "个项目"
+                    "单次最多处理"
+                            + Math.min(config.maxItems(), 5)
+                            + "个用户输入项目"
             );
         }
 
@@ -154,8 +154,7 @@ public class ForEachGraphNodeExecutor
         Map<String, Object> parentVariables =
                 context.snapshotVariables();
 
-        List<ForEachItemResult> itemResults =
-                config.continueOnItemError()
+        List<ForEachItemResult> itemResults = config.continueOnItemError()
                         ? executeConcurrent(
                                 node,
                                 config,
@@ -215,17 +214,20 @@ public class ForEachGraphNodeExecutor
             );
         }
 
-        String summary =
-                batch.failureCount() == 0
-                        ? "FOREACH执行成功，共处理" +
-                        batch.totalCount() +
-                        "个项目"
-                        : "FOREACH部分成功：成功" +
-                        batch.successCount() +
-                        "个，失败" +
-                        batch.failureCount() +
-                        "个";
-
+        String summary;
+        if (batch.failureCount() == 0 && batch.skippedCount() == 0) {
+            summary = "FOREACH执行成功，共处理"
+                    + batch.totalCount()
+                    + "条记录";
+        } else {
+            summary = "FOREACH执行完成：成功"
+                    + batch.successCount()
+                    + "条，失败"
+                    + batch.failureCount()
+                    + "条，跳过"
+                    + batch.skippedCount()
+                    + "条";
+        }
         return GraphNodeResult.success(
                 node,
                 batch,
@@ -239,9 +241,10 @@ public class ForEachGraphNodeExecutor
                         "successCount",
                         batch.successCount(),
                         "failureCount",
-                        batch.failureCount()
-                )
-        );
+                        batch.failureCount(),
+                        "skippedCount",
+                        batch.skippedCount()
+                ));
     }
 
     /**
@@ -254,20 +257,17 @@ public class ForEachGraphNodeExecutor
             GraphExecutionContext parentContext,
             Map<String, Object> parentVariables) {
 
-        int concurrency =
-                Math.max(
-                        1,
-                        Math.min(
-                                config.concurrency(),
-                                Math.min(
-                                        config.maxItems(),
-                                        5
-                                )
-                        )
-                );
+        /*
+         * processAllItems只解除记录总数限制，
+         * 不能解除并发限制。
+         */
+        int concurrencyLimit =config.processAllItems()
+                        ? 5: Math.min(config.maxItems(),5);
 
-        Semaphore semaphore =
-                new Semaphore(concurrency);
+        int concurrency =Math.max(1,Math.min(config.concurrency(),
+                                concurrencyLimit));
+
+        Semaphore semaphore =new Semaphore(concurrency);
 
         List<CompletableFuture<ForEachItemResult>>
                 futures =
@@ -360,15 +360,11 @@ public class ForEachGraphNodeExecutor
             GraphExecutionContext parentContext,
             Map<String, Object> parentVariables) {
 
-        List<ForEachItemResult> results =
-                new ArrayList<>();
+        List<ForEachItemResult> results =new ArrayList<>();
 
         boolean aborted = false;
 
-        for (int index = 0;
-             index < items.size();
-             index++) {
-
+        for (int index = 0; index < items.size();index++) {
             Object item = items.get(index);
 
             if (aborted) {
@@ -393,7 +389,11 @@ public class ForEachGraphNodeExecutor
 
             results.add(result);
 
-            if (!result.isSuccess()) {
+            /*
+             * SKIPPED 是正常业务跳过，不属于失败。
+             * 只有 FAILED 才能中断后续记录。
+             */
+            if (result.status() == ForEachItemStatus.FAILED) {
                 aborted = true;
             }
         }
@@ -462,16 +462,29 @@ public class ForEachGraphNodeExecutor
                             .executionPath(childPath)
                             .build();
 
-            GraphExecutionResult childResult =
-                    subgraphRunner.execute(
+
+            /*
+             * 在执行详情子图前先检查缺值策略。
+             *
+             * 这一步必须放在 subgraphRunner.execute() 之前，
+             * 才能保证无 id 时完全不进入详情能力，更不会发送 HTTP 请求。
+             */
+            ForEachItemResult skippedResult =evaluateMissingValueSkip(
+                            config,
+                            childRequest,
+                            index,
+                            item,
+                            startedAt);
+
+            if (skippedResult != null) {
+                return skippedResult;
+            }
+
+            GraphExecutionResult childResult =subgraphRunner.execute(
                             config.body(),
                             childRequest
                     );
-
-            long duration =
-                    System.currentTimeMillis()
-                            - startedAt;
-
+            long duration = System.currentTimeMillis() - startedAt;
             if (childResult == null) {
                 return ForEachItemResult.failure(
                         index,
@@ -514,8 +527,70 @@ public class ForEachGraphNodeExecutor
         }
     }
 
-    private List<Object> convertToList(
-            Object source) {
+    /**
+     * 检查当前循环记录是否需要因缺少必要值而跳过。
+     *
+     * @return 返回null表示继续执行子图；
+     *         返回ForEachItemResult表示当前记录已经被跳过。
+     */
+    private ForEachItemResult evaluateMissingValueSkip(
+            CompiledForEachNodeConfig config,
+            GraphExecutionRequest childRequest,
+            int index,
+            Object item,
+            long startedAt) {
+
+        ForEachMissingValueSkip policy =config.missingValueSkip();
+
+        if (policy == null) {
+            return null;
+        }
+
+        /*
+         * 使用当前item创建只读执行上下文，
+         * 让$item.id等表达式能够正确解析。
+         */
+        GraphExecutionContext itemContext =
+                GraphExecutionContext.create(
+                        childRequest
+                );
+
+        Object value =
+                expressionResolver.resolve(
+                        policy.expression(),
+                        itemContext
+                );
+
+        if (!isMissingValue(value)) {
+            return null;
+        }
+
+        return ForEachItemResult.skipped(
+                index,
+                item,
+                policy.code(),
+                policy.message(),
+                System.currentTimeMillis() - startedAt
+        );
+    }
+
+    /**
+     * id等必要值的统一缺失判断。
+     */
+    private boolean isMissingValue(Object value) {
+
+        if (value == null) {
+            return true;
+        }
+        if (value instanceof CharSequence text) {
+            return !StringUtils.hasText(text.toString());
+        }
+
+        return false;
+    }
+
+
+    private List<Object> convertToList(Object source) {
 
         if (source == null) {
             return null;
@@ -526,24 +601,15 @@ public class ForEachGraphNodeExecutor
         }
 
         if (source.getClass().isArray()) {
-            int length =
-                    Array.getLength(source);
+            int length =Array.getLength(source);
 
-            List<Object> result =
-                    new ArrayList<>(length);
+            List<Object> result =new ArrayList<>(length);
 
-            for (int index = 0;
-                 index < length;
-                 index++) {
-
-                result.add(
-                        Array.get(source, index)
-                );
+            for (int index = 0;index < length; index++) {
+                result.add( Array.get(source, index));
             }
-
             return result;
         }
-
         return null;
     }
 }
