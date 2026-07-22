@@ -151,8 +151,7 @@ public class CapabilityVersionServiceImpl extends ServiceImpl<CapabilityVersionM
     }
 
     @Override
-    public CapabilityVersion getRequiredVersion(
-            Long versionId) {
+    public CapabilityVersion getRequiredVersion( Long versionId) {
 
         if (versionId == null) {
             throw new IllegalArgumentException(

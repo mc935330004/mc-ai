@@ -35,10 +35,7 @@ public class CapabilityRuntimeSnapshotResolver {
             );
         }
 
-        CapabilityVersion version =
-                versionService.getRequiredVersion(
-                        registryDefinition.getActiveVersionId()
-                );
+        CapabilityVersion version =versionService.getRequiredVersion(registryDefinition.getActiveVersionId());
 
         if (!Objects.equals(
                 version.getCapabilityId(),
@@ -56,10 +53,6 @@ public class CapabilityRuntimeSnapshotResolver {
                             version.getId()
             );
         }
-
-        return snapshotFactory.restore(
-                registryDefinition,
-                version
-        );
+        return snapshotFactory.restore( registryDefinition,version );
     }
 }

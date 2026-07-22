@@ -250,36 +250,22 @@ public class WorkflowDefinitionServiceImpl extends ServiceImpl< WorkflowDefiniti
      * 纯校验接口，不修改数据库。
      */
     @Override
-    public WorkflowValidationVO validateDraft(
-            Long id) {
+    public WorkflowValidationVO validateDraft(Long id) {
 
-        WorkflowDefinition definition =
-                getRequiredDefinition(id);
+        WorkflowDefinition definition =getRequiredDefinition(id);
 
-        WorkflowGraphMaterial material =
-                snapshotFactory.analyzeDraft(
-                        definition.getWorkflowCode(),
-                        definition.getWorkflowName(),
-                        definition.getGraphSpecJson()
-                );
+        WorkflowGraphMaterial material = snapshotFactory.analyzeDraft(definition.getWorkflowCode(),
+                definition.getWorkflowName(),definition.getGraphSpecJson());
 
         return WorkflowValidationVO.builder()
                 .workflowId(definition.getId())
-                .workflowCode(
-                        definition.getWorkflowCode()
-                )
-                .configRevision(
-                        definition.getConfigRevision()
-                )
+                .workflowCode(definition.getWorkflowCode())
+                .configRevision(definition.getConfigRevision() )
                 .valid(material.valid())
                 .nodeCount(material.nodeCount())
                 .edgeCount(material.edgeCount())
                 .draftChecksum(material.checksum())
-                .errors(
-                        material
-                                .compilationResult()
-                                .errors()
-                )
+                .errors( material.compilationResult().errors())
                 .build();
     }
 

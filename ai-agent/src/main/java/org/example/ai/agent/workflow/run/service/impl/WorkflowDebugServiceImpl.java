@@ -89,9 +89,9 @@ public class WorkflowDebugServiceImpl implements WorkflowDebugService {
         if (!validation.isValid()) {
             throw new BusinessException(
                     400,
-                    "调试参数校验失败："
-                            + validation
-                            .getValidationErrors()
+                    "调试参数校验失败：缺少参数="+ validation.getMissingParameters()
+                            + "，参数错误="
+                            + validation.getValidationErrors()
             );
         }
 

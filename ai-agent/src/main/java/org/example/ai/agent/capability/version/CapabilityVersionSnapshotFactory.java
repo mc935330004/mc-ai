@@ -54,14 +54,15 @@ public class CapabilityVersionSnapshotFactory {
         }
 
         /*
-         * 发布时再次规范化配置，不能直接相信数据库中的字符串。
+         * 发布快照生成前再次校验输入 Schema 与请求绑定，
+         * 确保不可变版本快照中不存在错误字段。
          */
-        String requestBindingJson =
-                bindingService.normalizeRequestBinding(
+        String requestBindingJson =bindingService.normalizeRequestBinding(
+                        capability.getCapabilityCode(),
                         capability.getMethod(),
                         capability.getUrl(),
-                        capability.getRequestBindingJson()
-                );
+                        capability.getInputSchemaJson(),
+                        capability.getRequestBindingJson());
 
         if (!StringUtils.hasText(requestBindingJson)) {
             throw new BusinessException(
@@ -134,23 +135,15 @@ public class CapabilityVersionSnapshotFactory {
      * registryDefinition 只提供运行状态；
      * HTTP、Schema、绑定等配置全部来自版本快照。
      */
-    public CapabilityDefinition restore(
-            CapabilityDefinition registryDefinition,
-            CapabilityVersion version) {
-
+    public CapabilityDefinition restore(CapabilityDefinition registryDefinition,CapabilityVersion version) {
         if (registryDefinition == null || version == null) {
             throw new IllegalArgumentException(
                     "能力定义和能力版本不能为空"
             );
         }
-
         CapabilityPublishedSnapshot snapshot;
-
         try {
-            snapshot = objectMapper.readValue(
-                    version.getSnapshotJson(),
-                    CapabilityPublishedSnapshot.class
-            );
+            snapshot = objectMapper.readValue(version.getSnapshotJson(), CapabilityPublishedSnapshot.class );
         } catch (JsonProcessingException exception) {
             throw new IllegalStateException(
                     "能力发布快照解析失败，versionId=" +

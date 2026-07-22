@@ -597,18 +597,25 @@ public class GraphSpecCompiler {
                     node.getId(),
                     "CAPABILITY节点必须配置capabilityCode"
             );
+
             return config;
         }
 
+        boolean callable = false;
+
         try {
-            if (!capabilityCatalog.isCallable( config.capabilityCode())) {
+            callable = capabilityCatalog.isCallable(
+                    config.capabilityCode()
+            );
+
+            if (!callable) {
                 addNodeError(
                         errors,
                         "GRAPH_CAPABILITY_NOT_CALLABLE",
                         graphPath,
                         node.getId(),
-                        "能力不存在、未启用或未发布：" +
-                                config.capabilityCode()
+                        "能力不存在、未启用或未发布："
+                                + config.capabilityCode()
                 );
             }
         } catch (Exception exception) {
@@ -618,6 +625,19 @@ public class GraphSpecCompiler {
                     graphPath,
                     node.getId(),
                     "能力目录暂时不可用"
+            );
+        }
+
+        /*
+         * 只有能力可调用时才查询输入契约，
+         * 避免对同一个无效能力产生重复错误。
+         */
+        if (callable) {
+            validateCapabilityContract(
+                    node,
+                    config,
+                    graphPath,
+                    errors
             );
         }
 
@@ -653,6 +673,219 @@ public class GraphSpecCompiler {
         );
 
         return config;
+    }
+    /**
+     * 读取能力契约并校验节点inputMapping。
+     */
+    private void validateCapabilityContract(
+            GraphNodeSpec node,
+            CapabilityNodeConfig config,
+            String graphPath,
+            List<GraphValidationError> errors) {
+
+        try {
+            capabilityCatalog.findContract(
+                    config.capabilityCode()
+            ).ifPresent(contract ->
+                    validateCapabilityInputMapping(
+                            node,
+                            config,
+                            contract,
+                            graphPath,
+                            errors
+                    )
+            );
+        } catch (Exception exception) {
+            /*
+             * 已发布能力的契约无法读取时必须失败关闭，
+             * 不能跳过校验后继续发布工作流。
+             */
+            addNodeError(
+                    errors,
+                    "GRAPH_CAPABILITY_CONTRACT_UNAVAILABLE",
+                    graphPath,
+                    node.getId(),
+                    "能力输入契约暂时不可用："
+                            + config.capabilityCode()
+            );
+        }
+    }
+
+    /**
+     * 校验工作流inputMapping只包含能力允许的字段，
+     * 并检查能力必填输入是否已经配置。
+     */
+    private void validateCapabilityInputMapping(
+            GraphNodeSpec node,
+            CapabilityNodeConfig config,
+            GraphCapabilityContract contract,
+            String graphPath,
+            List<GraphValidationError> errors) {
+
+        validateMappingObject(
+                config.inputMapping(),
+                "",
+                contract.allowedInputPaths(),
+                graphPath,
+                node.getId(),
+                errors
+        );
+
+        for (String requiredPath : contract.requiredInputPaths()) {
+
+            if (!containsMappingPath(config.inputMapping(), requiredPath)) {
+                addNodeError(
+                        errors,
+                        "GRAPH_CAPABILITY_INPUT_REQUIRED",
+                        graphPath,
+                        node.getId(),
+                        "能力必填输入未配置："
+                                + requiredPath
+                );
+            }
+        }
+    }
+
+    /**
+     * 递归校验嵌套输入映射。
+     *
+     * 示例：
+     *
+     * {
+     *   "project": {
+     *     "name": "$input.projectName"
+     *   }
+     * }
+     */
+    private void validateMappingObject(
+            Map<String, Object> mapping,
+            String prefix,
+            Set<String> allowedPaths,
+            String graphPath,
+            String nodeId,
+            List<GraphValidationError> errors) {
+
+        for (Map.Entry<String, Object> entry: mapping.entrySet()) {
+            String key = entry.getKey();
+            if (!StringUtils.hasText(key)) {
+                /*
+                 * 顶层空名称已经由原有校验处理；
+                 * 嵌套空名称在这里统一拦截。
+                 */
+                addNodeError( errors,
+                        "GRAPH_INPUT_NAME_INVALID",
+                        graphPath,
+                        nodeId,
+                        "输入参数名称不能为空"
+                );
+                continue;
+            }
+
+            String path =StringUtils.hasText(prefix)
+                            ? prefix + "." + key
+                            : key;
+
+            boolean exactAllowed =allowedPaths.contains(path);
+
+            boolean knownParent =
+                    allowedPaths.stream()
+                            .anyMatch(allowedPath ->
+                                    allowedPath.startsWith(
+                                            path + "."
+                                    )
+                            );
+
+            if (!exactAllowed && !knownParent) {
+                addNodeError(
+                        errors,
+                        "GRAPH_CAPABILITY_INPUT_UNKNOWN",
+                        graphPath,
+                        nodeId,
+                        "能力输入映射包含未声明字段："
+                                + path
+                );
+
+                continue;
+            }
+            Object value = entry.getValue();
+
+            /*
+             * 当前路径存在子字段并且值是对象时，
+             * 继续校验对象内部字段。
+             */
+            if (knownParent && value instanceof Map<?, ?> childMap) {
+                Map<String, Object> normalizedChild =new LinkedHashMap<>();
+
+                childMap.forEach((childKey, childValue) -> {
+                    if (childKey != null) {
+                        normalizedChild.put(
+                                String.valueOf(childKey),
+                                childValue
+                        );
+                    }
+                });
+                validateMappingObject(
+                        normalizedChild,
+                        path,
+                        allowedPaths,
+                        graphPath,
+                        nodeId,
+                        errors
+                );
+                continue;
+            }
+
+            /*
+             * 当前路径只是某个允许字段的父路径，
+             * 但配置值不是对象，无法生成正确的嵌套输入。
+             */
+            if (!exactAllowed && knownParent) {
+                addNodeError(
+                        errors,
+                        "GRAPH_CAPABILITY_INPUT_STRUCTURE_INVALID",
+                        graphPath,
+                        nodeId,
+                        "能力嵌套输入必须使用JSON对象配置："
+                                + path
+                );
+            }
+        }
+    }
+
+    /**
+     * 判断inputMapping是否配置了指定必填路径。
+     *
+     * 如果某个父对象直接使用表达式整体映射，
+     * 认为其内部字段将在运行时由Schema继续校验。
+     */
+    private boolean containsMappingPath(
+            Map<String, Object> mapping,
+            String path) {
+
+        Object current = mapping;
+        String[] pathParts = path.split("\\.");
+
+        for (String pathPart : pathParts) {
+            if (!(current instanceof Map<?, ?> currentMap)) {
+                /*
+                 * 父对象已经整体映射，
+                 * 编译期无法继续查看内部结构，
+                 * 后续由CapabilityInputSchemaValidator校验。
+                 */
+                return current != null;
+            }
+
+            if (!currentMap.containsKey(pathPart)) {
+                return false;
+            }
+
+            current = currentMap.get(pathPart);
+        }
+
+        /*
+         * 必填字段不能显式映射为null。
+         */
+        return current != null;
     }
 
     private CompiledForEachNodeConfig compileForEachConfig(

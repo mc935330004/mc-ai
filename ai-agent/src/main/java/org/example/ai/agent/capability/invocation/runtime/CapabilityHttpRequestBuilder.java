@@ -54,24 +54,16 @@ public class CapabilityHttpRequestBuilder {
                     "能力定义不能为空"
             );
         }
-
         String endpoint = endpointResolver.resolve(capability);
-
-        RequestBindingSpec spec =
-                bindingSpecParser.parse(
+        RequestBindingSpec spec = bindingSpecParser.parse(
                         capability.getMethod(),
                         capability.getUrl(),
-                        capability.getRequestBindingJson()
-                );
+                        capability.getRequestBindingJson());
 
         HttpMethod method;
-
         try {
-            method = HttpMethod.valueOf(
-                    capability.getMethod()
-                            .trim()
-                            .toUpperCase()
-            );
+            method = HttpMethod.valueOf(capability.getMethod().trim()
+                            .toUpperCase());
         } catch (Exception exception) {
             throw invalid(
                     "CAPABILITY_HTTP_METHOD_INVALID",
@@ -82,11 +74,9 @@ public class CapabilityHttpRequestBuilder {
 
         validateRootBodyBinding(spec);
 
-        UriComponentsBuilder uriBuilder =
-                UriComponentsBuilder.fromUriString(endpoint);
+        UriComponentsBuilder uriBuilder = UriComponentsBuilder.fromUriString(endpoint);
 
-        Map<String, Object> pathVariables =
-                new LinkedHashMap<>();
+        Map<String, Object> pathVariables =new LinkedHashMap<>();
 
         HttpHeaders headers = new HttpHeaders();
         Map<String, Object> auditInput = new LinkedHashMap<>();

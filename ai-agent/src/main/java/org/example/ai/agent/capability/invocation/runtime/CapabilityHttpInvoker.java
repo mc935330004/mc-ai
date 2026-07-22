@@ -21,24 +21,13 @@ public class CapabilityHttpInvoker {
     private final CapabilityRestClientFactory clientFactory;
 
     public Object invoke(CapabilityHttpRequest request) {
-        if (request == null
-                || request.getMethod() == null
-                || request.getUri() == null) {
-            throw new IllegalArgumentException(
-                    "HTTP请求不能为空"
-            );
+        if (request == null || request.getMethod() == null || request.getUri() == null) {
+            throw new IllegalArgumentException( "HTTP请求不能为空" );
         }
-
-        RestClient client =
-                clientFactory.create( request.getTimeoutMs());
-
+        RestClient client = clientFactory.create( request.getTimeoutMs());
         try {
             RestClient.RequestHeadersSpec<?> requestSpec =createRequest(client, request);
-
-            return requestSpec
-                    .retrieve()
-                    .body(Object.class);
-
+            return requestSpec.retrieve().body(Object.class);
         } catch (RestClientResponseException exception) {
             /*
              * 不把业务系统响应正文放进错误消息，
@@ -64,12 +53,8 @@ public class CapabilityHttpInvoker {
         }
     }
 
-    private RestClient.RequestHeadersSpec<?> createRequest(
-            RestClient client,
-            CapabilityHttpRequest request) {
-
+    private RestClient.RequestHeadersSpec<?> createRequest(RestClient client, CapabilityHttpRequest request) {
         HttpMethod method = request.getMethod();
-
         /*
          * HttpMethod 在 Spring 7 中不是 enum，
          * 因此使用 equals 判断，不能使用 switch case。
@@ -77,11 +62,7 @@ public class CapabilityHttpInvoker {
         if (HttpMethod.GET.equals(method)) {
             return client.get()
                     .uri(request.getUri())
-                    .headers(headers ->
-                            headers.addAll(
-                                    request.getHeaders()
-                            )
-                    );
+                    .headers(headers ->headers.addAll(request.getHeaders()));
         }
 
         if (HttpMethod.DELETE.equals(method)) {

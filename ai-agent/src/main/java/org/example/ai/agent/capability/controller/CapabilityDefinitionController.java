@@ -168,7 +168,6 @@ public class CapabilityDefinitionController {
                                 currentUserProvider .getRequiredUserId()).authorization(
                                 currentUserProvider.getRequiredAuthorization()).variables(new LinkedHashMap<>())
                         .build();
-
         ToolResult toolResult = businessCapabilityExecutor.executeReadTest(context,step);
         if (!toolResult.isSuccess()) {
             return Result.success(
@@ -184,7 +183,6 @@ public class CapabilityDefinitionController {
         // 必须扫描 raw，而不是经过字段字典压缩后的 data。
         String rawJson = objectMapper.writeValueAsString(toolResult.getRaw());
         List<FieldDictionary> detected =fieldDictionaryService.detectFromJson(capabilityCode,rawJson);
-
         Set<String> existingPaths =fieldDictionaryService.lambdaQuery()
                         .eq(FieldDictionary::getCapabilityCode,capabilityCode)
                         .select(FieldDictionary::getFieldPath)

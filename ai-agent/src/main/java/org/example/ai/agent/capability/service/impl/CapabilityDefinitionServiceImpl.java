@@ -176,15 +176,17 @@ public class CapabilityDefinitionServiceImpl extends ServiceImpl<CapabilityDefin
 
         /*
          * 草稿阶段请求绑定可以为空；
-         * 只要填写了，就必须立即通过校验。
+         * 只要填写了，就必须同时通过：
+         * 1. 请求绑定语法校验；
+         * 2. inputSchemaJson 输入字段契约校验。
          */
         dto.setRequestBindingJson(
-                bindingConfigurationService
-                        .normalizeRequestBinding(
+                bindingConfigurationService .normalizeRequestBinding(
+                                dto.getCapabilityCode(),
                                 dto.getMethod(),
                                 dto.getUrl(),
-                                dto.getRequestBindingJson()
-                        )
+                                dto.getInputSchemaJson(),
+                                dto.getRequestBindingJson())
         );
 
         dto.setResponseBindingJson(bindingConfigurationService.normalizeResponseBinding( dto.getResponseBindingJson()));

@@ -72,9 +72,7 @@ public class CapabilityEndpointResolver {
             return system.getBaseUrl().trim();
         }
 
-        if (!StringUtils.hasText(
-                businessApiProperties.getBaseUrl()
-        )) {
+        if (!StringUtils.hasText( businessApiProperties.getBaseUrl())) {
             throw invalid(
                     "BUSINESS_SYSTEM_BASE_URL_MISSING",
                     "业务系统基础地址未配置"
@@ -110,9 +108,7 @@ public class CapabilityEndpointResolver {
     private void validateHttpUrl(String url) {
         URI uri = parseTemplateUri(url);
 
-        if (!List.of("http", "https").contains(
-                normalize(uri.getScheme())
-        )) {
+        if (!List.of("http", "https").contains( normalize(uri.getScheme()))) {
             throw invalid(
                     "CAPABILITY_URL_SCHEME_NOT_ALLOWED",
                     "业务系统地址只允许HTTP或HTTPS"

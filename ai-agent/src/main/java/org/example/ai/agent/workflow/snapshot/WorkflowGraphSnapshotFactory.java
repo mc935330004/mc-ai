@@ -107,34 +107,22 @@ public class WorkflowGraphSnapshotFactory {
     private WorkflowGraphMaterial analyze(
             GraphSpec graph) {
 
-        GraphCompilationResult graphCompilation =
-                graphSpecCompiler.compile(graph);
-        List<GraphValidationError> errors =
-                new ArrayList<>(
-                        graphCompilation.errors()
-                );
+        GraphCompilationResult graphCompilation = graphSpecCompiler.compile(graph);
+        List<GraphValidationError> errors = new ArrayList<>(graphCompilation.errors());
         validateInputSchema(graph.getInputSchema(),errors );
 
-        GraphCompilationResult compilation =
-                errors.isEmpty()
+        GraphCompilationResult compilation =errors.isEmpty()
                         ? graphCompilation
                         : GraphCompilationResult.failure(
-                        errors
-                );
-        JsonNode canonicalNode = canonicalize(
-                objectMapper.valueToTree(graph)
-        );
+                        errors );
+        JsonNode canonicalNode = canonicalize(objectMapper.valueToTree(graph));
 
-        String normalizedJson = writeJson(
-                canonicalNode
-        );
+        String normalizedJson = writeJson(canonicalNode);
 
         GraphSize graphSize;
 
         if (compilation.valid()) {
-            graphSize = countGraph(
-                    compilation.compiledGraph()
-            );
+            graphSize = countGraph(compilation.compiledGraph() );
         } else {
             graphSize = new GraphSize(
                     graph.getNodes() == null
@@ -142,8 +130,7 @@ public class WorkflowGraphSnapshotFactory {
                             : graph.getNodes().size(),
                     graph.getEdges() == null
                             ? 0
-                            : graph.getEdges().size()
-            );
+                            : graph.getEdges().size() );
         }
 
         return new WorkflowGraphMaterial(

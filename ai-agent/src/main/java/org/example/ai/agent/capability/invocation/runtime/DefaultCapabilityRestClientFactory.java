@@ -18,8 +18,7 @@ public class DefaultCapabilityRestClientFactory
 
     @Override
     public RestClient create(int timeoutMs) {
-        Duration timeout =
-                Duration.ofMillis(timeoutMs);
+        Duration timeout =Duration.ofMillis(timeoutMs);
 
         HttpClient httpClient =
                 HttpClient.newBuilder()
@@ -29,8 +28,7 @@ public class DefaultCapabilityRestClientFactory
                         )
                         .build();
 
-        JdkClientHttpRequestFactory requestFactory =
-                new JdkClientHttpRequestFactory(httpClient);
+        JdkClientHttpRequestFactory requestFactory = new JdkClientHttpRequestFactory(httpClient);
 
         requestFactory.setReadTimeout(timeout);
 
