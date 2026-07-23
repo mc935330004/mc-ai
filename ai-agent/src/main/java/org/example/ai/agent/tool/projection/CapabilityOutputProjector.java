@@ -2,7 +2,6 @@ package org.example.ai.agent.tool.projection;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.RequiredArgsConstructor;
 import org.example.ai.agent.tool.FieldMeta;
@@ -33,6 +32,10 @@ public class CapabilityOutputProjector {
 
     private final ObjectMapper objectMapper;
 
+    /**
+     * 专门负责受限路径和嵌套数组解析。
+     */
+    private final CapabilityFieldPathProjector fieldPathProjector;
     /**
      * 同时生成工作流机器视图和中文展示视图。
      *
@@ -103,6 +106,9 @@ public class CapabilityOutputProjector {
     /**
      * 根据字段名称解析策略生成投影结果。
      */
+    /**
+     * 根据字段名称策略生成机器视图或展示视图。
+     */
     private Object projectFields(
             JsonNode root,
             List<FieldMeta> fields,
@@ -126,191 +132,22 @@ public class CapabilityOutputProjector {
             }
 
             /*
-             * 数组字段示例：
-             * $.data.records[].projectCode
+             * 普通字段、单层数组和任意层嵌套数组，
+             * 全部交给统一的受限路径投影器处理。
              */
-            if (field.getPath().contains("[]")) {
-                projectArrayField(
-                        root,
-                        result,
-                        field,
-                        outputName
-                );
-                continue;
-            }
-
-            /*
-             * 普通字段示例：
-             * $.data.current
-             */
-            JsonNode value =
-                    readBySimplePath(
-                            root,
-                            field.getPath()
-                    );
-
-            if (value == null
-                    || value.isMissingNode()
-                    || value.isNull()) {
-                continue;
-            }
-
-            result.set(outputName, value);
+            fieldPathProjector.project(
+                    root,
+                    result,
+                    field.getPath(),
+                    outputName
+            );
         }
-
         return objectMapper.convertValue(
                 result,
                 Object.class
         );
     }
 
-    /**
-     * 读取受限 JSON 路径。
-     *
-     * 当前支持：
-     * $.data.xxx
-     * $.data.records
-     * $.data.project.id
-     *
-     * 不使用 JsonPath、SpEL 或脚本，
-     * 避免引入动态执行能力。
-     */
-    private JsonNode readBySimplePath(
-            JsonNode root,
-            String path) {
-
-        if (root == null
-                || !StringUtils.hasText(path)
-                || !path.startsWith("$.")) {
-            return null;
-        }
-
-        JsonNode current = root;
-
-        String[] parts =
-                path.substring(2)
-                        .split("\\.");
-
-        for (String part : parts) {
-            if (current == null
-                    || current.isMissingNode()
-                    || current.isNull()) {
-                return null;
-            }
-
-            current = current.path(part);
-        }
-
-        return current;
-    }
-
-    /**
-     * 投影数组字段。
-     *
-     * 例如：
-     * $.data.records[].id
-     * $.data.records[].projectCode
-     */
-    private void projectArrayField(
-            JsonNode root,
-            ObjectNode result,
-            FieldMeta field,
-            String outputName) {
-
-        String path = field.getPath();
-
-        int arrayIndex =
-                path.indexOf("[]");
-
-        if (arrayIndex < 0) {
-            return;
-        }
-
-        /*
-         * $.data.records[].id
-         * 转换为：
-         * arrayPath = $.data.records
-         * leafPath  = id
-         */
-        String arrayPath =
-                path.substring(0, arrayIndex);
-
-        String leafPath =
-                path.length() > arrayIndex + 3
-                        ? path.substring(arrayIndex + 3)
-                        : "";
-
-        if (!StringUtils.hasText(leafPath)) {
-            return;
-        }
-
-        JsonNode sourceArray =
-                readBySimplePath(
-                        root,
-                        arrayPath
-                );
-
-        if (sourceArray == null
-                || !sourceArray.isArray()) {
-            return;
-        }
-
-        /*
-         * 数组名称保持机器字段结构。
-         *
-         * $.data.records 对应 records。
-         */
-        String arrayName =
-                arrayPath.substring(
-                        arrayPath.lastIndexOf('.') + 1
-                );
-
-        ArrayNode targetArray =
-                result.withArray(arrayName);
-
-        for (int index = 0;
-             index < sourceArray.size();
-             index++) {
-
-            /*
-             * 先补齐目标数组位置，
-             * 保证目标记录顺序与业务接口返回顺序一致。
-             */
-            while (targetArray.size() <= index) {
-                targetArray.add(
-                        objectMapper.createObjectNode()
-                );
-            }
-
-            ObjectNode targetRow =
-                    (ObjectNode) targetArray.get(index);
-
-            JsonNode sourceRow =
-                    sourceArray.get(index);
-
-            if (sourceRow == null
-                    || !sourceRow.isObject()) {
-                continue;
-            }
-
-            JsonNode value =
-                    readBySimplePath(
-                            sourceRow,
-                            "$." + leafPath
-                    );
-
-            if (value == null
-                    || value.isMissingNode()
-                    || value.isNull()) {
-                continue;
-            }
-
-            /*
-             * 同一条列表记录的多个字段会写入同一个对象。
-             */
-            targetRow.set(outputName, value);
-        }
-    }
 
     /**
      * 获取稳定机器字段名称。

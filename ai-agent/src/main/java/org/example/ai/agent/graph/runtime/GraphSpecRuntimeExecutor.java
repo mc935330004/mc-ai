@@ -29,6 +29,13 @@ public class GraphSpecRuntimeExecutor implements GraphSubgraphRunner{
     private final GraphNodeExecutorRegistry registry;
     private final Executor taskExecutor;
     private final RunStepRecorder runStepRecorder;
+    /**
+     * 当前线程同步执行器。
+     *
+     * 只用于FOREACH隔离任务内部的子图，
+     * 普通根工作流仍然使用graphRuntimeExecutor。
+     */
+    private static final Executor INLINE_EXECUTOR = Runnable::run;
 
     public GraphSpecRuntimeExecutor(
             GraphNodeExecutorRegistry registry,
@@ -63,10 +70,8 @@ public class GraphSpecRuntimeExecutor implements GraphSubgraphRunner{
         GraphExecutionContext context;
 
         try {
-            context =
-                    GraphExecutionContext.create(
-                            request
-                    );
+            context =GraphExecutionContext.create(request);
+
         } catch (GraphExecutionException exception) {
             return failure(
                     request,
@@ -78,30 +83,26 @@ public class GraphSpecRuntimeExecutor implements GraphSubgraphRunner{
                     graphStartedAt
             );
         }
+        /*
+         * 根工作流继续使用Graph运行线程池。
+         *
+         * FOREACH项目子图已经位于专用隔离线程中，
+         * 因此子图节点直接同步执行，避免线程池循环等待。
+         */
+        Executor selectedNodeExecutor =request.isInlineExecution()? INLINE_EXECUTOR : taskExecutor;
 
-        Map<String,
-                CompletableFuture<GraphNodeResult>>
-                futureByNode =
-                new LinkedHashMap<>();
+        Map<String, CompletableFuture<GraphNodeResult>>futureByNode = new LinkedHashMap<>();
 
         Map<String, Integer> stepNumber =
                 new LinkedHashMap<>();
 
-        for (int index = 0;
-             index < graph.topologicalOrder().size();
-             index++) {
-
-            stepNumber.put(
-                    graph.topologicalOrder().get(index),
-                    index + 1
-            );
+        for (int index = 0;index < graph.topologicalOrder().size(); index++) {
+            stepNumber.put( graph.topologicalOrder().get(index),index + 1);
         }
 
-        for (String nodeId :
-                graph.topologicalOrder()) {
+        for (String nodeId : graph.topologicalOrder()) {
 
-            CompiledGraphNode node =
-                    graph.nodesById().get(nodeId);
+            CompiledGraphNode node = graph.nodesById().get(nodeId);
 
             List<CompletableFuture<GraphNodeResult>>
                     upstreamFutures =
@@ -121,16 +122,14 @@ public class GraphSpecRuntimeExecutor implements GraphSubgraphRunner{
                                     CompletableFuture[]::new
                             )
                     );
-
-            CompletableFuture<GraphNodeResult> nodeFuture =
-                    dependencies.thenApplyAsync(
+            CompletableFuture<GraphNodeResult> nodeFuture = dependencies.thenApplyAsync(
                             ignored -> executeNode(
                                     node,
                                     upstreamFutures,
                                     context,
                                     stepNumber.get(nodeId)
                             ),
-                            taskExecutor
+                            selectedNodeExecutor
                     );
 
             futureByNode.put(

@@ -14,6 +14,7 @@ import org.example.ai.agent.graph.model.GraphNodeSpec;
 import org.example.ai.agent.graph.model.GraphSpec;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
+import org.example.ai.agent.graph.GraphSpecLimits;
 
 import java.io.IOException;
 import java.util.*;
@@ -41,12 +42,6 @@ public class GraphSpecCompiler {
     private static final int MAX_EDGES_PER_GRAPH = 100;
     private static final int MAX_TOTAL_NODES = 100;
 
-    /**
-     * root深度为0，ForEach body深度为1。
-     *
-     * 第一版不允许ForEach中继续嵌套ForEach。
-     */
-    private static final int MAX_FOREACH_DEPTH = 1;
 
     private static final Pattern IDENTIFIER_PATTERN =
             Pattern.compile(
@@ -76,7 +71,36 @@ public class GraphSpecCompiler {
             Pattern.compile(
                     "^[A-Z][A-Z0-9_]{2,63}$"
             );
+    /**
+     * 能力请求参数路径格式。
+     *
+     * 支持：
+     * current
+     * size
+     * page.current
+     *
+     * 不支持：
+     * SpEL、方法调用、数组通配符和脚本表达式。
+     */
+    private static final Pattern PAGINATION_INPUT_PATH_PATTERN =
+            Pattern.compile("^[\\p{L}_][\\p{L}\\p{N}_-]*" +
+                            "(?:\\.[\\p{L}\\p{N}_-]+)*$");
 
+    /**
+     * 分页响应数据的受限 JSON 路径。
+     *
+     * 支持：
+     * $.records
+     * $.data.records
+     * $.total
+     *
+     * 不支持：
+     * $..records
+     * $.records[?()]
+     * 脚本、过滤器和递归查询。
+     */
+    private static final Pattern PAGINATION_RESPONSE_PATH_PATTERN =
+            Pattern.compile("^\\$(?:\\.[\\p{L}\\p{N}_-]+)+$");
     private final ObjectMapper objectMapper;
     private final GraphCapabilityCatalog capabilityCatalog;
 
@@ -686,31 +710,58 @@ public class GraphSpecCompiler {
 
         return config;
     }
-    /**
-     * 读取能力契约并校验节点inputMapping。
-     */
-    private void validateCapabilityContract(
-            GraphNodeSpec node,
-            CapabilityNodeConfig config,
-            String graphPath,
-            List<GraphValidationError> errors) {
 
+    /**
+     * 读取能力输入契约并校验：
+     * 1. 普通 inputMapping；
+     * 2. 自动分页参数；
+     * 3. 分页参数是否确实存在于能力 Schema。
+     */
+    private void validateCapabilityContract( GraphNodeSpec node, CapabilityNodeConfig config,
+                                             String graphPath,List<GraphValidationError> errors) {
         try {
-            capabilityCatalog.findContract(
-                    config.capabilityCode()
-            ).ifPresent(contract ->
-                    validateCapabilityInputMapping(
-                            node,
-                            config,
-                            contract,
+            Optional<GraphCapabilityContract> contractOptional =capabilityCatalog.findContract(config.capabilityCode());
+
+            /*
+             * 普通能力可以兼容旧目录实现。
+             *
+             * 但自动分页必须拥有明确的能力请求契约，
+             * 否则无法判断 current、size 是否为真实接口字段。
+             */
+            if (contractOptional.isEmpty()) {
+
+                if (config.pagination() != null && config.pagination().isEnabled()) {
+
+                    addNodeError(errors,
+                            "GRAPH_PAGINATION_CONTRACT_REQUIRED",
                             graphPath,
-                            errors
-                    )
+                            node.getId(),
+                            "开启自动分页的能力必须提供请求参数契约"
+                    );
+                }
+                return;
+            }
+            GraphCapabilityContract contract =contractOptional.get();
+
+            validateCapabilityInputMapping(
+                    node,
+                    config,
+                    contract,
+                    graphPath,
+                    errors
             );
+            validateCapabilityPagination(
+                    node,
+                    config,
+                    contract,
+                    graphPath,
+                    errors
+            );
+
         } catch (Exception exception) {
             /*
-             * 已发布能力的契约无法读取时必须失败关闭，
-             * 不能跳过校验后继续发布工作流。
+             * 能力契约读取异常必须失败关闭，
+             * 不能跳过校验后发布工作流。
              */
             addNodeError(
                     errors,
@@ -719,6 +770,233 @@ public class GraphSpecCompiler {
                     node.getId(),
                     "能力输入契约暂时不可用："
                             + config.capabilityCode()
+            );
+        }
+    }
+    /**
+     * 校验能力节点的自动分页配置。
+     */
+    private void validateCapabilityPagination(
+            GraphNodeSpec node,
+            CapabilityNodeConfig config,
+            GraphCapabilityContract contract,
+            String graphPath,
+            List<GraphValidationError> errors) {
+
+        CapabilityPaginationConfig pagination =
+                config.pagination();
+
+        /*
+         * 没有开启分页时完全保持原来的单次能力调用逻辑。
+         */
+        if (pagination == null
+                || !pagination.isEnabled()) {
+            return;
+        }
+
+        boolean pageNumberValid =
+                validatePaginationInputPath(
+                        node,
+                        config,
+                        contract,
+                        pagination.pageNumberInputPath(),
+                        "pageNumberInputPath",
+                        graphPath,
+                        errors
+                );
+
+        boolean pageSizeValid =
+                validatePaginationInputPath(
+                        node,
+                        config,
+                        contract,
+                        pagination.pageSizeInputPath(),
+                        "pageSizeInputPath",
+                        graphPath,
+                        errors
+                );
+
+        /*
+         * 页码字段和每页数量字段不能使用同一个请求参数。
+         */
+        if (pageNumberValid
+                && pageSizeValid
+                && pagination.pageNumberInputPath()
+                .equals(pagination.pageSizeInputPath())) {
+
+            addNodeError(
+                    errors,
+                    "GRAPH_PAGINATION_INPUT_DUPLICATED",
+                    graphPath,
+                    node.getId(),
+                    "页码参数和每页数量参数不能使用同一个字段"
+            );
+        }
+
+        validatePaginationResponsePath(
+                node,
+                pagination.recordsPath(),
+                "recordsPath",
+                true,
+                graphPath,
+                errors
+        );
+
+        validatePaginationResponsePath(
+                node,
+                pagination.totalPath(),
+                "totalPath",
+                false,
+                graphPath,
+                errors
+        );
+
+        if (StringUtils.hasText(pagination.recordsPath())
+                && StringUtils.hasText(pagination.totalPath())
+                && pagination.recordsPath()
+                .equals(pagination.totalPath())) {
+
+            addNodeError(
+                    errors,
+                    "GRAPH_PAGINATION_RESPONSE_PATH_DUPLICATED",
+                    graphPath,
+                    node.getId(),
+                    "recordsPath 和 totalPath 不能相同"
+            );
+        }
+    }
+
+    /**
+     * 校验分页请求参数。
+     *
+     * 分页字段必须同时满足：
+     * 1. 字段格式合法；
+     * 2. 能力请求参数 Schema 已声明；
+     * 3. 当前节点 inputMapping 已配置。
+     */
+    private boolean validatePaginationInputPath(
+            GraphNodeSpec node,
+            CapabilityNodeConfig config,
+            GraphCapabilityContract contract,
+            String inputPath,
+            String configName,
+            String graphPath,
+            List<GraphValidationError> errors) {
+
+        if (!StringUtils.hasText(inputPath)) {
+
+            addNodeError(
+                    errors,
+                    "GRAPH_PAGINATION_PAGE_INPUT_REQUIRED",
+                    graphPath,
+                    node.getId(),
+                    configName + "不能为空"
+            );
+
+            return false;
+        }
+
+        String normalizedPath =
+                inputPath.trim();
+
+        if (!PAGINATION_INPUT_PATH_PATTERN
+                .matcher(normalizedPath)
+                .matches()) {
+
+            addNodeError(
+                    errors,
+                    "GRAPH_PAGINATION_INPUT_PATH_INVALID",
+                    graphPath,
+                    node.getId(),
+                    "分页请求参数路径格式不正确："
+                            + normalizedPath
+            );
+
+            return false;
+        }
+
+        /*
+         * 这是防止凭空增加 current、size 等字段的关键校验。
+         */
+        if (!contract.allowedInputPaths()
+                .contains(normalizedPath)) {
+
+            addNodeError(
+                    errors,
+                    "GRAPH_PAGINATION_INPUT_NOT_DECLARED",
+                    graphPath,
+                    node.getId(),
+                    "分页参数未在能力请求参数Schema中声明："
+                            + normalizedPath
+            );
+
+            return false;
+        }
+
+        /*
+         * P1-2 分页执行器会读取第一次调用的页码和分页大小，
+         * 因此 inputMapping 必须配置对应字段。
+         */
+        if (!containsMappingPath(
+                config.inputMapping(),
+                normalizedPath)) {
+
+            addNodeError(
+                    errors,
+                    "GRAPH_PAGINATION_INPUT_MAPPING_REQUIRED",
+                    graphPath,
+                    node.getId(),
+                    "自动分页参数尚未配置输入映射："
+                            + normalizedPath
+            );
+
+            return false;
+        }
+
+        return true;
+    }
+
+    /**
+     * 校验分页响应数据路径。
+     */
+    private void validatePaginationResponsePath( GraphNodeSpec node,
+            String responsePath,
+            String configName,
+            boolean required,
+            String graphPath,
+            List<GraphValidationError> errors) {
+
+        if (!StringUtils.hasText(responsePath)) {
+            if (required) {
+                addNodeError(
+                        errors,
+                        "GRAPH_PAGINATION_RECORDS_PATH_REQUIRED",
+                        graphPath,
+                        node.getId(),
+                        configName + "不能为空"
+                );
+            }
+            /*
+             * totalPath 允许不配置。
+             *
+             * P1-2 中未配置 totalPath 时，
+             * 使用“当前页数量小于 size”作为结束条件。
+             */
+            return;
+        }
+
+        String normalizedPath =responsePath.trim();
+
+        if (!PAGINATION_RESPONSE_PATH_PATTERN
+                .matcher(normalizedPath)
+                .matches()) {
+            addNodeError(
+                    errors,
+                    "GRAPH_PAGINATION_RESPONSE_PATH_INVALID",
+                    graphPath,
+                    node.getId(),
+                    configName + "必须使用受限JSON路径："
+                            + normalizedPath
             );
         }
     }
@@ -971,15 +1249,15 @@ public class GraphSpecCompiler {
 
         CompiledGraphSpec body = null;
 
-        if (depth >= MAX_FOREACH_DEPTH) {
+        if (depth >= GraphSpecLimits.MAX_FOREACH_NESTING_DEPTH) {
             addNodeError(
                     errors,
                     "GRAPH_NESTING_DEPTH_EXCEEDED",
                     graphPath,
                     node.getId(),
-                    "第一版不允许FOREACH子图继续嵌套FOREACH"
+                    "FOREACH最多允许嵌套" + GraphSpecLimits.MAX_FOREACH_NESTING_DEPTH
+                            + "层：第一层处理项目，第二层处理业务记录"
             );
-
         } else if (config.body() == null) {
             addNodeError(
                     errors,

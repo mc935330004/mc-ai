@@ -13,16 +13,18 @@ import java.util.Map;
  *
  * 示例：
  * 用户问：“查询 A 项目回款情况，并分析风险”
- *
  * 可以拆成：
  * 1. 查询项目
  * 2. 查询合同
  * 3. 查询回款
  * 4. 检索风险制度
  * 5. 汇总生成回答
+ * 开启toBuilder后，分页执行器可以为每一页创建独立PlanStep，
+ * 不需要修改原始步骤对象。
  */
+
 @Data
-@Builder
+@Builder(toBuilder = true)
 public class PlanStep {
 
     /**

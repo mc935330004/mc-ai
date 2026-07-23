@@ -36,6 +36,26 @@ public class GraphExecutionRequest {
     private Object currentItem;
 
     /**
+     * 当前图拥有的祖先FOREACH数量。
+     *
+     * root图为0；
+     * 外层项目循环body为1；
+     * 内层业务记录循环body为2。
+     */
+    @Builder.Default
+    private int forEachDepth = 0;
+
+    /**
+     * 是否在当前线程同步执行子图节点。
+     *
+     * FOREACH项目任务已经运行在隔离线程池中，
+     * 子图再提交到graphRuntimeExecutor会产生循环等待风险，
+     * 因此FOREACH子图统一使用同步执行。
+     */
+    @Builder.Default
+    private boolean inlineExecution = false;
+
+    /**
      * 子图启动时继承的父图变量快照。
      *
      * 每个FOREACH项目都会获得独立副本。

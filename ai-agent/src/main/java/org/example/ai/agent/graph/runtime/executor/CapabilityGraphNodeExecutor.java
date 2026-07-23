@@ -14,6 +14,7 @@ import org.example.ai.agent.tool.BusinessCapabilityExecutor;
 import org.example.ai.agent.tool.ToolExecutionContext;
 import org.example.ai.agent.tool.ToolResult;
 import org.springframework.stereotype.Component;
+import org.example.ai.agent.graph.runtime.pagination.CapabilityPaginationExecutor;
 
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -35,12 +36,16 @@ import java.util.Map;
 public class CapabilityGraphNodeExecutor
         implements GraphNodeExecutor {
 
-    private final BusinessCapabilityExecutor
-            businessCapabilityExecutor;
+    private final BusinessCapabilityExecutor  businessCapabilityExecutor;
 
-    private final GraphRuntimeExpressionResolver
-            expressionResolver;
-
+    private final GraphRuntimeExpressionResolver expressionResolver;
+    /**
+     * 自动分页能力执行器。
+     *
+     * 只有pagination.enabled=true时使用，
+     * 普通能力仍然走原来的单次调用逻辑。
+     */
+    private final CapabilityPaginationExecutor capabilityPaginationExecutor;
     /**
      * 当前执行器负责CAPABILITY节点。
      */
@@ -134,12 +139,18 @@ public class CapabilityGraphNodeExecutor
                         )
                         .build();
 
-        ToolResult toolResult =
-                businessCapabilityExecutor.execute(
-                        toolContext,
-                        step
-                );
-
+        ToolResult toolResult;
+        /*
+         * 分页能力和普通能力共用同一个CAPABILITY节点类型。
+         *
+         * 这样不会为每一种查询接口继续堆积新的节点类型，
+         * 新增、修改等写能力也不会受到分页逻辑影响。
+         */
+        if (config.pagination() != null && config.pagination().isEnabled()) {
+            toolResult = capabilityPaginationExecutor.execute(toolContext,step,config.pagination() );
+        } else {
+            toolResult =businessCapabilityExecutor.execute(toolContext,step);
+        }
         if (toolResult == null) {
             return GraphNodeResult.failure(
                     node,
@@ -151,8 +162,7 @@ public class CapabilityGraphNodeExecutor
         /*
          * metadata只能保存安全的审计信息。
          */
-        Map<String, Object> metadata =
-                new LinkedHashMap<>();
+        Map<String, Object> metadata =new LinkedHashMap<>();
 
         if (toolResult.getInput() != null) {
             metadata.put(

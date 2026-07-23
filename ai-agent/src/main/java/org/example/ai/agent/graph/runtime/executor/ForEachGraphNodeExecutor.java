@@ -2,6 +2,7 @@ package org.example.ai.agent.graph.runtime.executor;
 
 import org.example.ai.agent.common.enums.ForEachItemStatus;
 import org.example.ai.agent.common.enums.GraphNodeType;
+import org.example.ai.agent.graph.GraphSpecLimits;
 import org.example.ai.agent.graph.compiler.CompiledGraphNode;
 import org.example.ai.agent.graph.config.CompiledForEachNodeConfig;
 import org.example.ai.agent.graph.config.ForEachMissingValueSkip;
@@ -36,20 +37,23 @@ public class ForEachGraphNodeExecutor
             subgraphRunner;
 
     /**
-     * 项目级并发使用独立线程池。
-     *
-     * 子图内部节点仍使用graphRuntimeExecutor，
-     * 两个线程池不能共用，否则存在嵌套等待死锁风险。
+     * 第一层项目循环线程池。
      */
-    private final Executor itemExecutor;
+    private final Executor outerItemExecutor;
+
+    /**
+     * 第二层业务记录循环线程池。
+     */
+    private final Executor nestedItemExecutor;
 
     public ForEachGraphNodeExecutor(
-            GraphRuntimeExpressionResolver
-                    expressionResolver,
+            GraphRuntimeExpressionResolver expressionResolver,
             @Lazy
             GraphSubgraphRunner subgraphRunner,
             @Qualifier("graphForEachExecutor")
-            Executor itemExecutor) {
+            Executor outerItemExecutor,
+            @Qualifier("graphNestedForEachExecutor")
+            Executor nestedItemExecutor) {
 
         this.expressionResolver =
                 expressionResolver;
@@ -57,8 +61,9 @@ public class ForEachGraphNodeExecutor
         this.subgraphRunner =
                 subgraphRunner;
 
-        this.itemExecutor =
-                itemExecutor;
+        this.outerItemExecutor = outerItemExecutor;
+
+        this.nestedItemExecutor =nestedItemExecutor;
     }
 
     @Override
@@ -80,7 +85,24 @@ public class ForEachGraphNodeExecutor
                     "FOREACH节点配置类型不正确"
             );
         }
+        int currentDepth =
+                context.getForEachDepth();
 
+        /*
+         * 编译器负责正常工作流校验，
+         * 运行时保护旧快照、异常快照和绕过编译器的调用。
+         */
+        if (currentDepth>= GraphSpecLimits.MAX_FOREACH_NESTING_DEPTH) {
+
+            return GraphNodeResult.failure(
+                    node,
+                    "GRAPH_NESTING_DEPTH_EXCEEDED",
+                    "FOREACH运行深度超过"
+                            + GraphSpecLimits
+                            .MAX_FOREACH_NESTING_DEPTH
+                            + "层"
+            );
+        }
         Object source;
 
         try {
@@ -154,26 +176,36 @@ public class ForEachGraphNodeExecutor
         Map<String, Object> parentVariables =
                 context.snapshotVariables();
 
+        /*
+         * 第一层和第二层使用不同线程池。
+         *
+         * currentDepth=0：
+         * 当前是最多5个项目的外层循环。
+         *
+         * currentDepth=1：
+         * 当前是业务接口返回记录的内层循环。
+         */
+        Executor selectedItemExecutor =
+                currentDepth == 0
+                        ? outerItemExecutor
+                        : nestedItemExecutor;
+
         List<ForEachItemResult> itemResults = config.continueOnItemError()
                         ? executeConcurrent(
-                                node,
-                                config,
-                                items,
-                                context,
-                                parentVariables
-                        )
+                        node,
+                        config,
+                        items,
+                        context,
+                        parentVariables,
+                        selectedItemExecutor)
                         : executeSequential(
-                                node,
-                                config,
-                                items,
-                                context,
-                                parentVariables
-                        );
-
-        ForEachBatchResult batch =
-                ForEachBatchResult.from(
-                        itemResults
+                        node,
+                        config,
+                        items,
+                        context,
+                        parentVariables
                 );
+        ForEachBatchResult batch =ForEachBatchResult.from(itemResults);
 
         /*
          * continueOnItemError=false：
@@ -215,19 +247,22 @@ public class ForEachGraphNodeExecutor
         }
 
         String summary;
-        if (batch.failureCount() == 0 && batch.skippedCount() == 0) {
+        if (batch.allSucceeded()) {
             summary = "FOREACH执行成功，共处理"
                     + batch.totalCount()
                     + "条记录";
         } else {
-            summary = "FOREACH执行完成：成功"
+            summary = "FOREACH执行完成：可用"
                     + batch.successCount()
+                    + "条，其中部分成功"
+                    + batch.partialCount()
                     + "条，失败"
                     + batch.failureCount()
                     + "条，跳过"
                     + batch.skippedCount()
                     + "条";
         }
+
         return GraphNodeResult.success(
                 node,
                 batch,
@@ -240,11 +275,14 @@ public class ForEachGraphNodeExecutor
                         batch.totalCount(),
                         "successCount",
                         batch.successCount(),
+                        "partialCount",
+                        batch.partialCount(),
                         "failureCount",
                         batch.failureCount(),
                         "skippedCount",
                         batch.skippedCount()
-                ));
+                )
+        );
     }
 
     /**
@@ -255,7 +293,8 @@ public class ForEachGraphNodeExecutor
             CompiledForEachNodeConfig config,
             List<Object> items,
             GraphExecutionContext parentContext,
-            Map<String, Object> parentVariables) {
+            Map<String, Object> parentVariables,
+            Executor selectedItemExecutor) {
 
         /*
          * processAllItems只解除记录总数限制，
@@ -281,8 +320,7 @@ public class ForEachGraphNodeExecutor
             Object item = items.get(index);
 
             CompletableFuture<ForEachItemResult> future =
-                    CompletableFuture.supplyAsync(
-                            () -> executeWithPermit(
+                    CompletableFuture.supplyAsync( () -> executeWithPermit(
                                     semaphore,
                                     node,
                                     config,
@@ -291,9 +329,8 @@ public class ForEachGraphNodeExecutor
                                     parentContext,
                                     parentVariables
                             ),
-                            itemExecutor
+                            selectedItemExecutor
                     );
-
             futures.add(future);
         }
 
@@ -460,6 +497,12 @@ public class ForEachGraphNodeExecutor
                                     parentVariables
                             )
                             .executionPath(childPath)
+                            .forEachDepth(parentContext.getForEachDepth() + 1)
+                            /*
+                             * 当前循环项已经运行在FOREACH隔离线程池中，
+                             * 子图内部不再提交到Graph运行线程池。
+                             */
+                            .inlineExecution(true)
                             .build();
 
 
@@ -495,20 +538,16 @@ public class ForEachGraphNodeExecutor
                 );
             }
 
-            if (!childResult.success()) {
-                return ForEachItemResult.failure(
-                        index,
-                        item,
-                        childResult.errorCode(),
-                        childResult.errorMessage(),
-                        duration
-                );
-            }
-
-            return ForEachItemResult.success(
+            /*
+             * 统一判断子图结果。
+             *
+             * 如果子图中包含嵌套FOREACH，
+             * fromChildResult会把内层失败或跳过传播为PARTIAL_SUCCESS。
+             */
+            return ForEachItemResult.fromChildResult(
                     index,
                     item,
-                    childResult.result(),
+                    childResult,
                     duration
             );
 

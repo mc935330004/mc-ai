@@ -174,18 +174,12 @@ public class WorkflowRunServiceImpl extends ServiceImpl<WorkflowRunMapper,Workfl
         int failure = 0;
         int skipped = 0;
 
-        for (WorkflowBatchSummary batch :
-                outcome.batches()) {
-
+        for (WorkflowBatchSummary batch :outcome.batches()) {
             total += batch.totalCount();
             success += batch.successCount();
             failure += batch.failureCount();
             skipped += batch.skippedCount();
-
-            saveBatchItems(
-                    runId,
-                    batch
-            );
+            saveBatchItems(runId, batch);
         }
 
         WorkflowRunStatus status;

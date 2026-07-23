@@ -20,6 +20,10 @@ public class GraphExecutionContext {
     private final Map<String, Object> secureContext;
     private final Object currentItem;
     private final String executionPath;
+    /**
+     * 当前图拥有的祖先FOREACH数量。
+     */
+    private final int forEachDepth;
 
     /**
      * 不同并行分支会同时写入不同outputKey。
@@ -44,6 +48,15 @@ public class GraphExecutionContext {
         );
         this.currentItem =
                 request.getCurrentItem();
+        if (request.getForEachDepth() < 0) {
+            throw new GraphExecutionException(
+                    "GRAPH_FOREACH_DEPTH_INVALID",
+                    "FOREACH执行深度不能小于0"
+            );
+        }
+
+        this.forEachDepth =
+                request.getForEachDepth();
         this.executionPath =
                 StringUtils.hasText(
                         request.getExecutionPath()
@@ -100,6 +113,12 @@ public class GraphExecutionContext {
         return Collections.unmodifiableMap(
                 new LinkedHashMap<>(variables)
         );
+    }
+    /**
+     * 获取当前图的祖先FOREACH数量。
+     */
+    public int getForEachDepth() {
+        return forEachDepth;
     }
 
     public String getRunId() {

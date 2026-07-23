@@ -1,5 +1,6 @@
 package org.example.ai.agent.workflow.runtime;
 
+import org.example.ai.agent.common.enums.GraphNodeType;
 import org.example.ai.agent.graph.runtime.ForEachBatchResult;
 import org.example.ai.agent.graph.runtime.GraphExecutionResult;
 import org.example.ai.agent.graph.runtime.GraphNodeResult;
@@ -136,9 +137,17 @@ public class WorkflowExecutionOutcomeFactory {
                                     nodeId,
                                     batch.totalCount(),
                                     batch.successCount(),
+                                    batch.partialCount(),
                                     batch.failureCount(),
                                     batch.skippedCount(),
                                     batch.partialSuccess(),
+                                    /*
+                                     * 递归统计项目下面的明细批次，
+                                     * 但不把明细数量重复计入项目总数。
+                                     */
+                                    WorkflowDescendantSummary.from(
+                                            batch
+                                    ),
                                     batch.items()
                             )
                     );
@@ -148,38 +157,39 @@ public class WorkflowExecutionOutcomeFactory {
     }
 
     /**
-     * 从节点执行结果中查找 FOREACH 批量结果。
+     * 从FOREACH节点结果中提取批量执行结果。
+     *
+     * 重要说明：
+     * END节点可能把FOREACH结果作为最终结果返回，
+     * 但它不是真正的循环节点，不能再次计入批次统计，
+     * 否则会造成项目数量和项目明细重复。
      */
-    private ForEachBatchResult findBatch(
-            GraphNodeResult nodeResult) {
+    private ForEachBatchResult findBatch(GraphNodeResult nodeResult) {
 
-        if (nodeResult == null) {
+        /*
+         * 只允许真正的FOREACH节点产生批次摘要。
+         *
+         * 这项判断必须放在解析data和metadata之前，
+         * 从源头排除END、MERGE等节点回传的重复批次。
+         */
+        if (nodeResult == null || nodeResult.nodeType() != GraphNodeType.FOREACH) {
             return null;
         }
-
         /*
-         * FOREACH 节点正常执行完成。
+         * FOREACH节点正常执行完成时，
+         * 批量结果保存在data字段中。
          */
-        if (nodeResult.data()
-                instanceof ForEachBatchResult batch) {
-
+        if (nodeResult.data() instanceof ForEachBatchResult batch) {
             return batch;
         }
-
         /*
-         * FOREACH 因单项错误导致节点失败时，
-         * 批量执行结果保存在 metadata.batchResult 中。
+         * FOREACH因单项错误导致节点失败时，
+         * 批量结果保存在metadata.batchResult中。
          */
-        Map<String, Object> metadata =
-                nodeResult.metadata();
-
-        if (metadata != null
-                && metadata.get("batchResult")
-                instanceof ForEachBatchResult batch) {
-
+        Map<String, Object> metadata = nodeResult.metadata();
+        if (metadata != null && metadata.get("batchResult") instanceof ForEachBatchResult batch) {
             return batch;
         }
-
         return null;
     }
 }
