@@ -61,4 +61,11 @@ public class ActionPreviewVO {
      * 是否需要用户确认。
      */
     private Boolean requireConfirm;
+
+    /**
+     * 中文展示参数。
+     *
+     * 只用于预览，不能提交给业务接口。
+     */
+    private Map<String, Object> displayInput;
 }

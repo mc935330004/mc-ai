@@ -28,6 +28,7 @@ import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
+import org.example.ai.agent.capability.ui.CapabilityUiSchemaParser;
 
 import java.time.LocalDateTime;
 import java.util.LinkedHashMap;
@@ -55,6 +56,10 @@ public class CapabilityDefinitionServiceImpl extends ServiceImpl<CapabilityDefin
      */
     private final CapabilityBindingConfigurationService bindingConfigurationService;
 
+    /**
+     * 通用动态表单 Schema 解析器。
+     */
+    private final CapabilityUiSchemaParser uiSchemaParser;
 
     /**
      * 根据能力编码查询启用状态的能力。
@@ -501,15 +506,22 @@ public class CapabilityDefinitionServiceImpl extends ServiceImpl<CapabilityDefin
     public List<CapabilityDefinition> listAgentCallableCapabilities() {
         List<CapabilityDefinition> registries =
                 lambdaQuery()
-                        .eq(CapabilityDefinition::getEnabled, 1)
+                        .eq(CapabilityDefinition::getEnabled,1)
                         .eq(CapabilityDefinition::getPublishStatus,
                                 "PUBLISHED")
-                        .isNotNull( CapabilityDefinition::getActiveVersionId)
+                        .isNotNull(CapabilityDefinition::getActiveVersionId)
                         .orderByAsc(CapabilityDefinition::getDomain)
                         .orderByAsc(CapabilityDefinition::getCapabilityCode)
                         .list();
+
         return registries.stream()
                 .map(runtimeSnapshotResolver::resolve)
+                /*
+                 * OPTION_SOURCE只能被表单字段精确引用，
+                 * 不进入大模型能力候选和工作流节点库。
+                 */
+                .filter(capability ->!uiSchemaParser.isOptionSource(
+                                capability.getInputSchemaJson()))
                 .toList();
 
     }
@@ -600,6 +612,23 @@ public class CapabilityDefinitionServiceImpl extends ServiceImpl<CapabilityDefin
         validateBusinessSystem(capability);
         validateSideEffect(capability);
         validateSchema(capability.getCapabilityCode(),"inputSchemaJson",capability.getInputSchemaJson());
+        /*
+         * 草稿可以暂存。
+         * 正式发布时必须保证动态表单协议完整。
+         */
+        uiSchemaParser.parse(capability.getInputSchemaJson());
+
+        /*
+         * OPTION_SOURCE只能调用只读查询接口，
+         * 不能将WRITE能力伪装成下拉数据源。
+         */
+        if (uiSchemaParser.isOptionSource(capability.getInputSchemaJson()) && !"READ".equalsIgnoreCase(capability.getSideEffect())) {
+            throw new BusinessException(
+                    400,
+                    "OPTION_SOURCE能力必须是READ："
+                            + capability.getCapabilityCode()
+            );
+        }
         validateSchema(capability.getCapabilityCode(),"outputSchemaJson",capability.getOutputSchemaJson());
         /*
          * 发布时必须重新校验数据库中的请求和响应绑定，

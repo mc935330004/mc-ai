@@ -25,7 +25,13 @@ import org.example.ai.agent.graph.config.CapabilityNodeConfig;
 import org.example.ai.agent.graph.runtime.GraphExecutionContext;
 import org.example.ai.agent.graph.runtime.GraphExecutionRequest;
 import org.example.ai.agent.graph.runtime.GraphRuntimeExpressionResolver;
+import com.fasterxml.jackson.databind.JsonNode;
+import org.example.ai.agent.capability.entity.CapabilityDefinition;
+import org.example.ai.agent.capability.service.CapabilityDefinitionService;
+import org.example.ai.agent.capability.ui.CapabilityOptionService;
+import org.example.ai.agent.capability.vo.CapabilityOptionResolution;
 
+import java.util.Optional;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -58,6 +64,15 @@ public class WorkflowPlanner {
      * 复用 GraphSpec 原有受限表达式解析器。
      */
     private final GraphRuntimeExpressionResolver expressionResolver;
+    /**
+     * 读取WRITE能力发布快照。
+     */
+    private final CapabilityDefinitionService  capabilityDefinitionService;
+
+    /**
+     * 解析远程下拉中文名称和真实ID。
+     */
+    private final CapabilityOptionService capabilityOptionService;
 
     public WorkflowPlan plan(String userQuestion, ModelCallContext sourceContext) {
 
@@ -126,12 +141,30 @@ public class WorkflowPlanner {
         String sideEffect =writeConfig == null
                         ? "READ"
                         : "WRITE";
+        CapabilityDefinition writeCapability =
+                writeConfig == null? null
+                        : getRequiredWriteCapability(
+                        writeConfig.capabilityCode() );
 
+        JsonNode actionInputSchema = writeCapability == null
+                        ? null
+                        : readSchema(writeCapability.getInputSchemaJson());
         WorkflowParameterExtraction extraction =extractParameters(
                         userQuestion,
                         published,
                         sourceContext);
-
+        /*
+         * 即使工作流输入还没有通过校验，
+         * 也先按受限inputMapping生成WRITE表单初始值。
+         *
+         * 这里只解析$input，不执行能力。
+         */
+        Map<String, Object> rawActionInput =
+                writeConfig == null? new LinkedHashMap<>()
+                        : resolveWriteInput(
+                        writeConfig,
+                        extraction.input(),
+                        sourceContext);
         String schemaJson =writeJson(published.inputSchema());
 
         CapabilityInputValidationResult validation =
@@ -173,7 +206,17 @@ public class WorkflowPlanner {
                             writeNode == null
                                     ? null
                                     : writeNode.name()
+                    ).input(
+                            writeConfig == null
+                                    ? extraction.input()
+                                    : rawActionInput
                     )
+                    .actionCapabilityVersionId(
+                            writeCapability == null
+                                    ? null
+                                    : writeCapability.getActiveVersionId()
+                    )
+                    .actionInputSchema(actionInputSchema)
                     .build();
         }
         Map<String, Object> actionInput =new LinkedHashMap<>();
@@ -223,6 +266,247 @@ public class WorkflowPlanner {
                                 ? null
                                 : writeNode.name()
                 ).actionInput(actionInput)
+                .actionCapabilityVersionId(writeCapability == null ? null : writeCapability.getActiveVersionId())
+                .actionInputSchema(actionInputSchema)
+                .build();
+    }
+
+    /**
+     * 处理前端提交的WRITE动态表单。
+     *
+     * 该入口不调用大模型重新选择工作流，
+     * 只允许精确恢复已经发布的工作流和能力。
+     */
+    public WorkflowPlan planActionForm(
+            Map<String, Object> submission,
+            ModelCallContext sourceContext,
+            String authorization) {
+
+        if (submission == null) {
+            throw new BusinessException(
+                    400,
+                    "WRITE表单提交不能为空"
+            );
+        }
+
+        String workflowCode =
+                requiredSubmissionText(
+                        submission,
+                        "workflowCode"
+                );
+
+        String capabilityCode =
+                requiredSubmissionText(
+                        submission,
+                        "capabilityCode"
+                );
+
+        Long workflowVersionId =
+                requiredSubmissionLong(
+                        submission,
+                        "workflowVersionId"
+                );
+
+        Long capabilityVersionId =
+                requiredSubmissionLong(
+                        submission,
+                        "capabilityVersionId"
+                );
+
+        Map<String, Object> rawInput =
+                readSubmissionInput(
+                        submission.get("input")
+                );
+
+        WorkflowDefinition selected =
+                workflowService
+                        .listAgentCallableDefinitions()
+                        .stream()
+                        .filter(item ->
+                                workflowCode.equals(
+                                        item.getWorkflowCode()
+                                )
+                        )
+                        .findFirst()
+                        .orElseThrow(() ->
+                                new BusinessException(
+                                        404,
+                                        "WRITE工作流不存在、未启用或未发布："
+                                                + workflowCode
+                                )
+                        );
+
+        PublishedWorkflow published =
+                snapshotResolver.resolveByCode(
+                        workflowCode
+                );
+
+        if (!Objects.equals(
+                workflowVersionId,
+                published.version().getId()
+        )) {
+            throw new BusinessException(
+                    409,
+                    "工作流版本已经变化，请重新打开操作表单"
+            );
+        }
+
+        CompiledGraphNode writeNode = findWriteNode(published);
+
+        if (writeNode == null || !(writeNode.config() instanceof CapabilityNodeConfig writeConfig)) {
+            throw new BusinessException(
+                    400,
+                    "工作流中没有合法的WRITE能力节点"
+            );
+        }
+
+        if (!capabilityCode.equals(writeConfig.capabilityCode())) {
+            throw new BusinessException(
+                    400,
+                    "提交的WRITE能力不属于当前工作流"
+            );
+        }
+
+        CapabilityDefinition writeCapability = getRequiredWriteCapability( capabilityCode);
+
+        if (!Objects.equals(
+                capabilityVersionId,
+                writeCapability.getActiveVersionId()
+        )) {
+            throw new BusinessException(
+                    409,
+                    "WRITE能力版本已经变化，请重新打开操作表单"
+            );
+        }
+
+        String schemaJson =
+                writeCapability.getInputSchemaJson();
+
+        JsonNode schemaNode = readSchema(schemaJson);
+
+        CapabilityOptionResolution resolution =
+                capabilityOptionService.resolveInput(
+                        capabilityCode,
+                        rawInput,
+                        sourceContext == null
+                                ? null
+                                : sourceContext.getUserId(),
+                        authorization
+                );
+
+        if (!resolution.isReady()) {
+            return WorkflowPlan.builder()
+                    .status(
+                            WorkflowPlanStatus.NEED_CLARIFY
+                    )
+                    .workflowCode(workflowCode)
+                    .workflowName(
+                            published.compiledGraph().name()
+                    )
+                    .versionId(workflowVersionId)
+                    .input(rawInput)
+                    .confidence(1D)
+                    .reason(
+                            "WRITE表单选项需要用户确认"
+                    )
+                    .clarifyQuestion(
+                            resolution.getClarifyQuestion()
+                    )
+                    .sideEffect("WRITE")
+                    .actionCapabilityCode(
+                            capabilityCode
+                    )
+                    .actionCapabilityName(
+                            writeNode.name()
+                    )
+                    .actionCapabilityVersionId(
+                            capabilityVersionId
+                    )
+                    .actionInputSchema(schemaNode)
+                    .actionDisplayInput(
+                            resolution.getDisplayInput()
+                    )
+                    .build();
+        }
+
+        CapabilityInputValidationResult validation =
+                inputValidator.validate(
+                        schemaJson,
+                        resolution.getRequestInput()
+                );
+
+        if (!validation.isValid()) {
+            return WorkflowPlan.builder()
+                    .status(
+                            WorkflowPlanStatus.NEED_CLARIFY
+                    )
+                    .workflowCode(workflowCode)
+                    .workflowName(
+                            published.compiledGraph().name()
+                    )
+                    .versionId(workflowVersionId)
+                    .input(rawInput)
+                    .confidence(1D)
+                    .reason(
+                            "WRITE表单参数未通过Schema校验"
+                    )
+                    .clarifyQuestion(
+                            buildClarifyQuestion(validation)
+                    )
+                    .sideEffect("WRITE")
+                    .actionCapabilityCode(
+                            capabilityCode
+                    )
+                    .actionCapabilityName(
+                            writeNode.name()
+                    )
+                    .actionCapabilityVersionId(
+                            capabilityVersionId
+                    )
+                    .actionInputSchema(schemaNode)
+                    .actionDisplayInput(
+                            resolution.getDisplayInput()
+                    )
+                    .build();
+        }
+
+        return WorkflowPlan.builder()
+                .status(WorkflowPlanStatus.READY)
+                .workflowCode(workflowCode)
+                .workflowName(
+                        published.compiledGraph().name()
+                )
+                .versionId(workflowVersionId)
+                .input(
+                        validation.getSanitizedInput()
+                )
+                .confidence(1D)
+                .reason(
+                        "WRITE动态表单已通过校验"
+                )
+                .sideEffect("WRITE")
+                .actionCapabilityCode(
+                        capabilityCode
+                )
+                .actionCapabilityName(
+                        writeNode.name()
+                )
+                .actionCapabilityVersionId(
+                        capabilityVersionId
+                )
+                .actionInputSchema(schemaNode)
+                /*
+                 * PendingAction只保存该真实请求参数。
+                 */
+                .actionInput(
+                        validation.getSanitizedInput()
+                )
+                /*
+                 * 中文名称只用于预览。
+                 */
+                .actionDisplayInput(
+                        resolution.getDisplayInput()
+                )
                 .build();
     }
 
@@ -537,5 +821,172 @@ public class WorkflowPlanner {
             }
         }
         return null;
+    }
+
+    /**
+     * 使用现有受限表达式解析器生成WRITE表单初始值。
+     */
+    private Map<String, Object> resolveWriteInput(
+            CapabilityNodeConfig writeConfig,
+            Map<String, Object> rawInput,
+            ModelCallContext sourceContext) {
+
+        GraphExecutionContext context =
+                GraphExecutionContext.create(
+                        GraphExecutionRequest.builder()
+                                .runId(
+                                        sourceContext == null
+                                                ? null
+                                                : sourceContext
+                                                .getRunId()
+                                )
+                                .userId(
+                                        sourceContext == null
+                                                ? null
+                                                : sourceContext
+                                                .getUserId()
+                                )
+                                .input(
+                                        rawInput == null
+                                                ? Map.of()
+                                                : rawInput
+                                )
+                                .executionPath("root")
+                                .build()
+                );
+
+        return expressionResolver.resolveMap(
+                writeConfig.inputMapping(),
+                context
+        );
+    }
+
+    /**
+     * 读取已启用、已发布、需要确认的WRITE能力。
+     */
+    private CapabilityDefinition getRequiredWriteCapability(
+            String capabilityCode) {
+
+        CapabilityDefinition capability =
+                capabilityDefinitionService
+                        .getEnabledByCode(
+                                capabilityCode
+                        );
+
+        if (capability == null) {
+            throw new BusinessException(
+                    404,
+                    "WRITE能力不存在、未启用或未发布："
+                            + capabilityCode
+            );
+        }
+
+        if (!"WRITE".equalsIgnoreCase(
+                capability.getSideEffect()
+        ) || !Boolean.TRUE.equals(
+                capability.getRequireConfirm()
+        )) {
+            throw new BusinessException(
+                    400,
+                    "能力不是需要确认的WRITE能力："
+                            + capabilityCode
+            );
+        }
+
+        return capability;
+    }
+
+    private JsonNode readSchema(String schemaJson) {
+        try {
+            JsonNode schema =
+                    objectMapper.readTree(schemaJson);
+
+            if (schema == null || !schema.isObject()) {
+                throw new BusinessException(
+                        400,
+                        "WRITE能力inputSchemaJson必须是JSON对象"
+                );
+            }
+
+            return schema;
+        } catch (BusinessException exception) {
+            throw exception;
+        } catch (JsonProcessingException exception) {
+            throw new BusinessException(
+                    400,
+                    "WRITE能力inputSchemaJson不是合法JSON"
+            );
+        }
+    }
+
+    private String requiredSubmissionText(
+            Map<String, Object> submission,
+            String fieldName) {
+
+        Object value =
+                submission.get(fieldName);
+
+        String textValue =
+                value == null
+                        ? ""
+                        : String.valueOf(value)
+                        .trim();
+
+        if (!StringUtils.hasText(textValue)) {
+            throw new BusinessException(
+                    400,
+                    "WRITE表单缺少字段："
+                            + fieldName
+            );
+        }
+
+        return textValue;
+    }
+
+    private Long requiredSubmissionLong(
+            Map<String, Object> submission,
+            String fieldName) {
+
+        Object value =
+                submission.get(fieldName);
+
+        if (value instanceof Number number) {
+            return number.longValue();
+        }
+
+        try {
+            return Long.valueOf(
+                    String.valueOf(value)
+            );
+        } catch (Exception exception) {
+            throw new BusinessException(
+                    400,
+                    "WRITE表单版本字段不合法："
+                            + fieldName
+            );
+        }
+    }
+
+    private Map<String, Object> readSubmissionInput(
+            Object value) {
+
+        if (!(value instanceof Map<?, ?> source)) {
+            throw new BusinessException(
+                    400,
+                    "WRITE表单input必须是JSON对象"
+            );
+        }
+
+        Map<String, Object> result =
+                new LinkedHashMap<>();
+
+        source.forEach((key, child) ->
+                result.put(
+                        String.valueOf(key),
+                        child
+                )
+        );
+
+        return result;
     }
 }

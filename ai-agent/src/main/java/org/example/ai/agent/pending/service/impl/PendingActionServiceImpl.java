@@ -62,7 +62,9 @@ public class PendingActionServiceImpl extends ServiceImpl<PendingActionMapper, P
         action.setCapabilityCode(plan.getCapabilityCode());
         action.setCapabilityName(plan.getCapabilityName());
         action.setInputJson(toJson(plan.getInput()));
-        action.setActionSummary("准备执行：" + plan.getCapabilityName());
+        action.setActionSummary(buildActionSummary(
+                        plan.getCapabilityName(),
+                        plan.getDisplayInput()));
         action.setStatus(PendingActionStatus.PENDING.getCode());
         action.setCreatedAt(LocalDateTime.now());
         action.setUpdatedAt(LocalDateTime.now());
@@ -275,5 +277,74 @@ public class PendingActionServiceImpl extends ServiceImpl<PendingActionMapper, P
             throw new BusinessException(403, "无权访问其他用户的操作");
         }
         return action;
+    }
+    /**
+     * 构建中文操作预览摘要。
+     *
+     * inputJson仍然保存真实ID；
+     * 中文名称只进入展示摘要。
+     */
+    private String buildActionSummary(
+            String capabilityName,
+            Map<String, Object> displayInput) {
+
+        String base =
+                "准备执行：" + capabilityName;
+
+        if (displayInput == null
+                || displayInput.isEmpty()) {
+            return base;
+        }
+
+        String parameters =
+                displayInput.entrySet()
+                        .stream()
+                        /*
+                         * 安全字段不能进入数据库摘要。
+                         */
+                        .filter(entry ->
+                                !isSensitiveName(
+                                        entry.getKey()
+                                )
+                        )
+                        .map(entry ->
+                                entry.getKey()
+                                        + "="
+                                        + safeSummaryValue(
+                                        entry.getValue()
+                                )
+                        )
+                        .reduce(
+                                (left, right) ->
+                                        left + "，" + right
+                        )
+                        .orElse("");
+
+        return StringUtils.hasText(parameters)
+                ? base + "；参数：" + parameters
+                : base;
+    }
+
+    private boolean isSensitiveName(String fieldName) {
+        if (!StringUtils.hasText(fieldName)) {
+            return false;
+        }
+
+        String normalized =
+                fieldName.toLowerCase();
+
+        return normalized.contains("token")
+                || normalized.contains("authorization")
+                || normalized.contains("cookie")
+                || normalized.contains("password");
+    }
+
+    private String safeSummaryValue(Object value) {
+        if (value == null) {
+            return "";
+        }
+        return String.valueOf(value)
+                .replace("\r", " ")
+                .replace("\n", " ");
     }
 }

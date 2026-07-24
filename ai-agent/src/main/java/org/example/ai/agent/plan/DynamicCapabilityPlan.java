@@ -77,4 +77,12 @@ public class DynamicCapabilityPlan {
      * 以便后端判断第一名与第二名是否过于接近。
      */
     private List<CapabilityAlternative> alternatives =new ArrayList<>();
+
+    /**
+     * 操作预览展示参数。
+     *
+     * input保存业务接口需要的真实ID；
+     * displayInput保存用户看到的中文名称。
+     */
+    private Map<String, Object> displayInput =new LinkedHashMap<>();
 }

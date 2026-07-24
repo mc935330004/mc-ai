@@ -28,6 +28,8 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.example.ai.agent.capability.dto.CapabilityOptionQueryDTO;
+import org.example.ai.agent.capability.ui.CapabilityOptionService;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -48,6 +50,10 @@ public class CapabilityDefinitionController {
     private final FieldDictionaryService fieldDictionaryService;
     private final ObjectMapper objectMapper;
     private final CurrentUserProvider currentUserProvider;
+    /**
+     * 通用WRITE远程选项服务。
+     */
+    private final CapabilityOptionService capabilityOptionService;
     /**
      * 分页查询能力列表。
      */
@@ -148,6 +154,34 @@ public class CapabilityDefinitionController {
     @GetMapping("/agent/list")
     public Result<List<AgentCapabilityVO>> agentList() {
         return Result.success(capabilityDefinitionService.listEnabledForAgent());
+    }
+
+    /**
+     * 查询WRITE动态表单字段的远程选项。
+     *
+     * 选项能力由WRITE字段Schema精确指定，
+     * 前端不能直接传入任意OPTION_SOURCE能力编码。
+     */
+    @PostMapping("/{writeCapabilityCode}/fields/{fieldName}/options")
+    public Result<List<CapabilityOptionVO>> queryFieldOptions(
+            @PathVariable String writeCapabilityCode,
+            @PathVariable String fieldName,
+            @RequestBody(required = false)
+            CapabilityOptionQueryDTO request) {
+
+        Map<String, Object> form =request == null
+                        || request.getForm() == null
+                        ? Map.of()
+                        : request.getForm();
+
+        List<CapabilityOptionVO> options = capabilityOptionService.queryOptions(
+                        writeCapabilityCode,
+                        fieldName,
+                        form,
+                        currentUserProvider.getRequiredUserId(),
+                        currentUserProvider.getRequiredAuthorization());
+
+        return Result.success(options);
     }
 
     /**

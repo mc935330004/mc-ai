@@ -6,7 +6,7 @@ import org.example.ai.agent.answer.AnswerComposer;
 import org.example.ai.agent.chat.entity.AgentRequest;
 import org.example.ai.agent.chat.entity.AgentStreamEvent;
 import org.example.ai.agent.chat.service.AgentOrchestrator;
-
+import org.example.ai.agent.vo.ActionFormVO;
 import org.example.ai.agent.chat.support.AgentStreamSession;
 import org.example.ai.agent.chat.support.AgentStreamSessionFactory;
 import org.example.ai.agent.chat.vo.FactPreviewVO;
@@ -210,9 +210,34 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
              * 不应该继续调用 RAG 或业务接口。
              */
             if (intentResult.isNeedClarify()) {
-                // 追问也使用统一回答协议，保证 v2 前端能收到 delta 和 snapshot。
-                stream.publishAnswer(intentResult.getClarifyQuestion());
-                runTraceService.markSuccess(runId, System.currentTimeMillis() - startTime);
+                WorkflowPlan workflowPlan =
+                        intentResult.getWorkflowPlan();
+
+                /*
+                 * WRITE参数不足时发送结构化表单，
+                 * 不能只返回一段纯文本。
+                 */
+                if (workflowPlan != null && workflowPlan.isWriteAction() && workflowPlan.getActionInputSchema() != null) {
+                    sendActionForm(
+                            stream,
+                            runId,
+                            workflowPlan
+                    );
+
+                    runTraceService.markSuccess( runId,System.currentTimeMillis()- startTime);
+                    stream.complete();
+                    return;
+                }
+                stream.publishAnswer(
+                        intentResult.getClarifyQuestion()
+                );
+
+                runTraceService.markSuccess(
+                        runId,
+                        System.currentTimeMillis()
+                                - startTime
+                );
+
                 stream.complete();
                 return;
             }
@@ -490,6 +515,42 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
         stream.complete();
     }
     /**
+     * 向前端发送WRITE参数收集表单。
+     *
+     * 此方法只发送Schema和初始值，
+     * 不创建PendingAction，不调用WRITE接口。
+     */
+    private void sendActionForm(
+            AgentStreamSession stream,
+            String runId,
+            WorkflowPlan workflowPlan)
+            throws Exception {
+
+        ActionFormVO form =ActionFormVO.builder()
+                        .workflowCode( workflowPlan.getWorkflowCode())
+                        .workflowVersionId(workflowPlan.getVersionId())
+                        .capabilityCode(workflowPlan.getActionCapabilityCode())
+                        .capabilityVersionId(workflowPlan.getActionCapabilityVersionId())
+                        .capabilityName(workflowPlan.getActionCapabilityName())
+                        .schema(workflowPlan.getActionInputSchema())
+                        .initialValue(new LinkedHashMap<>( workflowPlan.getInput()))
+                        .clarifyQuestion(workflowPlan.getClarifyQuestion())
+                        .build();
+
+        stream.send(
+                "action_form",
+                AgentStreamEvent.of(
+                        runId,
+                        AgentStreamEventType
+                                .ACTION_FORM
+                                .name(),
+                        workflowPlan
+                                .getClarifyQuestion(),
+                        form
+                )
+        );
+    }
+    /**
      * 向聊天端发送写操作预览。
      */
     private void sendActionPreview( AgentStreamSession stream,
@@ -512,6 +573,7 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                 .status(pendingAction.getStatus())
                 .expireAt(pendingAction.getExpireAt())
                 .requireConfirm(true)
+                .displayInput(plan.getDisplayInput())
                 .build();
         StringBuilder markdown = new StringBuilder();
         markdown.append("## 操作确认\n\n")

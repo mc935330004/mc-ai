@@ -56,6 +56,10 @@ public enum AgentStreamEventType {
      * RAG 引用来源。
      */
     REFERENCES,
+    /**
+     * WRITE参数收集表单。
+     */
+    ACTION_FORM,
 
     /**
      * 写操作确认预览。

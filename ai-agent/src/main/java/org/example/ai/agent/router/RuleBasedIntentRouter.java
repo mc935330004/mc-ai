@@ -12,6 +12,7 @@ import org.example.ai.agent.workflow.plan.WorkflowPlan;
 import org.example.ai.agent.workflow.plan.WorkflowPlanner;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
+import org.example.ai.agent.common.exception.BusinessException;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -111,6 +112,25 @@ public class RuleBasedIntentRouter implements IntentRouter {
                 .callType(ModelCallType.PLANNER)
                 .callSequence(1)
                 .build();
+        Map<String, Object> actionForm =readActionForm(request);
+        if (actionForm != null) {
+            WorkflowPlan workflowPlan =
+                    workflowPlanner.planActionForm(
+                            actionForm,
+                            plannerContext,
+                            request.getAuthorization()
+                    );
+
+            if (workflowPlan.isReady()) {
+                return buildWorkflowActionResult(
+                        workflowPlan,
+                        List.of("WRITE表单提交"));
+            }
+
+            return buildWorkflowActionFormResult(
+                    workflowPlan,
+                    List.of("WRITE表单提交"));
+        }
         // 用户问题为空时，不继续执行任何链路，直接要求用户补充问题。
         if (!StringUtils.hasText(question)) {
             return clarify("请先输入你要咨询的问题。");
@@ -370,7 +390,9 @@ public class RuleBasedIntentRouter implements IntentRouter {
             );
         }
         if (workflowPlan.getStatus()== WorkflowPlanStatus.NEED_CLARIFY && workflowPlan.isWriteAction()) {
-            return clarify(workflowPlan.getClarifyQuestion());
+            return buildWorkflowActionFormResult(
+                    workflowPlan,
+                    actionHits );
         }
 
         DynamicCapabilityPlan dynamicPlan = dynamicCapabilityPlanner.plan(question, plannerContext);
@@ -426,6 +448,7 @@ public class RuleBasedIntentRouter implements IntentRouter {
                         .getActionCapabilityName()
         );
         actionPlan.setInput(new LinkedHashMap<>( workflowPlan.getActionInput()));
+        actionPlan.setDisplayInput(new LinkedHashMap<>(workflowPlan.getActionDisplayInput()));
         actionPlan.setSideEffect("WRITE");
         actionPlan.setRequireConfirm(true);
         actionPlan.setConfidence(
@@ -451,5 +474,59 @@ public class RuleBasedIntentRouter implements IntentRouter {
                 .workflowPlan(workflowPlan)
                 .dynamicCapabilityPlan(actionPlan)
                 .build();
+    }
+
+    /**
+     * 保留WRITE工作流上下文，让编排器发送ACTION_FORM。
+     */
+    private IntentResult buildWorkflowActionFormResult(
+            WorkflowPlan workflowPlan,
+            List<String> matchedKeywords) {
+
+        return IntentResult.builder()
+                .routeType(RouteType.CLARIFY)
+                .confidence(
+                        workflowPlan.getConfidence()
+                )
+                .reason(
+                        workflowPlan.getReason()
+                )
+                .needClarify(true)
+                .clarifyQuestion(
+                        workflowPlan
+                                .getClarifyQuestion()
+                )
+                .matchedKeywords(
+                        matchedKeywords
+                )
+                .entities(Map.of())
+                .workflowPlan(workflowPlan)
+                .build();
+    }
+
+    /**
+     * 从AgentRequest.extra中读取结构化WRITE表单。
+     */
+    private Map<String, Object> readActionForm(
+            AgentRequest request) {
+
+        if (request == null|| request.getExtra() == null|| !request.getExtra().containsKey("actionForm")) {
+            return null;
+        }
+
+        Object value =request.getExtra().get("actionForm");
+
+        if (!(value instanceof Map<?, ?> source)) {
+            throw new BusinessException(
+                    400,
+                    "extra.actionForm必须是JSON对象"
+            );
+        }
+        Map<String, Object> result =new LinkedHashMap<>();
+
+        source.forEach((key, child) ->
+                result.put(String.valueOf(key),
+                        child) );
+        return result;
     }
 }
