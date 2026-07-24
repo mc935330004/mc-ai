@@ -44,9 +44,14 @@ public class ActionFormVO {
     private String capabilityName;
 
     /**
-     * WRITE能力发布快照中的输入Schema。
+     * WRITE能力发布快照中的输入 Schema。
+     *
+     * 中文注释：
+     * Spring Boot 4 的 HTTP/SSE 序列化器不能直接正确处理
+     * Jackson 2 的 JsonNode，因此在 SSE 边界使用标准 JSON 字符串。
+     * 前端动态表单解析器已经支持 JSON 字符串，不需要修改前端协议。
      */
-    private JsonNode schema;
+    private String schema;
 
     /**
      * 大模型已经提取出的初始值。

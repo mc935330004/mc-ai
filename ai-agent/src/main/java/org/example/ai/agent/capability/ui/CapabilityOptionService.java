@@ -95,9 +95,14 @@ public class CapabilityOptionService {
                                 .getInputSchemaJson()
                 );
 
-        CapabilityUiSchemaParser.Field field =
-                writeSchema.fields().get(fieldName);
-
+        /*
+         * 同时支持根字段和 OBJECT_LIST 子字段。
+         *
+         * 示例：
+         * projectTypeId
+         * units[].unitId
+         */
+        CapabilityUiSchemaParser.Field field =writeSchema.findField(fieldName);
         if (field == null) {
             throw badRequest(
                     "WRITE能力未声明字段："
@@ -268,6 +273,31 @@ public class CapabilityOptionService {
         for (CapabilityUiSchemaParser.Field field :
                 schema.fields().values()) {
 
+            /*
+             * OBJECT_LIST 单独逐行解析。
+             * 其中的 REMOTE_SELECT 需要把中文名称转换为真实值。
+             */
+            if ("OBJECT_LIST".equals(field.component())) {
+                if (input.containsKey(field.name())) {
+                    CapabilityOptionResolution listResolution =
+                            resolveObjectListField(
+                                    writeCapabilityCode,
+                                    field,
+                                    input.get(field.name()),
+                                    requestInput,
+                                    displayInput,
+                                    userId,
+                                    authorization
+                            );
+
+                    if (!listResolution.isReady()) {
+                        return listResolution;
+                    }
+                }
+
+                continue;
+            }
+
             if ("REMOTE_SELECT".equals(
                     field.component()
             )) {
@@ -418,7 +448,153 @@ public class CapabilityOptionService {
                 .displayInput(displayInput)
                 .build();
     }
+    /**
+     * 解析 OBJECT_LIST 中的每一行数据。
+     *
+     * 请求参数中的 REMOTE_SELECT 保存真实值，
+     * 展示参数中的 REMOTE_SELECT 保存中文名称。
+     */
+    private CapabilityOptionResolution resolveObjectListField(
+            String writeCapabilityCode,
+            CapabilityUiSchemaParser.Field listField,
+            Object rawValue,
+            Map<String, Object> requestInput,
+            Map<String, Object> displayInput,
+            String userId,
+            String authorization) {
 
+        /*
+         * 如果输入不是数组，暂时保留原始值。
+         * 后续继续由现有 JSON Schema 校验器返回类型错误，
+         * 这里不重复实现一套 Schema 校验逻辑。
+         */
+        if (!(rawValue instanceof List<?> rawRows)) {
+            requestInput.put(
+                    listField.name(),
+                    rawValue
+            );
+
+            displayInput.put(
+                    listField.name(),
+                    rawValue
+            );
+
+            return CapabilityOptionResolution.builder()
+                    .ready(true)
+                    .requestInput(requestInput)
+                    .displayInput(displayInput)
+                    .build();
+        }
+
+        List<Object> requestRows = new ArrayList<>();
+
+        List<Object> displayRows =
+                new ArrayList<>();
+
+        for (int rowIndex = 0; rowIndex < rawRows.size(); rowIndex++) {
+
+            Object rawRowValue =rawRows.get(rowIndex);
+
+            /*
+             * 非对象行继续交给 JSON Schema 校验器处理。
+             */
+            if (!(rawRowValue instanceof Map<?, ?> rawRow)) {
+                requestRows.add(rawRowValue);
+                displayRows.add(rawRowValue);
+                continue;
+            }
+
+            Map<String, Object> requestRow =new LinkedHashMap<>();
+
+            Map<String, Object> displayRow =new LinkedHashMap<>();
+
+            /*
+             * 只复制 items.properties 中声明的字段，
+             * 防止模型凭空生成的字段进入业务 WRITE 接口。
+             */
+            for (CapabilityUiSchemaParser.Field childField : listField.itemFields().values()) {
+
+                if (!rawRow.containsKey( childField.name())) {
+                    continue;
+                }
+
+                Object childRawValue =rawRow.get(childField.name());
+
+                if (!"REMOTE_SELECT".equals(childField.component())) {
+                    requestRow.put(childField.name(),childRawValue);
+                    displayRow.put(childField.name(),childRawValue);
+                    continue;
+                }
+
+                /*
+                 * 空的远程下拉字段不在这里补默认值。
+                 * 必填校验继续由 JSON Schema items.required 处理。
+                 */
+                if (isMissing(childRawValue)) {
+                    continue;
+                }
+
+                String childFieldPath =
+                        listField.name() + "[]."+ childField.name();
+
+                List<CapabilityOptionVO> options =
+                        queryOptions(
+                                writeCapabilityCode,
+                                childFieldPath,
+                                requestRow,
+                                userId,
+                                authorization
+                        );
+
+                CapabilityOptionResolution matched =
+                        matchOption(
+                                childField,
+                                childRawValue,
+                                options,
+                                requestRow,
+                                displayRow
+                        );
+
+                if (!matched.isReady()) {
+                    /*
+                     * 把当前已经处理的行放回根对象，
+                     * 保证澄清结果仍然使用原有根级参数结构。
+                     */
+                    requestRows.add(requestRow);
+                    displayRows.add(displayRow);
+
+                    requestInput.put(listField.name(),requestRows );
+
+                    displayInput.put(listField.name(),displayRows);
+
+                    return clarify(requestInput,displayInput,
+                            "字段【"
+                                    + listField.label()
+                                    + "】第"
+                                    + (rowIndex + 1)
+                                    + "行："
+                                    + matched.getClarifyQuestion()
+                    );
+                }
+            }
+
+            requestRows.add(requestRow);
+            displayRows.add(displayRow);
+        }
+
+        requestInput.put(
+                listField.name(),
+                requestRows
+        );
+
+        displayInput.put(listField.name(),displayRows );
+
+        return CapabilityOptionResolution.builder()
+                .ready(true)
+                .requestInput(requestInput)
+                .displayInput(displayInput)
+                .build();
+    }
     /**
      * 根据Schema inputMapping构造OPTION_SOURCE能力入参。
      */
@@ -426,22 +602,15 @@ public class CapabilityOptionService {
             CapabilityUiSchemaParser.OptionSource source,
             Map<String, Object> form) {
 
-        Map<String, Object> result =
-                new LinkedHashMap<>();
+        Map<String, Object> result = new LinkedHashMap<>();
 
-        for (Map.Entry<String, String> mapping :
-                source.inputMapping().entrySet()) {
+        for (Map.Entry<String, String> mapping : source.inputMapping().entrySet()) {
 
-            String expression =
-                    mapping.getValue();
+            String expression =mapping.getValue();
 
-            String sourceField =
-                    expression.substring(
-                            "$form.".length()
-                    );
+            String sourceField =expression.substring("$form.".length());
 
-            Object value =
-                    form.get(sourceField);
+            Object value =form.get(sourceField);
 
             if (isMissing(value)) {
                 throw badRequest(
@@ -449,11 +618,7 @@ public class CapabilityOptionService {
                                 + sourceField
                 );
             }
-
-            result.put(
-                    mapping.getKey(),
-                    value
-            );
+            result.put(mapping.getKey(),value);
         }
 
         return result;
@@ -467,16 +632,10 @@ public class CapabilityOptionService {
             CapabilityUiSchemaParser.OptionSource source,
             String fieldName) {
 
-        JsonNode root =
-                objectMapper.valueToTree(
-                        workflowData
-                );
+        JsonNode root = objectMapper.valueToTree(workflowData);
 
         SimpleJsonPathReader.ReadResult readResult =
-                jsonPathReader.read(
-                        root,
-                        source.itemsPath()
-                );
+                jsonPathReader.read(root,source.itemsPath());
 
         if (!readResult.found()
                 || readResult.value() == null
@@ -489,19 +648,15 @@ public class CapabilityOptionService {
             );
         }
 
-        Map<String, CapabilityOptionVO> unique =
-                new LinkedHashMap<>();
+        Map<String, CapabilityOptionVO> unique = new LinkedHashMap<>();
 
         for (JsonNode item : readResult.value()) {
             if (!item.isObject()) {
                 continue;
             }
+            JsonNode valueNode =item.get(source.valueField());
 
-            JsonNode valueNode =
-                    item.get(source.valueField());
-
-            JsonNode labelNode =
-                    item.get(source.labelField());
+            JsonNode labelNode = item.get(source.labelField());
 
             if (valueNode == null
                     || valueNode.isNull()
@@ -509,19 +664,13 @@ public class CapabilityOptionService {
                     || labelNode.isNull()) {
                 continue;
             }
-
-            String label =
-                    labelNode.asText("").trim();
+            String label =labelNode.asText("").trim();
 
             if (!StringUtils.hasText(label)) {
                 continue;
             }
 
-            Object value =
-                    objectMapper.convertValue(
-                            valueNode,
-                            Object.class
-                    );
+            Object value = objectMapper.convertValue(valueNode,Object.class );
 
             /*
              * 按真实值去重，保持业务接口原始顺序。
@@ -534,10 +683,7 @@ public class CapabilityOptionService {
                             .build()
             );
         }
-
-        return List.copyOf(
-                unique.values()
-        );
+        return List.copyOf(unique.values());
     }
 
     /**
@@ -569,16 +715,11 @@ public class CapabilityOptionService {
             );
         }
 
-        String textValue =
-                String.valueOf(rawValue).trim();
+        String textValue =String.valueOf(rawValue).trim();
 
         List<CapabilityOptionVO> labelMatches =
-                options.stream()
-                        .filter(option ->
-                                option.getLabel()
-                                        .equals(textValue)
-                        )
-                        .toList();
+                options.stream() .filter(option ->
+                                option.getLabel().equals(textValue)).toList();
 
         if (labelMatches.size() == 1) {
             return accepted(

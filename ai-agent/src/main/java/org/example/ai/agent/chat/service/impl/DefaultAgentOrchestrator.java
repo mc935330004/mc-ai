@@ -532,7 +532,12 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                         .capabilityCode(workflowPlan.getActionCapabilityCode())
                         .capabilityVersionId(workflowPlan.getActionCapabilityVersionId())
                         .capabilityName(workflowPlan.getActionCapabilityName())
-                        .schema(workflowPlan.getActionInputSchema())
+                        /*
+                         * 中文注释：
+                         * SSE 输出边界不直接暴露 Jackson 2 JsonNode，
+                         * 转成标准 JSON 字符串，防止被序列化成 array、object、nodeType 等 Bean 属性。
+                         */
+                        .schema(workflowPlan.getActionInputSchema().toString())
                         .initialValue(new LinkedHashMap<>( workflowPlan.getInput()))
                         .clarifyQuestion(workflowPlan.getClarifyQuestion())
                         .build();

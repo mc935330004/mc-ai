@@ -22,14 +22,25 @@ import java.util.regex.Pattern;
 /**
  * 通用能力动态表单 Schema 解析器。
  *
- * 只识别通用协议，不包含任何具体业务字段判断。
+ * 只解析通用 WRITE 能力表单协议，
+ * 不包含新增立项、对方单位等具体业务字段判断。
  */
 @Component
 @RequiredArgsConstructor
 public class CapabilityUiSchemaParser {
 
     /**
-     * 当前前端支持的组件类型。
+     * OBJECT_LIST 允许配置的最大行数。
+     */
+    private static final int OBJECT_LIST_HARD_LIMIT = 50;
+
+    /**
+     * 未配置 maxItems 时的默认最大行数。
+     */
+    private static final int OBJECT_LIST_DEFAULT_MAX_ITEMS = 20;
+
+    /**
+     * 当前前端支持的通用表单组件。
      */
     private static final Set<String> SUPPORTED_COMPONENTS =
             Set.of(
@@ -37,11 +48,12 @@ public class CapabilityUiSchemaParser {
                     "NUMBER",
                     "DATE",
                     "RADIO",
-                    "REMOTE_SELECT"
+                    "REMOTE_SELECT",
+                    "OBJECT_LIST"
             );
 
     /**
-     * 输入映射只允许读取当前表单字段。
+     * 远程下拉输入映射只允许读取当前表单字段。
      */
     private static final Pattern FORM_EXPRESSION =
             Pattern.compile(
@@ -51,20 +63,22 @@ public class CapabilityUiSchemaParser {
     private final ObjectMapper objectMapper;
 
     /**
-     * 解析并校验 inputSchemaJson。
+     * 解析并校验能力 inputSchemaJson。
      */
     public UiSchema parse(String schemaJson) {
         JsonNode root = readRoot(schemaJson);
 
         validateCapabilityRole(root);
 
-        JsonNode propertiesNode =root.get("properties");
+        JsonNode propertiesNode =
+                root.get("properties");
 
         /*
-         * 兼容以前使用 {} 的能力配置。
-         * 没有 properties 时表示没有动态表单字段。
+         * 兼容以前使用空对象 {} 的能力。
+         * 没有 properties 表示没有动态表单字段。
          */
-        if (propertiesNode == null || propertiesNode.isNull()) {
+        if (propertiesNode == null
+                || propertiesNode.isNull()) {
 
             if (root.has("required")) {
                 throw badRequest(
@@ -85,17 +99,13 @@ public class CapabilityUiSchemaParser {
         }
 
         Set<String> propertyNames =
-                new LinkedHashSet<>();
-
-        propertiesNode.fieldNames()
-                .forEachRemaining(
-                        propertyNames::add
-                );
+                readPropertyNames(propertiesNode);
 
         Set<String> requiredFields =
                 readRequiredFields(
                         root.get("required"),
-                        propertyNames
+                        propertyNames,
+                        "inputSchemaJson"
                 );
 
         Map<String, Field> fields =
@@ -108,23 +118,22 @@ public class CapabilityUiSchemaParser {
             Map.Entry<String, JsonNode> entry =
                     iterator.next();
 
-            String fieldName = entry.getKey();
-            JsonNode fieldSchema = entry.getValue();
-
             Field field = parseField(
-                    fieldName,
-                    fieldSchema,
-                    propertyNames
+                    entry.getKey(),
+                    entry.getValue(),
+                    propertyNames,
+                    false
             );
 
-            fields.put(fieldName, field);
+            fields.put(
+                    entry.getKey(),
+                    field
+            );
         }
 
         return new UiSchema(
                 Collections.unmodifiableMap(fields),
-                Collections.unmodifiableSet(
-                        requiredFields
-                )
+                Collections.unmodifiableSet(requiredFields)
         );
     }
 
@@ -141,12 +150,15 @@ public class CapabilityUiSchemaParser {
     }
 
     /**
-     * 解析单个字段。
+     * 解析一个普通字段或对象列表字段。
+     *
+     * @param childField true 表示当前字段属于 OBJECT_LIST 的列表项
      */
     private Field parseField(
             String fieldName,
             JsonNode fieldSchema,
-            Set<String> propertyNames) {
+            Set<String> propertyNames,
+            boolean childField) {
 
         if (!fieldSchema.isObject()) {
             throw badRequest(
@@ -168,33 +180,38 @@ public class CapabilityUiSchemaParser {
 
         String type = fieldSchema
                 .path("type")
-                .asText("");
+                .asText("")
+                .trim();
 
-        String component;
-
-        if (uiNode == null) {
-            component = defaultComponent(type);
-        } else {
-            component = text(
-                    uiNode,
-                    "component"
-            ).toUpperCase();
-
-            if (!StringUtils.hasText(component)) {
-                throw badRequest(
-                        "字段x-ui.component不能为空："
-                                + fieldName
+        String component =
+                resolveComponent(
+                        fieldName,
+                        type,
+                        uiNode
                 );
-            }
-        }
 
         if (component != null
-                && !SUPPORTED_COMPONENTS.contains(
-                        component
-                )) {
+                && !SUPPORTED_COMPONENTS.contains(component)) {
             throw badRequest(
                     "不支持的动态表单组件："
                             + component
+            );
+        }
+        /*
+         * OBJECT_LIST 子字段必须能映射到现有五类标量控件。
+         * object、普通 array 等无法渲染的类型不能静默放行。
+         */
+        if (childField && component == null) {
+            throw badRequest(
+                    "OBJECT_LIST子字段只支持INPUT、NUMBER、DATE、RADIO、REMOTE_SELECT："
+                            + fieldName
+            );
+        }
+        if (childField
+                && "OBJECT_LIST".equals(component)) {
+            throw badRequest(
+                    "不支持嵌套OBJECT_LIST："
+                            + fieldName
             );
         }
 
@@ -206,6 +223,28 @@ public class CapabilityUiSchemaParser {
                                 : uiNode.get("dependsOn"),
                         propertyNames
                 );
+
+        /*
+         * 第一版列表子字段不处理同行字段依赖，
+         * 防止远程下拉请求错误地读取其他列表行。
+         */
+        if (childField
+                && !dependsOn.isEmpty()) {
+            throw badRequest(
+                    "OBJECT_LIST子字段暂不支持dependsOn："
+                            + fieldName
+            );
+        }
+
+        if ("OBJECT_LIST".equals(component)) {
+            return parseObjectList(
+                    fieldName,
+                    fieldSchema,
+                    uiNode,
+                    type,
+                    dependsOn
+            );
+        }
 
         OptionSource optionSource = null;
 
@@ -224,37 +263,191 @@ public class CapabilityUiSchemaParser {
             );
         }
 
-        String label = text(
-                uiNode,
-                "label"
+        return new Field(
+                fieldName,
+                resolveLabel(
+                        fieldName,
+                        fieldSchema,
+                        uiNode
+                ),
+                type,
+                component,
+                dependsOn,
+                optionSource,
+                Map.of(),
+                Set.of(),
+                0,
+                0
+        );
+    }
+
+    /**
+     * 解析一层对象列表。
+     */
+    private Field parseObjectList(
+            String fieldName,
+            JsonNode fieldSchema,
+            JsonNode uiNode,
+            String type,
+            List<String> dependsOn) {
+
+        if (!"array".equals(type)) {
+            throw badRequest(
+                    "OBJECT_LIST字段type必须是array："
+                            + fieldName
+            );
+        }
+
+        if (uiNode != null
+                && uiNode.has("optionSource")) {
+            throw badRequest(
+                    "OBJECT_LIST不能配置optionSource："
+                            + fieldName
+            );
+        }
+
+        JsonNode itemsNode =
+                fieldSchema.get("items");
+
+        if (itemsNode == null
+                || !itemsNode.isObject()) {
+            throw badRequest(
+                    "OBJECT_LIST必须配置items对象："
+                            + fieldName
+            );
+        }
+
+        if (!"object".equals(
+                itemsNode.path("type")
+                        .asText("")
+                        .trim()
+        )) {
+            throw badRequest(
+                    "OBJECT_LIST的items.type必须是object："
+                            + fieldName
+            );
+        }
+
+        JsonNode itemPropertiesNode =
+                itemsNode.get("properties");
+
+        if (itemPropertiesNode == null
+                || !itemPropertiesNode.isObject()
+                || itemPropertiesNode.isEmpty()) {
+            throw badRequest(
+                    "OBJECT_LIST的items.properties不能为空："
+                            + fieldName
+            );
+        }
+
+        Set<String> itemPropertyNames =
+                readPropertyNames(
+                        itemPropertiesNode
+                );
+
+        Set<String> itemRequiredFields =
+                readRequiredFields(
+                        itemsNode.get("required"),
+                        itemPropertyNames,
+                        "字段" + fieldName + ".items"
+                );
+
+        Map<String, Field> itemFields =
+                new LinkedHashMap<>();
+
+        Iterator<Map.Entry<String, JsonNode>> iterator =
+                itemPropertiesNode.fields();
+
+        while (iterator.hasNext()) {
+            Map.Entry<String, JsonNode> entry =
+                    iterator.next();
+
+            Field child = parseField(
+                    entry.getKey(),
+                    entry.getValue(),
+                    itemPropertyNames,
+                    true
+            );
+
+            itemFields.put(
+                    entry.getKey(),
+                    child
+            );
+        }
+
+        int minItems = readIntegerLimit(
+                fieldSchema.get("minItems"),
+                "字段" + fieldName + ".minItems",
+                0,
+                0
         );
 
-        if (!StringUtils.hasText(label)) {
-            label = text(
-                    fieldSchema,
-                    "description"
+        int maxItems = readIntegerLimit(
+                fieldSchema.get("maxItems"),
+                "字段" + fieldName + ".maxItems",
+                OBJECT_LIST_DEFAULT_MAX_ITEMS,
+                1
+        );
+
+        if (maxItems > OBJECT_LIST_HARD_LIMIT) {
+            throw badRequest(
+                    "OBJECT_LIST的maxItems不能超过50："
+                            + fieldName
             );
         }
 
-        if (!StringUtils.hasText(label)) {
-            label = text(
-                    fieldSchema,
-                    "title"
+        if (minItems > maxItems) {
+            throw badRequest(
+                    "OBJECT_LIST的minItems不能大于maxItems："
+                            + fieldName
             );
-        }
-
-        if (!StringUtils.hasText(label)) {
-            label = fieldName;
         }
 
         return new Field(
                 fieldName,
-                label,
+                resolveLabel(
+                        fieldName,
+                        fieldSchema,
+                        uiNode
+                ),
                 type,
-                component,
+                "OBJECT_LIST",
                 dependsOn,
-                optionSource
+                null,
+                Collections.unmodifiableMap(itemFields),
+                Collections.unmodifiableSet(
+                        itemRequiredFields
+                ),
+                minItems,
+                maxItems
         );
+    }
+
+    /**
+     * 解析字段所使用的表单控件。
+     */
+    private String resolveComponent(
+            String fieldName,
+            String type,
+            JsonNode uiNode) {
+
+        if (uiNode == null) {
+            return defaultComponent(type);
+        }
+
+        String component = text(
+                uiNode,
+                "component"
+        ).toUpperCase();
+
+        if (!StringUtils.hasText(component)) {
+            throw badRequest(
+                    "字段x-ui.component不能为空："
+                            + fieldName
+            );
+        }
+
+        return component;
     }
 
     /**
@@ -293,13 +486,12 @@ public class CapabilityUiSchemaParser {
         }
 
         if (mappingNode != null) {
-            Iterator<Map.Entry<String, JsonNode>>
-                    mappingIterator =
+            Iterator<Map.Entry<String, JsonNode>> iterator =
                     mappingNode.fields();
 
-            while (mappingIterator.hasNext()) {
+            while (iterator.hasNext()) {
                 Map.Entry<String, JsonNode> mapping =
-                        mappingIterator.next();
+                        iterator.next();
 
                 String expression = mapping
                         .getValue()
@@ -394,7 +586,8 @@ public class CapabilityUiSchemaParser {
 
         for (JsonNode item : dependsNode) {
             String dependency =
-                    item.asText("").trim();
+                    item.asText("")
+                            .trim();
 
             if (!StringUtils.hasText(dependency)) {
                 throw badRequest(
@@ -427,11 +620,12 @@ public class CapabilityUiSchemaParser {
     }
 
     /**
-     * 读取必填字段。
+     * 读取 required 字段集合。
      */
     private Set<String> readRequiredFields(
             JsonNode requiredNode,
-            Set<String> propertyNames) {
+            Set<String> propertyNames,
+            String schemaPath) {
 
         Set<String> result =
                 new LinkedHashSet<>();
@@ -443,18 +637,21 @@ public class CapabilityUiSchemaParser {
 
         if (!requiredNode.isArray()) {
             throw badRequest(
-                    "inputSchemaJson.required必须是字符串数组"
+                    schemaPath
+                            + ".required必须是字符串数组"
             );
         }
 
         for (JsonNode item : requiredNode) {
             String fieldName =
-                    item.asText("").trim();
+                    item.asText("")
+                            .trim();
 
             if (!StringUtils.hasText(fieldName)
                     || !propertyNames.contains(fieldName)) {
                 throw badRequest(
-                        "required引用了未声明字段："
+                        schemaPath
+                                + ".required引用了未声明字段："
                                 + fieldName
                 );
             }
@@ -463,6 +660,90 @@ public class CapabilityUiSchemaParser {
         }
 
         return result;
+    }
+
+    /**
+     * 读取 properties 中声明的字段名。
+     */
+    private Set<String> readPropertyNames(
+            JsonNode propertiesNode) {
+
+        Set<String> result =
+                new LinkedHashSet<>();
+
+        propertiesNode.fieldNames()
+                .forEachRemaining(
+                        result::add
+                );
+
+        return result;
+    }
+
+    /**
+     * 读取 minItems、maxItems 等非负整数配置。
+     */
+    private int readIntegerLimit(
+            JsonNode valueNode,
+            String fieldPath,
+            int defaultValue,
+            int minimumValue) {
+
+        if (valueNode == null
+                || valueNode.isNull()) {
+            return defaultValue;
+        }
+
+        if (!valueNode.isIntegralNumber()
+                || !valueNode.canConvertToInt()) {
+            throw badRequest(
+                    fieldPath
+                            + "必须是整数"
+            );
+        }
+
+        int value = valueNode.intValue();
+
+        if (value < minimumValue) {
+            throw badRequest(
+                    fieldPath
+                            + "不能小于"
+                            + minimumValue
+            );
+        }
+
+        return value;
+    }
+
+    /**
+     * 解析字段中文标签。
+     */
+    private String resolveLabel(
+            String fieldName,
+            JsonNode fieldSchema,
+            JsonNode uiNode) {
+
+        String label = text(
+                uiNode,
+                "label"
+        );
+
+        if (!StringUtils.hasText(label)) {
+            label = text(
+                    fieldSchema,
+                    "description"
+            );
+        }
+
+        if (!StringUtils.hasText(label)) {
+            label = text(
+                    fieldSchema,
+                    "title"
+            );
+        }
+
+        return StringUtils.hasText(label)
+                ? label
+                : fieldName;
     }
 
     /**
@@ -479,12 +760,14 @@ public class CapabilityUiSchemaParser {
             return;
         }
 
-        String role =
-                roleNode.asText("").trim();
+        String role = roleNode
+                .asText("")
+                .trim();
 
         if (!"OPTION_SOURCE".equalsIgnoreCase(role)) {
             throw badRequest(
-                    "不支持的能力角色：" + role
+                    "不支持的能力角色："
+                            + role
             );
         }
     }
@@ -503,7 +786,8 @@ public class CapabilityUiSchemaParser {
             JsonNode root =
                     objectMapper.readTree(schemaJson);
 
-            if (root == null || !root.isObject()) {
+            if (root == null
+                    || !root.isObject()) {
                 throw badRequest(
                         "inputSchemaJson必须是JSON对象"
                 );
@@ -519,6 +803,9 @@ public class CapabilityUiSchemaParser {
         }
     }
 
+    /**
+     * 读取必填字符串配置。
+     */
     private String requiredText(
             JsonNode node,
             String key,
@@ -538,6 +825,9 @@ public class CapabilityUiSchemaParser {
         return value;
     }
 
+    /**
+     * 安全读取 JSON 字符串。
+     */
     private String text(
             JsonNode node,
             String key) {
@@ -550,7 +840,7 @@ public class CapabilityUiSchemaParser {
     }
 
     /**
-     * 未配置x-ui时，根据基础类型提供默认控件。
+     * 未配置 x-ui 时，根据基础类型提供默认控件。
      */
     private String defaultComponent(String type) {
         return switch (type) {
@@ -563,6 +853,7 @@ public class CapabilityUiSchemaParser {
 
     private BusinessException badRequest(
             String message) {
+
         return new BusinessException(
                 400,
                 message
@@ -575,10 +866,69 @@ public class CapabilityUiSchemaParser {
     public record UiSchema(
             Map<String, Field> fields,
             Set<String> requiredFields) {
+
+        /**
+         * 根据字段路径查询字段定义。
+         *
+         * 支持：
+         * projectName
+         * units
+         * units[].unitId
+         *
+         * 不支持多层嵌套数组。
+         */
+        public Field findField(String fieldPath) {
+            if (!StringUtils.hasText(fieldPath)) {
+                return null;
+            }
+
+            int separatorIndex =
+                    fieldPath.indexOf("[].");
+
+            if (separatorIndex < 0) {
+                return fields.get(fieldPath);
+            }
+
+            String rootName =
+                    fieldPath.substring(
+                            0,
+                            separatorIndex
+                    );
+
+            String childName =
+                    fieldPath.substring(
+                            separatorIndex + 3
+                    );
+
+            /*
+             * 第一版明确禁止多层列表路径。
+             */
+            if (!StringUtils.hasText(childName)
+                    || childName.contains("[].")) {
+                return null;
+            }
+
+            Field rootField =
+                    fields.get(rootName);
+
+            if (rootField == null
+                    || !"OBJECT_LIST".equals(
+                    rootField.component()
+            )) {
+                return null;
+            }
+
+            return rootField
+                    .itemFields()
+                    .get(childName);
+        }
     }
 
     /**
      * 通用表单字段。
+     *
+     * 普通字段的 itemFields 和 itemRequiredFields 为空，
+     * minItems、maxItems 为 0。
      */
     public record Field(
             String name,
@@ -586,7 +936,11 @@ public class CapabilityUiSchemaParser {
             String type,
             String component,
             List<String> dependsOn,
-            OptionSource optionSource) {
+            OptionSource optionSource,
+            Map<String, Field> itemFields,
+            Set<String> itemRequiredFields,
+            int minItems,
+            int maxItems) {
     }
 
     /**
