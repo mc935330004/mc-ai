@@ -179,3 +179,17 @@ ai:
       initial-delay-ms: 30000
       # 此后每 60 秒检查一次
       fixed-delay-ms: 60000
+    answer:
+      chunk:
+        # 每个分块最多字符数，不是业务记录数量限制。
+        max-chars: 12000
+        # 防止异常业务数据造成无限模型调用。
+        # 超过时明确失败，绝不静默截断。
+        max-chunks: 2000
+      reduce:
+        # 每次最多合并8份摘要。
+        max-group-items: 8
+        # 每组摘要最大字符数，不执行静默截断。
+        max-group-chars: 12000
+        # 防止异常模型输出导致无限递归汇总。
+        max-levels: 10

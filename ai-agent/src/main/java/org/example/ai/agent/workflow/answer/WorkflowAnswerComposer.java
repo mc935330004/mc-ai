@@ -5,17 +5,21 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.example.ai.agent.chat.entity.AgentRequest;
-import org.example.ai.agent.common.enums.ModelCallType;
-import org.example.ai.agent.common.modelusage.ModelCallContext;
-import org.example.ai.agent.common.modelusage.TrackedChatClientService;
+import org.example.ai.agent.workflow.answer.chunk.*;
+import org.example.ai.agent.workflow.answer.trace.WorkflowAnswerTraceRecorder;
 import org.example.ai.agent.workflow.runtime.WorkflowExecutionOutcome;
-import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.stereotype.Service;
-
-import java.util.List;
 
 /**
  * 根据工作流结构化结果生成最终中文回答。
+ *
+ * 当前回答链路：
+ * 安全字段投影
+ * → 数据分块
+ * → 逐块模型消费
+ * → 覆盖率校验
+ * → 分层汇总
+ * → 最终回答
  */
 @Slf4j
 @Service
@@ -23,10 +27,35 @@ import java.util.List;
 public class WorkflowAnswerComposer {
 
     private final ObjectMapper objectMapper;
-    private final TrackedChatClientService chatClientService;
-    private final WorkflowAnswerFieldContextResolver  fieldContextResolver;
-    private final WorkflowAnswerPayloadFactory answerPayloadFactory;
 
+    private final WorkflowAnswerFieldContextResolver
+            fieldContextResolver;
+
+    private final WorkflowAnswerPayloadFactory
+            answerPayloadFactory;
+
+    private final WorkflowAnswerChunkPlanner
+            chunkPlanner;
+
+    private final WorkflowAnswerChunkConsumer
+            chunkConsumer;
+
+    private final WorkflowAnswerSummaryReducer
+            summaryReducer;
+    private final WorkflowAnswerTraceRecorder traceRecorder;
+
+    /**
+     * 根据工作流执行结果生成最终中文回答。
+     *
+     * 完整处理链路：
+     * 1. 校验工作流结果；
+     * 2. 根据字段字典过滤隐藏字段；
+     * 3. 将安全数据拆分成多个 JSON 数据块；
+     * 4. 逐块调用大模型；
+     * 5. 校验全部分块是否完整消费；
+     * 6. 对分块摘要进行分层汇总；
+     * 7. 记录安全的 P2 回答链路遥测。
+     */
     public String compose(
             AgentRequest request,
             WorkflowExecutionOutcome outcome) {
@@ -37,109 +66,212 @@ public class WorkflowAnswerComposer {
 
         if (!outcome.success()) {
             return "工作流执行失败："
-                    + safeText(
-                    outcome.errorMessage()
-            );
+                    + safeText(outcome.errorMessage());
         }
 
+        /*
+         * 第一阶段：加载字段展示策略。
+         *
+         * 如果无法确定字段是否允许展示，
+         * 必须阻止原始业务数据发送给大模型。
+         */
         WorkflowAnswerFieldPolicy fieldPolicy;
 
         try {
-            fieldPolicy = fieldContextResolver.resolvePolicy(outcome);
+            fieldPolicy =
+                    fieldContextResolver.resolvePolicy(
+                            outcome
+                    );
         } catch (Exception exception) {
-
-            /*
-             * 无法确认字段可见性时必须失败关闭，
-             * 不能把完整workflowData发送给模型。
-             */
-            log.error("工作流字段展示策略加载失败，已阻止业务数据发送给模型，runId={}，原因={}",
+            log.error(
+                    "工作流字段展示策略加载失败，已阻止业务数据发送给模型，"
+                            + "runId={}，errorType={}",
                     outcome.runId(),
-                    safeText(exception.getMessage()));
+                    exception.getClass().getSimpleName()
+            );
 
             return "查询已经完成，但字段展示策略加载失败。"
                     + "为保护业务数据，本次未生成详细回答，"
                     + "请管理员检查字段字典发布状态。";
         }
 
+        /*
+         * 这里只生成经过字段隐藏过滤后的安全数据。
+         *
+         * 后续分块器只能接收 modelPayload，
+         * 不能接收业务系统的原始响应。
+         */
         WorkflowAnswerModelPayload modelPayload =
                 answerPayloadFactory.create(
                         outcome,
                         fieldPolicy.hiddenFieldNames()
                 );
 
-        String systemPrompt = """
-                你是企业PM项目管理系统的AI助手。
-
-                系统已经执行了真实、已发布的工作流。
-                你只负责解释工作流返回的结构化结果。
-
-                必须遵守：
-                1. 只能依据提供的工作流结果回答。
-                2. 不允许编造项目、金额、日期、状态或业务记录。
-                3. partialSuccess=true时，必须明确说明存在部分成功。
-                4. batches表示用户输入项目的执行结果。
-                5. batches.descendants表示项目下的业务明细统计。
-                6. PARTIAL_SUCCESS表示项目返回了可用数据，但部分明细失败或跳过。
-                7. SKIPPED_NO_ID表示列表记录没有id，因此未调用详情接口，不能描述为接口调用失败。
-                8. 必须分别说明成功、部分成功、失败和跳过数量。
-                9. 不输出workflowCode、versionId、节点ID、能力编码或内部异常堆栈。
-                10. 不向用户输出原始JSON。
-                11. 用户最多输入5个项目，但业务系统返回的明细数量不受此限制。
-                12. 字段语义用于解释英文机器字段，回答时优先使用中文label。
-                13. 不直接向用户输出fieldName、capabilityCode或字段路径。
-                14. 字段format只表示展示类型，不能自行改变数值单位或进行未经定义的换算。
-                15. 字段meaning存在时，应按照meaning解释业务含义。
-                """;
-
-        String userPrompt = """
-                    用户问题：
-                    %s
-            
-                    字段中文语义：
-                    %s
-            
-                    工作流安全结果：
-                    %s
-            
-                    请生成清晰、准确、简洁的中文业务回答。
-                    """.formatted(request.getUserQuestion(),
-                            writeJson(fieldPolicy.visibleFields()),
-                            writeJson(modelPayload));
-
-        ModelCallContext context =
-                ModelCallContext.builder()
-                        .runId(outcome.runId())
-                        .conversationId(
-                                request.getConversationId()
-                        )
-                        .userId(request.getUserId())
-                        .callType(
-                                ModelCallType.ANSWER
-                        )
-                        .callSequence(1)
-                        .build();
-
-        ChatResponse response =
-                chatClientService.call(
-                        context,
-                        systemPrompt,
-                        userPrompt
+        String fieldSemanticsJson =
+                writeJson(
+                        fieldPolicy.visibleFields()
                 );
 
-        if (response == null || response.getResult() == null || response.getResult() .getOutput() == null) {
-            throw new IllegalStateException("工作流回答模型没有返回内容");
+        /*
+         * 第二阶段：数据分块并逐块调用大模型。
+         */
+        long chunkStartedAt =
+                System.currentTimeMillis();
+
+        WorkflowAnswerChunkPlan chunkPlan = null;
+        WorkflowAnswerChunkCoverage coverage;
+
+        try {
+            /*
+             * 将安全业务数据拆分为完整且合法的 JSON 分块。
+             */
+            chunkPlan =chunkPlanner.plan(modelPayload );
+
+            /*
+             * 注意：
+             * chunkConsumer.consume() 在整个方法中只能调用一次。
+             *
+             * 每个分块都会独立调用大模型，
+             * 任意一个分块失败都会抛出明确异常。
+             */
+            coverage =chunkConsumer.consume( request,
+                            outcome.runId(),
+                            fieldSemanticsJson,
+                            chunkPlan);
+
+            /*
+             * 分块全部消费成功后，记录安全遥测。
+             *
+             * 遥测只包含：
+             * - 分块数量；
+             * - 成功、失败、待处理数量；
+             * - 字符数量；
+             * - 模型调用次数。
+             *
+             * 不包含原始业务数据和模型摘要。
+             */
+            traceRecorder.recordChunkSuccess(
+                    outcome.runId(),
+                    chunkPlan,
+                    coverage,
+                    System.currentTimeMillis()
+                            - chunkStartedAt
+            );
+        } catch (
+                WorkflowAnswerChunkConsumeException exception) {
+
+            /*
+             * 分块消费失败时，异常中携带当前覆盖率台账。
+             */
+            traceRecorder.recordChunkFailure(
+                    outcome.runId(),
+                    chunkPlan,
+                    exception.getCoverage(),
+                    System.currentTimeMillis()
+                            - chunkStartedAt,
+                    safeText(exception.getMessage())
+            );
+
+            throw exception;
+        } catch (RuntimeException exception) {
+            /*
+             * 分块计划生成失败等异常可能没有 coverage，
+             * 仍然需要生成一条失败遥测。
+             */
+            traceRecorder.recordChunkFailure(
+                    outcome.runId(),
+                    chunkPlan,
+                    null,
+                    System.currentTimeMillis()
+                            - chunkStartedAt,
+                    "工作流安全数据分块失败"
+            );
+
+            throw exception;
         }
-        return response.getResult()
-                .getOutput()
-                .getText();
+
+        /*
+         * 第三阶段：对全部分块摘要进行分层汇总。
+         */
+        long reductionStartedAt =
+                System.currentTimeMillis();
+
+        try {
+            WorkflowAnswerReductionResult reductionResult =
+                    summaryReducer.reduce(
+                            request,
+                            outcome.runId(),
+                            fieldSemanticsJson,
+                            coverage
+                    );
+
+            /*
+             * 最终回答必须覆盖全部原始分块。
+             *
+             * 即使汇总器返回了文本，
+             * 只要覆盖率不完整，就不能作为最终回答返回。
+             */
+            if (!reductionResult.complete(
+                    chunkPlan.totalChunks())) {
+
+                throw new IllegalStateException(
+                        "工作流最终回答未覆盖全部数据分块"
+                );
+            }
+
+            /*
+             * 分层汇总和最终覆盖率校验全部成功后，
+             * 再记录成功遥测。
+             */
+            traceRecorder.recordReductionSuccess(
+                    outcome.runId(),
+                    reductionResult,
+                    System.currentTimeMillis()
+                            - reductionStartedAt
+            );
+
+            return reductionResult.finalAnswer();
+        } catch (
+                WorkflowAnswerReduceException exception) {
+
+            /*
+             * 汇总器明确抛出的异常中包含：
+             * - 失败层级；
+             * - 调用序号；
+             * - 已覆盖分块编号。
+             */
+            traceRecorder.recordReductionFailure(
+                    outcome.runId(),
+                    coverage,
+                    exception,
+                    System.currentTimeMillis()
+                            - reductionStartedAt,
+                    safeText(exception.getMessage())
+            );
+
+            throw exception;
+        } catch (RuntimeException exception) {
+            /*
+             * 覆盖率防御校验失败等普通运行异常，
+             * 同样记录汇总失败，但不暴露第三方模型异常详情。
+             */
+            traceRecorder.recordReductionFailure(
+                    outcome.runId(),
+                    coverage,
+                    null,
+                    System.currentTimeMillis()
+                            - reductionStartedAt,
+                    "工作流分层汇总失败"
+            );
+
+            throw exception;
+        }
     }
 
 
     private String writeJson(Object value) {
         try {
-            return objectMapper.writeValueAsString(
-                    value
-            );
+            return objectMapper.writeValueAsString(value );
         } catch (JsonProcessingException exception) {
             throw new IllegalStateException(
                     "工作流回答上下文序列化失败",
@@ -150,6 +282,7 @@ public class WorkflowAnswerComposer {
 
     private String safeText(String value) {
         return value == null
+                || value.isBlank()
                 ? "未知错误"
                 : value;
     }
