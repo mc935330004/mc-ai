@@ -25,16 +25,13 @@ import java.util.Set;
  */
 @Component
 @RequiredArgsConstructor
-public class DefaultGraphCapabilityCatalog
-        implements GraphCapabilityCatalog {
+public class DefaultGraphCapabilityCatalog implements GraphCapabilityCatalog {
 
     private static final String INPUT_ROOT = "$input";
 
-    private final CapabilityDefinitionService
-            capabilityDefinitionService;
+    private final CapabilityDefinitionService  capabilityDefinitionService;
 
-    private final RequestBindingSpecParser
-            requestBindingSpecParser;
+    private final RequestBindingSpecParser requestBindingSpecParser;
 
     private final ObjectMapper objectMapper;
 
@@ -50,16 +47,46 @@ public class DefaultGraphCapabilityCatalog
             return false;
         }
 
-        CapabilityDefinition capability =
-                capabilityDefinitionService
-                        .getEnabledByCode(capabilityCode);
+        CapabilityDefinition capability =capabilityDefinitionService.getEnabledByCode(capabilityCode);
 
-        return capability != null
-                && "READ".equalsIgnoreCase(
-                capability.getSideEffect()
+        if (capability == null) {
+            return false;
+        }
+
+        String sideEffect = capability.getSideEffect() == null
+                        ? ""
+                        : capability.getSideEffect()
+                        .trim();
+
+        if ("READ".equalsIgnoreCase(sideEffect)) {
+            return true;
+        }
+
+        return "WRITE".equalsIgnoreCase(sideEffect)
+                && Boolean.TRUE.equals(
+                capability.getRequireConfirm()
         );
     }
 
+    /**
+     * 返回已发布能力的副作用类型。
+     */
+    @Override
+    public String sideEffect(String capabilityCode) {
+
+        if (!StringUtils.hasText(capabilityCode)) {
+            return "";
+        }
+
+        CapabilityDefinition capability =capabilityDefinitionService.getEnabledByCode(
+                                capabilityCode);
+
+        if (capability == null || capability.getSideEffect() == null) {
+            return "";
+        }
+
+        return capability.getSideEffect().trim().toUpperCase();
+    }
     /**
      * 根据发布版本中的requestBindingJson生成工作流输入契约。
      *

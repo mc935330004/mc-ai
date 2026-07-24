@@ -14,6 +14,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -255,11 +256,7 @@ public class RuleBasedIntentRouter implements IntentRouter {
      */
     private IntentResult routeBusiness(String question, RouteType routeType,List<String> matchedKeywords,String routeReason,
             double confidence,ModelCallContext plannerContext) {
-        WorkflowPlan workflowPlan =
-                workflowPlanner.plan(
-                        question,
-                        plannerContext
-                );
+        WorkflowPlan workflowPlan =workflowPlanner.plan(question,plannerContext);
 
         if (workflowPlan.getStatus()== WorkflowPlanStatus.NEED_CLARIFY) {
             return IntentResult.builder()
@@ -279,6 +276,16 @@ public class RuleBasedIntentRouter implements IntentRouter {
                     .entities(Map.of())
                     .workflowPlan(workflowPlan)
                     .build();
+        }
+        /*
+         * 防止用户没有明显动作关键词时，
+         * WRITE 工作流被当成查询工作流直接执行。
+         */
+        if (workflowPlan.isReady() && workflowPlan.isWriteAction()) {
+            return buildWorkflowActionResult(
+                    workflowPlan,
+                    matchedKeywords
+            );
         }
 
         if (workflowPlan.isReady()) {
@@ -350,6 +357,22 @@ public class RuleBasedIntentRouter implements IntentRouter {
      * 根据能力目录匹配写操作能力。
      */
     private IntentResult routeAction(String question, List<String> actionHits,ModelCallContext plannerContext) {
+        /*
+         * 写操作优先匹配已经发布的 GraphSpec 工作流。
+         * 没匹配到时，继续兼容原来的动态 WRITE 能力。
+         */
+        WorkflowPlan workflowPlan = workflowPlanner.plan(question,plannerContext);
+
+        if (workflowPlan.isReady() && workflowPlan.isWriteAction()) {
+            return buildWorkflowActionResult(
+                    workflowPlan,
+                    actionHits
+            );
+        }
+        if (workflowPlan.getStatus()== WorkflowPlanStatus.NEED_CLARIFY && workflowPlan.isWriteAction()) {
+            return clarify(workflowPlan.getClarifyQuestion());
+        }
+
         DynamicCapabilityPlan dynamicPlan = dynamicCapabilityPlanner.plan(question, plannerContext);
         if (!dynamicPlan.isMatched()) {
             return clarify(dynamicPlan.getClarifyQuestion());
@@ -378,6 +401,55 @@ public class RuleBasedIntentRouter implements IntentRouter {
                 .needClarify(false)
                 .entities(Map.of())
                 .dynamicCapabilityPlan(dynamicPlan)
+                .build();
+    }
+    /**
+     * 将工作流 WRITE 计划转换成现有动态能力计划。
+     *
+     * 后续继续复用现有 PendingAction，
+     * 不创建第二套确认执行逻辑。
+     */
+    private IntentResult buildWorkflowActionResult(
+            WorkflowPlan workflowPlan,
+            List<String> matchedKeywords) {
+
+        DynamicCapabilityPlan actionPlan =
+                new DynamicCapabilityPlan();
+
+        actionPlan.setMatched(true);
+        actionPlan.setCapabilityCode(
+                workflowPlan
+                        .getActionCapabilityCode()
+        );
+        actionPlan.setCapabilityName(
+                workflowPlan
+                        .getActionCapabilityName()
+        );
+        actionPlan.setInput(new LinkedHashMap<>( workflowPlan.getActionInput()));
+        actionPlan.setSideEffect("WRITE");
+        actionPlan.setRequireConfirm(true);
+        actionPlan.setConfidence(
+                workflowPlan.getConfidence()
+        );
+        actionPlan.setReason(
+                "命中已发布WRITE工作流："
+                        + workflowPlan
+                        .getWorkflowName()
+        );
+
+        return IntentResult.builder()
+                .routeType(
+                        RouteType.WORKFLOW_ACTION
+                )
+                .confidence(
+                        workflowPlan.getConfidence()
+                )
+                .reason(actionPlan.getReason())
+                .needClarify(false)
+                .matchedKeywords(matchedKeywords)
+                .entities(Map.of())
+                .workflowPlan(workflowPlan)
+                .dynamicCapabilityPlan(actionPlan)
                 .build();
     }
 }

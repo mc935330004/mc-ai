@@ -19,6 +19,12 @@ import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.prompt.ChatOptions;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
+import org.example.ai.agent.graph.compiler.CompiledGraphNode;
+import org.example.ai.agent.graph.compiler.GraphCapabilityCatalog;
+import org.example.ai.agent.graph.config.CapabilityNodeConfig;
+import org.example.ai.agent.graph.runtime.GraphExecutionContext;
+import org.example.ai.agent.graph.runtime.GraphExecutionRequest;
+import org.example.ai.agent.graph.runtime.GraphRuntimeExpressionResolver;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -36,22 +42,26 @@ import java.util.Objects;
 @RequiredArgsConstructor
 public class WorkflowPlanner {
 
-    private static final double MIN_CONFIDENCE =
-            0.75D;
+    private static final double MIN_CONFIDENCE = 0.75D;
 
     private final WorkflowDefinitionService workflowService;
     private final WorkflowRuntimeSnapshotResolver snapshotResolver;
     private final CapabilityInputSchemaValidator inputValidator;
     private final TrackedChatClientService chatClientService;
     private final ObjectMapper objectMapper;
+    /**
+     * 读取发布能力的副作用类型。
+     */
+    private final GraphCapabilityCatalog capabilityCatalog;
 
-    public WorkflowPlan plan(
-            String userQuestion,
-            ModelCallContext sourceContext) {
+    /**
+     * 复用 GraphSpec 原有受限表达式解析器。
+     */
+    private final GraphRuntimeExpressionResolver expressionResolver;
 
-        List<WorkflowDefinition> candidates =
-                workflowService
-                        .listAgentCallableDefinitions();
+    public WorkflowPlan plan(String userQuestion, ModelCallContext sourceContext) {
+
+        List<WorkflowDefinition> candidates =workflowService.listAgentCallableDefinitions();
 
         if (candidates.isEmpty()) {
             return notMatched(
@@ -66,74 +76,63 @@ public class WorkflowPlanner {
                         sourceContext
                 );
 
-        if (!Boolean.TRUE.equals(
-                decision.matched()
-        )) {
-            return notMatched(
-                    decision.reason()
-            );
+        if (!Boolean.TRUE.equals(decision.matched())) {
+            return notMatched( decision.reason());
         }
 
         WorkflowDefinition selected =
-                candidates.stream()
-                        .filter(item ->
+                candidates.stream() .filter(item ->
                                 Objects.equals(
                                         item.getWorkflowCode(),
                                         decision.workflowCode()
                                 ))
-                        .findFirst()
-                        .orElseThrow(() ->
+                        .findFirst().orElseThrow(() ->
                                 new BusinessException(
                                         400,
                                         "模型选择了候选列表之外的工作流"
                                 )
                         );
 
-        double confidence =
-                decision.confidence() == null
+        double confidence = decision.confidence() == null
                         ? 0D
                         : decision.confidence();
 
         if (confidence < MIN_CONFIDENCE) {
             return WorkflowPlan.builder()
-                    .status(
-                            WorkflowPlanStatus
-                                    .NEED_CLARIFY
-                    )
-                    .workflowCode(
-                            selected.getWorkflowCode()
-                    )
-                    .workflowName(
-                            selected.getWorkflowName()
-                    )
+                    .status( WorkflowPlanStatus.NEED_CLARIFY)
+                    .workflowCode(selected.getWorkflowCode())
+                    .workflowName( selected.getWorkflowName())
                     .confidence(confidence)
                     .reason("工作流匹配置信度不足")
-                    .clarifyQuestion(
-                            StringUtils.hasText(
-                                    decision.clarifyQuestion()
-                            )
+                    .clarifyQuestion(StringUtils.hasText(decision.clarifyQuestion())
                                     ? decision.clarifyQuestion()
-                                    : "请确认需要执行的具体业务查询。"
-                    )
+                                    : "请确认需要执行的具体业务查询。")
                     .build();
         }
 
-        PublishedWorkflow published =
-                snapshotResolver.resolveByCode(
-                        selected.getWorkflowCode()
-                );
+        PublishedWorkflow published =snapshotResolver.resolveByCode(selected.getWorkflowCode());
+        /*
+         * 编译器已经保证 WRITE 工作流只有一个能力节点。
+         */
+        CompiledGraphNode writeNode = findWriteNode(published);
 
-        WorkflowParameterExtraction extraction =
-                extractParameters(
+        CapabilityNodeConfig writeConfig =
+                writeNode != null
+                        && writeNode.config()
+                        instanceof CapabilityNodeConfig config
+                        ? config
+                        : null;
+
+        String sideEffect =writeConfig == null
+                        ? "READ"
+                        : "WRITE";
+
+        WorkflowParameterExtraction extraction =extractParameters(
                         userQuestion,
                         published,
-                        sourceContext
-                );
+                        sourceContext);
 
-        String schemaJson =
-                writeJson(
-                        published.inputSchema()
-                );
+        String schemaJson =writeJson(published.inputSchema());
 
         CapabilityInputValidationResult validation =
                 inputValidator.validate(
@@ -164,25 +163,66 @@ public class WorkflowPlanner {
                                     validation
                             )
                     )
+                    .sideEffect(sideEffect)
+                    .actionCapabilityCode(
+                            writeConfig == null
+                                    ? null
+                                    : writeConfig.capabilityCode()
+                    )
+                    .actionCapabilityName(
+                            writeNode == null
+                                    ? null
+                                    : writeNode.name()
+                    )
                     .build();
         }
-
+        Map<String, Object> actionInput =new LinkedHashMap<>();
+        if (writeConfig != null) {
+            /*
+             * WRITE 工作流只有 START → WRITE → END，
+             * 因此只能读取 $input，不存在上游变量。
+             */
+            GraphExecutionContext context =
+                    GraphExecutionContext.create(
+                            GraphExecutionRequest.builder()
+                                    .runId(
+                                            sourceContext == null
+                                                    ? null
+                                                    : sourceContext
+                                                    .getRunId()
+                                    )
+                                    .userId(
+                                            sourceContext == null
+                                                    ? null
+                                                    : sourceContext
+                                                    .getUserId()
+                                    )
+                                    .input(
+                                            validation
+                                                    .getSanitizedInput()
+                                    )
+                                    .executionPath("root")
+                                    .build()
+                    );
+            actionInput =expressionResolver.resolveMap( writeConfig.inputMapping(),context );
+        }
         return WorkflowPlan.builder()
                 .status(WorkflowPlanStatus.READY)
-                .workflowCode(
-                        selected.getWorkflowCode()
-                )
-                .workflowName(
-                        published.compiledGraph().name()
-                )
-                .versionId(
-                        published.version().getId()
-                )
-                .input(
-                        validation.getSanitizedInput()
-                )
+                .workflowCode(selected.getWorkflowCode() )
+                .workflowName(published.compiledGraph().name())
+                .versionId(published.version().getId())
+                .input(validation.getSanitizedInput())
                 .confidence(confidence)
                 .reason(decision.reason())
+                .sideEffect(sideEffect)
+                .actionCapabilityCode(
+                        writeConfig == null
+                                ? null
+                                : writeConfig.capabilityCode()
+                ).actionCapabilityName(writeNode == null
+                                ? null
+                                : writeNode.name()
+                ).actionInput(actionInput)
                 .build();
     }
 
@@ -481,5 +521,21 @@ public class WorkflowPlanner {
                     ? Map.of()
                     : Map.copyOf(input);
         }
+    }
+    /**
+     * 查找已发布工作流中的 WRITE 节点。
+     */
+    private CompiledGraphNode findWriteNode(
+            PublishedWorkflow workflow) {
+
+        for (CompiledGraphNode node : workflow.compiledGraph().nodesById().values()) {
+            if (!(node.config() instanceof CapabilityNodeConfig config)) {
+                continue;
+            }
+            if ("WRITE".equalsIgnoreCase(capabilityCatalog.sideEffect(config.capabilityCode()))) {
+                return node;
+            }
+        }
+        return null;
     }
 }

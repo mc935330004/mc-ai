@@ -331,6 +331,24 @@ public class GraphSpecCompiler {
                 graphPath,
                 errors
         );
+        /*
+         * WRITE 工作流第一版只允许：
+         *
+         * START → WRITE → END
+         *
+         * 这里只做编译校验，不执行写接口。
+         */
+        validateWriteTopology(
+                nodeMap,
+                compiledConfigs,
+                incoming,
+                outgoing,
+                startNodeId,
+                endNodeId,
+                rootGraph,
+                graphPath,
+                errors
+        );
 
         if (errors.size() > initialErrorCount) {
             return null;
@@ -365,6 +383,135 @@ public class GraphSpecCompiler {
                 incoming,
                 topologicalOrder
         );
+    }
+    /**
+     * 校验第一版 WRITE 工作流结构。
+     *
+     * 当前只允许一个末端 WRITE 节点，
+     * 不支持查询后写入、循环写入或多个写节点。
+     */
+    private void validateWriteTopology(
+            Map<String, GraphNodeSpec> nodes,
+            Map<String, GraphNodeConfig> configs,
+            Map<String, List<GraphEdgeSpec>> incoming,
+            Map<String, List<GraphEdgeSpec>> outgoing,
+            String startNodeId,
+            String endNodeId,
+            boolean rootGraph,
+            String graphPath,
+            List<GraphValidationError> errors) {
+
+        List<String> writeNodeIds =
+                new ArrayList<>();
+
+        for (Map.Entry<String, GraphNodeConfig> entry
+                : configs.entrySet()) {
+
+            if (!(entry.getValue()
+                    instanceof CapabilityNodeConfig config)) {
+
+                continue;
+            }
+
+            String sideEffect;
+
+            try {
+                sideEffect =
+                        capabilityCatalog.sideEffect(
+                                config.capabilityCode()
+                        );
+            } catch (Exception exception) {
+                addNodeError(
+                        errors,
+                        "GRAPH_CAPABILITY_SIDE_EFFECT_UNAVAILABLE",
+                        graphPath,
+                        entry.getKey(),
+                        "能力副作用信息暂时不可用"
+                );
+                return;
+            }
+
+            if ("WRITE".equalsIgnoreCase(sideEffect)) {
+                writeNodeIds.add(entry.getKey());
+            }
+        }
+
+        // 没有 WRITE 节点时，保持原查询工作流逻辑。
+        if (writeNodeIds.isEmpty()) {
+            return;
+        }
+
+        /*
+         * 第一版不允许在 FOREACH 子图中写入，
+         * 也不允许一个流程包含多个 WRITE 节点。
+         */
+        if (!rootGraph || writeNodeIds.size() != 1) {
+            addGraphError(
+                    errors,
+                    "GRAPH_WRITE_TOPOLOGY_INVALID",
+                    graphPath,
+                    "WRITE工作流只能包含一个根级WRITE节点"
+            );
+            return;
+        }
+
+        String writeNodeId =
+                writeNodeIds.get(0);
+
+        GraphNodeConfig nodeConfig =
+                configs.get(writeNodeId);
+
+        /*
+         * WRITE 节点禁止开启自动分页。
+         */
+        if (nodeConfig
+                instanceof CapabilityNodeConfig capabilityConfig
+                && capabilityConfig.pagination() != null
+                && capabilityConfig.pagination().isEnabled()) {
+
+            addNodeError(
+                    errors,
+                    "GRAPH_WRITE_PAGINATION_NOT_ALLOWED",
+                    graphPath,
+                    writeNodeId,
+                    "WRITE节点不能配置自动分页"
+            );
+        }
+
+        List<GraphEdgeSpec> writeIncoming =
+                incoming.getOrDefault(
+                        writeNodeId,
+                        List.of()
+                );
+
+        List<GraphEdgeSpec> writeOutgoing =
+                outgoing.getOrDefault(
+                        writeNodeId,
+                        List.of()
+                );
+
+        boolean valid =
+                nodes.size() == 3
+                        && startNodeId != null
+                        && endNodeId != null
+                        && writeIncoming.size() == 1
+                        && writeOutgoing.size() == 1
+                        && startNodeId.equals(
+                        writeIncoming.get(0).getSource()
+                )
+                        && endNodeId.equals(
+                        writeOutgoing.get(0).getTarget()
+                );
+
+        if (!valid) {
+            addNodeError(
+                    errors,
+                    "GRAPH_WRITE_TOPOLOGY_INVALID",
+                    graphPath,
+                    writeNodeId,
+                    "WRITE工作流只允许START → WRITE → END"
+            );
+        }
     }
 
     private void validateGraphMetadata(

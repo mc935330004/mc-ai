@@ -17,6 +17,15 @@ public interface GraphCapabilityCatalog {
     boolean isCallable(String capabilityCode);
 
     /**
+     * 返回能力副作用类型。
+     *
+     * 默认按照 READ 处理，兼容原有测试中的 Lambda 实现。
+     */
+    default String sideEffect(String capabilityCode) {
+        return "READ";
+    }
+
+    /**
      * 查询能力公开输入契约。
      *
      * 使用default是为了保持本接口仍然是函数式接口，
