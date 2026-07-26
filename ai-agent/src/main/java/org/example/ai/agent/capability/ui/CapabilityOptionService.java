@@ -606,7 +606,90 @@ public class CapabilityOptionService {
     /**
      * 从安全的workflowData中读取选项。
      */
+
     private List<CapabilityOptionVO> readOptions(
+            Object workflowData,
+            CapabilityUiSchemaParser.OptionSource source,
+            String fieldName) {
+
+        JsonNode root = objectMapper.valueToTree(workflowData);
+
+        SimpleJsonPathReader.ReadResult readResult =
+                jsonPathReader.read(root, source.itemsPath());
+
+        if (!readResult.found()
+                || readResult.value() == null
+                || !readResult.value().isArray()) {
+            throw badRequest(
+                    "选项能力返回路径不是数组："
+                            + fieldName
+                            + "，itemsPath="
+                            + source.itemsPath()
+            );
+        }
+
+        Map<String, CapabilityOptionVO> unique = new LinkedHashMap<>();
+
+        for (JsonNode item : readResult.value()) {
+            collectOptionTree(
+                    item,
+                    source,
+                    unique
+            );
+        }
+
+        return List.copyOf(unique.values());
+    }
+
+    /**
+     * 递归收集树形选项：父节点 + children 全部合并为普通下拉选项。
+     */
+    private void collectOptionTree(
+            JsonNode item,
+            CapabilityUiSchemaParser.OptionSource source,
+            Map<String, CapabilityOptionVO> unique) {
+
+        if (item == null || !item.isObject()) {
+            return;
+        }
+
+        JsonNode valueNode = item.get(source.valueField());
+        JsonNode labelNode = item.get(source.labelField());
+
+        if (valueNode != null
+                && !valueNode.isNull()
+                && labelNode != null
+                && !labelNode.isNull()) {
+
+            String label = labelNode.asText("").trim();
+
+            if (StringUtils.hasText(label)) {
+                Object value = objectMapper.convertValue(valueNode, Object.class);
+
+                unique.putIfAbsent(
+                        valueNode.toString(),
+                        CapabilityOptionVO.builder()
+                                .value(value)
+                                .label(label)
+                                .build()
+                );
+            }
+        }
+
+        JsonNode children = item.get("children");
+
+        if (children != null && children.isArray()) {
+            for (JsonNode child : children) {
+                collectOptionTree(
+                        child,
+                        source,
+                        unique
+                );
+            }
+        }
+    }
+
+    private List<CapabilityOptionVO> olDreadOptions(
             Object workflowData,
             CapabilityUiSchemaParser.OptionSource source,
             String fieldName) {

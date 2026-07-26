@@ -1,9 +1,15 @@
 package org.example.ai.agent.capability.invocation.runtime;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 
+import java.util.ArrayList;
+import java.util.List;
 /**
  * 受限JSON路径读取器。
  *
@@ -13,7 +19,83 @@ import org.springframework.util.StringUtils;
 @Component
 public class SimpleJsonPathReader {
 
-    public ReadResult read( JsonNode root,String path) {
+    public ReadResult read(JsonNode root, String path) {
+        if (root == null || !StringUtils.hasText(path)) {
+            return ReadResult.missing();
+        }
+        if ("$".equals(path)) {
+            return ReadResult.found(root);
+        }
+        if (!path.startsWith("$.")) {
+            return ReadResult.missing();
+        }
+        List<JsonNode> currentNodes = List.of(root);
+        String[] parts = path.substring(2).split("\\.");
+        for (String part : parts) {
+            boolean wildcardArray = part.endsWith("[*]");
+            String fieldName = wildcardArray
+                    ? part.substring(0, part.length() - 3)
+                    : part;
+
+            List<JsonNode> nextNodes = new ArrayList<>();
+
+            for (JsonNode current : currentNodes) {
+                JsonNode value = readSingle(current, fieldName);
+
+                if (value == null || value.isNull() || value.isMissingNode()) {
+                    continue;
+                }
+
+                if (wildcardArray) {
+                    if (!value.isArray()) {
+                        continue;
+                    }
+
+                    value.forEach(nextNodes::add);
+                } else {
+                    nextNodes.add(value);
+                }
+            }
+
+            if (nextNodes.isEmpty()) {
+                return ReadResult.missing();
+            }
+
+            currentNodes = nextNodes;
+        }
+
+        if (currentNodes.size() == 1) {
+            return ReadResult.found(currentNodes.get(0));
+        }
+
+        ArrayNode arrayNode = JsonNodeFactory.instance.arrayNode();
+        currentNodes.forEach(arrayNode::add);
+        return ReadResult.found(arrayNode);
+    }
+
+    private JsonNode readSingle(JsonNode current, String part) {
+        if (current == null || current.isNull() || current.isMissingNode()) {
+            return null;
+        }
+
+        if (current.isObject()) {
+            return current.get(part);
+        }
+
+        if (current.isArray() && isArrayIndex(part)) {
+            int index = Integer.parseInt(part);
+
+            if (index < 0 || index >= current.size()) {
+                return null;
+            }
+
+            return current.get(index);
+        }
+
+        return null;
+    }
+
+    public ReadResult olDread( JsonNode root,String path) {
 
         if (root == null || !StringUtils.hasText(path)) {
 
