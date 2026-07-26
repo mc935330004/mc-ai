@@ -777,9 +777,7 @@ public class CapabilityUiSchemaParser {
      */
     private JsonNode readRoot(String schemaJson) {
         if (!StringUtils.hasText(schemaJson)) {
-            throw badRequest(
-                    "inputSchemaJson不能为空"
-            );
+            throw badRequest("inputSchemaJson不能为空");
         }
 
         try {

@@ -58,31 +58,17 @@ public class CapabilityOptionService {
             String userId,
             String authorization) {
 
-        requireText(
-                writeCapabilityCode,
-                "WRITE能力编码不能为空"
-        );
-        requireText(
-                fieldName,
-                "字段名称不能为空"
-        );
-        requireText(
-                userId,
-                "当前用户不能为空"
-        );
-        requireText(
-                authorization,
-                "当前请求缺少Authorization"
-        );
+        requireText( writeCapabilityCode,
+                "WRITE能力编码不能为空");
+        requireText(fieldName,
+                "字段名称不能为空");
+        requireText(userId,"当前用户不能为空" );
+        requireText( authorization,
+                "当前请求缺少Authorization");
 
-        CapabilityDefinition writeCapability =
-                getRequiredCapability(
-                        writeCapabilityCode
-                );
+        CapabilityDefinition writeCapability =getRequiredCapability( writeCapabilityCode);
 
-        if (!"WRITE".equalsIgnoreCase(
-                writeCapability.getSideEffect()
-        )) {
+        if (!"WRITE".equalsIgnoreCase(writeCapability.getSideEffect())) {
             throw badRequest(
                     "目标能力不是WRITE："
                             + writeCapabilityCode
@@ -110,9 +96,7 @@ public class CapabilityOptionService {
             );
         }
 
-        if (!"REMOTE_SELECT".equals(
-                field.component()
-        ) || field.optionSource() == null) {
+        if (!"REMOTE_SELECT".equals(field.component()) || field.optionSource() == null) {
             throw badRequest(
                     "字段不是远程下拉类型："
                             + fieldName
@@ -136,13 +120,8 @@ public class CapabilityOptionService {
             );
         }
 
-        if (!uiSchemaParser.isOptionSource(
-                optionCapability.getInputSchemaJson()
-        )) {
-            throw badRequest(
-                    "能力未声明为OPTION_SOURCE："
-                            + source.capabilityCode()
-            );
+        if (!uiSchemaParser.isOptionSource(optionCapability.getInputSchemaJson())) {
+            throw badRequest("能力未声明为OPTION_SOURCE："+ source.capabilityCode() );
         }
 
         Map<String, Object> optionInput =
