@@ -17,6 +17,7 @@ import org.example.ai.agent.common.exception.BusinessException;
 import org.example.ai.agent.common.result.Result;
 import org.example.ai.agent.plan.PlanStep;
 import org.example.ai.agent.security.CurrentUserProvider;
+import org.example.ai.agent.security.PmPermissionResolver;
 import org.example.ai.agent.tool.BusinessCapabilityExecutor;
 import org.example.ai.agent.tool.ToolExecutionContext;
 import org.example.ai.agent.tool.ToolResult;
@@ -51,6 +52,10 @@ public class CapabilityDefinitionController {
     private final ObjectMapper objectMapper;
     private final CurrentUserProvider currentUserProvider;
     /**
+     * PM接口permission安全解析代理。
+     */
+    private final PmPermissionResolver pmPermissionResolver;
+    /**
      * 通用WRITE远程选项服务。
      */
     private final CapabilityOptionService capabilityOptionService;
@@ -78,6 +83,14 @@ public class CapabilityDefinitionController {
      */
     @PostMapping("/save")
     public Result<Boolean> save(@RequestBody CapabilitySaveDTO dto) {
+        if (dto != null  && "WRITE".equalsIgnoreCase(dto.getSideEffect())) {
+            pmPermissionResolver.verifyWriteConfiguration(dto.getMethod(),
+                    dto.getUrl(),
+                    dto.getInputSchemaJson(),
+                    currentUserProvider
+                            .getRequiredAuthorization()
+            );
+        }
         return Result.success(capabilityDefinitionService.saveCapability(dto));
     }
 
@@ -248,6 +261,29 @@ public class CapabilityDefinitionController {
         return Result.success(capabilityDefinitionService.publishCapabilities(dto.getCapabilityCodes(),
                 currentUserProvider.getRequiredUserId()));
     }
+
+    /**
+     * 查询业务接口对应的PM permission。
+     *
+     * 浏览器只访问Agent，Agent使用当前用户的Authorization调用PM。
+     * 不返回PM原始响应和任何Token信息。
+     */
+    @PostMapping("/resolve-permission")
+    public Result<Map<String, String>> resolvePermission(@RequestBody(required = false) Map<String, String> request) {
+        String method =request == null ? null : request.get("method");
+        String path =request == null
+                        ? null
+                        : request.get("path");
+        String permission =pmPermissionResolver.resolve(
+                        method,
+                        path,
+                        currentUserProvider.getRequiredAuthorization() );
+        /*
+         * 只向前端返回经过安全校验的permission。
+         */
+        return Result.success(Map.of("permission",permission));
+    }
+
 
     /**
      * 将输入对象转换为输入映射。

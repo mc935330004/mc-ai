@@ -8,6 +8,7 @@ import lombok.RequiredArgsConstructor;
 import org.example.ai.agent.common.config.PendingActionProperties;
 import org.example.ai.agent.common.enums.PendingActionStatus;
 import org.example.ai.agent.common.exception.BusinessException;
+import org.example.ai.agent.pending.audit.ActionAuditRecorder;
 import org.example.ai.agent.pending.entity.PendingAction;
 import org.example.ai.agent.pending.mapper.PendingActionMapper;
 import org.example.ai.agent.pending.service.PendingActionService;
@@ -34,7 +35,7 @@ public class PendingActionServiceImpl extends ServiceImpl<PendingActionMapper, P
     private final BusinessCapabilityExecutor businessCapabilityExecutor;
     private final ObjectMapper objectMapper;
     private final PendingActionProperties properties;
-
+    private final ActionAuditRecorder actionAuditRecorder;
     @Override
     @Transactional(rollbackFor = Exception.class)
     public PendingAction createPendingAction( String runId, String userId,DynamicCapabilityPlan plan ) {
@@ -72,6 +73,8 @@ public class PendingActionServiceImpl extends ServiceImpl<PendingActionMapper, P
         action.setIdempotencyKey(runId);
         action.setExpireAt( LocalDateTime.now().plusMinutes(properties.getConfirmTimeoutMinutes()));
         save(action);
+        // 记录WRITE操作预览创建事件。
+        actionAuditRecorder.record(action,ActionAuditRecorder.PREVIEW_CREATED,null);
         return action;
     }
 
@@ -81,14 +84,16 @@ public class PendingActionServiceImpl extends ServiceImpl<PendingActionMapper, P
         PendingAction action = findOwnedAction(runId, userId);
         // 查询时发现操作过期，通过状态条件进行原子更新
         if (PendingActionStatus.PENDING.getCode().equals(action.getStatus()) && action.getExpireAt().isBefore(LocalDateTime.now())) {
-            lambdaUpdate()
+            boolean expired = lambdaUpdate()
                     .eq(PendingAction::getId, action.getId())
                     .eq(PendingAction::getStatus, PendingActionStatus.PENDING.getCode())
                     .set(PendingAction::getStatus, PendingActionStatus.EXPIRED.getCode())
                     .update();
-
-            // 重新查询，避免返回并发情况下的旧状态
             action = getById(action.getId());
+            if (expired) {
+                // 只有真正完成状态转换时才记录，避免重复查询产生重复审计。
+                actionAuditRecorder.record( action,ActionAuditRecorder.EXPIRED,null);
+            }
         }
 
         return action;
@@ -112,7 +117,9 @@ public class PendingActionServiceImpl extends ServiceImpl<PendingActionMapper, P
         if (!updated) {
             throw new BusinessException(409, "操作状态已经发生变化，请刷新后重试");
         }
-        return getById(action.getId());
+        PendingAction cancelledAction = getById(action.getId());
+        actionAuditRecorder.record( cancelledAction, ActionAuditRecorder.CANCELLED,null );
+        return cancelledAction;
     }
 
     @Override
@@ -176,6 +183,8 @@ public class PendingActionServiceImpl extends ServiceImpl<PendingActionMapper, P
         if (!claimed) {
             throw new BusinessException(409, "操作正在执行或已经执行");
         }
+        // 只有成功抢占执行权的请求才记录执行开始。
+        actionAuditRecorder.record(action,ActionAuditRecorder.EXECUTION_STARTED,null);
         try {
             Map<String, Object> input = objectMapper.readValue(
                     action.getInputJson(),
@@ -217,8 +226,13 @@ public class PendingActionServiceImpl extends ServiceImpl<PendingActionMapper, P
                         .set(PendingAction::getErrorMessage, result.getErrorMessage())
                         .update();
             }
+            PendingAction finishedAction = getById(action.getId());
 
-            return getById(action.getId());
+            actionAuditRecorder.record(finishedAction, result.isSuccess()
+                            ? ActionAuditRecorder.EXECUTION_SUCCEEDED
+                            : ActionAuditRecorder.EXECUTION_FAILED,
+                    result.isSuccess()? null: result.getErrorCode());
+            return finishedAction;
         } catch (Exception e) {
             lambdaUpdate()
                     .eq(PendingAction::getId, action.getId())
@@ -228,7 +242,11 @@ public class PendingActionServiceImpl extends ServiceImpl<PendingActionMapper, P
                     .set(PendingAction::getErrorMessage, e.getMessage())
                     .update();
 
-            return getById(action.getId());
+            PendingAction failedAction = getById(action.getId());
+            // 不把原始异常写入追加式审计，避免敏感信息泄露。
+            actionAuditRecorder.record(failedAction, ActionAuditRecorder.EXECUTION_FAILED,"UNEXPECTED_EXCEPTION");
+
+            return failedAction;
         }
     }
 

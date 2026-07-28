@@ -2,6 +2,7 @@ package org.example.ai.agent.capability.service.impl;
 
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
@@ -612,6 +613,7 @@ public class CapabilityDefinitionServiceImpl extends ServiceImpl<CapabilityDefin
         validateBusinessSystem(capability);
         validateSideEffect(capability);
         validateSchema(capability.getCapabilityCode(),"inputSchemaJson",capability.getInputSchemaJson());
+        validateWritePermission(capability);
         /*
          * 草稿可以暂存。
          * 正式发布时必须保证动态表单协议完整。
@@ -700,6 +702,38 @@ public class CapabilityDefinitionServiceImpl extends ServiceImpl<CapabilityDefin
             throw e;
         } catch (Exception e) {
             throw new BusinessException(400,fieldName + "不是合法JSON：" + capabilityCode );
+        }
+    }
+    /**
+     * 校验 WRITE 能力必须绑定 PM 业务权限编码。
+     */
+    private void validateWritePermission( CapabilityDefinition capability) {
+
+        if (!"WRITE".equalsIgnoreCase(capability.getSideEffect())) {
+            return;
+        }
+
+        try {
+            JsonNode schema = objectMapper.readTree(capability.getInputSchemaJson());
+
+            String permission = schema.path(
+                    "x-required-permission"
+            ).asText(null);
+
+            if (!StringUtils.hasText(permission)) {
+                throw new BusinessException(
+                        400,
+                        "WRITE能力必须配置x-required-permission："
+                                + capability.getCapabilityCode()
+                );
+            }
+
+        } catch (JsonProcessingException exception) {
+            throw new BusinessException(
+                    400,
+                    "WRITE能力权限配置不是合法JSON："
+                            + capability.getCapabilityCode()
+            );
         }
     }
 }

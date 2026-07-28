@@ -17,6 +17,7 @@ import org.example.ai.agent.capability.invocation.runtime.ResponseInterpretation
 import org.example.ai.agent.capability.mapper.FieldDictionaryMapper;
 import org.example.ai.agent.capability.service.CapabilityDefinitionService;
 import org.example.ai.agent.plan.PlanStep;
+import org.example.ai.agent.security.PmCapabilityPermissionVerifier;
 import org.example.ai.agent.tool.BusinessCapabilityExecutor;
 import org.example.ai.agent.tool.FieldMeta;
 import org.example.ai.agent.tool.ToolExecutionContext;
@@ -48,8 +49,7 @@ import java.util.Map;
  */
 @Service
 @RequiredArgsConstructor
-public class BusinessCapabilityExecutorImpl
-        implements BusinessCapabilityExecutor {
+public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecutor {
 
     private final CapabilityDefinitionService capabilityDefinitionService;
 
@@ -62,7 +62,10 @@ public class BusinessCapabilityExecutorImpl
     private final CapabilityHttpInvoker httpInvoker;
 
     private final CapabilityResponseInterpreter responseInterpreter;
-
+    /**
+     * PM WRITE 能力权限校验器。
+     */
+    private final PmCapabilityPermissionVerifier permissionVerifier;
     /**
      * 根据字段字典提取标准事实。
      */
@@ -152,16 +155,10 @@ public class BusinessCapabilityExecutorImpl
             String idempotencyKey,
             boolean adminReadTest) {
 
-        String capabilityCode =
-                step.getCapabilityCode();
+        String capabilityCode = step.getCapabilityCode();
 
         try {
-            CapabilityDefinition capability =
-                    loadCapability(
-                            capabilityCode,
-                            adminReadTest
-                    );
-
+            CapabilityDefinition capability = loadCapability(capabilityCode,adminReadTest);
             if (capability == null) {
                 return fail(
                         step,
@@ -182,7 +179,17 @@ public class BusinessCapabilityExecutorImpl
             if (sideEffectFailure != null) {
                 return sideEffectFailure;
             }
-
+            /*
+             * WRITE 真正执行前重新读取 PM 当前权限。
+             *
+             * PendingAction 创建时有权限，不代表用户确认时仍然有权限；
+             * 因此必须在调用真实 WRITE API 前重新校验。
+             */
+            if (confirmedWrite) {
+                permissionVerifier.verifyWritePermission(capability,
+                        context == null ? null: context.getAuthorization()
+                );
+            }
             /*
              * 把工作流输入、上游变量和可信安全上下文
              * 转换为能力绑定可以读取的调用上下文。

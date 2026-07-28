@@ -362,6 +362,20 @@ public class CapabilityVersionSnapshotFactory {
                 ? node.asText()
                 : writeJson(node);
     }
+    /**
+     * 根据数据库中保存的原始快照计算 SHA-256。
+     *
+     * 注意：
+     * 必须校验原始字符串，不能先反序列化再序列化，
+     * 否则字段顺序或格式变化可能掩盖快照被修改的问题。
+     */
+    public String checksumRaw(String snapshotJson) {
+        if (!StringUtils.hasText(snapshotJson)) {
+            throw new IllegalStateException("能力版本快照内容不能为空");
+        }
+
+        return sha256(snapshotJson);
+    }
 
     private String sha256(String source) {
         try {
