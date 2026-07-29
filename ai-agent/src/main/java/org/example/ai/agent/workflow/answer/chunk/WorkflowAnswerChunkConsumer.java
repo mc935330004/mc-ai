@@ -169,6 +169,8 @@ public class WorkflowAnswerChunkConsumer {
                  * P2-3最终汇总调用将使用totalChunks + 1。
                  */
                 .callSequence(callSequence)
+                // 中文注释：工作流回答使用当前会话选择的聊天模型。
+                .modelCode(request.getModelCode())
                 .build();
     }
 

@@ -289,6 +289,8 @@ public class WorkflowAnswerSummaryReducer {
                                 ModelCallType.ANSWER
                         )
                         .callSequence(callSequence)
+                        // 中文注释：工作流回答使用当前会话选择的聊天模型。
+                        .modelCode(request.getModelCode())
                         .build();
 
         try {

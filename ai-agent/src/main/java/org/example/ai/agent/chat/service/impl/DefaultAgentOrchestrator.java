@@ -38,6 +38,7 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+import org.example.ai.agent.chat.service.AiChatSessionService;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -90,6 +91,10 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
     private final PendingActionService pendingActionService;
     private final ObjectMapper objectMapper;
     /**
+     * 中文注释：负责保存聊天会话和助手回答。
+     */
+    private final AiChatSessionService aiChatSessionService;
+    /**
      * 使用显式构造器注入命名线程池。
      *
      * Executor 类型可能存在多个 Bean，必须使用 Qualifier 指定
@@ -107,7 +112,9 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
             PendingActionService pendingActionService,
             ObjectMapper objectMapper,
             WorkflowExecutionFacade workflowExecutionFacade,
-            WorkflowAnswerComposer workflowAnswerComposer
+            WorkflowAnswerComposer workflowAnswerComposer,
+            // 中文注释：注入会话服务，统一保存助手回答。
+            AiChatSessionService aiChatSessionService
     ) {
         this.streamSessionFactory = streamSessionFactory;
         this.knowledgeDocumentQueryService = knowledgeDocumentQueryService;
@@ -121,6 +128,7 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
         this.objectMapper = objectMapper;
         this.workflowExecutionFacade = workflowExecutionFacade;
         this.workflowAnswerComposer = workflowAnswerComposer;
+        this.aiChatSessionService = aiChatSessionService;
 
     }
     @Override
@@ -228,7 +236,11 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                     stream.complete();
                     return;
                 }
-                stream.publishAnswer(
+                // 中文注释：保存需要用户补充信息的追问。
+                publishAssistantAnswer(
+                        request,
+                        stream,
+                        runId,
                         intentResult.getClarifyQuestion()
                 );
 
@@ -253,7 +265,13 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
              */
             if (intentResult.getRouteType() == RouteType.REJECT) {
                 // 拒绝回答不再携带内部 RoutePlan，并复用统一回答协议。
-                stream.publishAnswer("该操作存在风险，当前版本不支持由 Agent 自动执行。");
+                // 中文注释：保存风险操作拒绝回答。
+                publishAssistantAnswer(
+                        request,
+                        stream,
+                        runId,
+                        "该操作存在风险，当前版本不支持由 Agent 自动执行。"
+                );
                 runTraceService.markSuccess(runId, System.currentTimeMillis() - startTime);
                 stream.complete();
                 return;
@@ -392,15 +410,20 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
         ToolResult failedResult = findFirstFailedResult(toolResults);
         if (failedResult != null) {
             // 失败摘要同样走统一回答协议，且不泄露完整 ToolResult。
-            stream.publishAnswer(buildFailedAnswer(failedResult));
+            // 中文注释：保存业务能力失败回答。
+            publishAssistantAnswer(
+                    request,
+                    stream,
+                    runId,
+                    buildFailedAnswer(failedResult)
+            );
             stream.complete();
             return;
         }
         // 基于真实业务数据生成最终回答。
         String finalAnswer = answerComposer.compose(request, routePlan, toolResults);
-
-        // v1 发送完整 answer；v2 发送 start、delta 和最终 snapshot。
-        stream.publishAnswer(finalAnswer);
+        // 中文注释：保存业务查询最终回答。
+        publishAssistantAnswer(request, stream, runId, finalAnswer);
         stream.complete();
     }
     /**
@@ -437,12 +460,16 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                 .conversationId(request.getConversationId())
                 .userId(request.getUserId())
                 .callType(ModelCallType.RAG)
+                // 中文注释：只切换 RAG 回答生成模型，不切换向量模型。
+                .modelCode(request.getModelCode())
                 .callSequence(1)
                 .build();
 
+        // 中文注释：向 RAG 回答层传递最近会话记忆。
         return knowledgeDocumentQueryService.query(
                 ragRequest,
-                ragContext
+                ragContext,
+                request.getConversationMemory()
         );
     }
 
@@ -497,8 +524,13 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
         // 2. 调用现有 RAG 服务。
         KnowledgeDocumentQueryResponse ragResponse =executeRagQuery(request, runId);
 
-        // 3. RAG 回答也使用统一 v1/v2 发布协议。
-        stream.publishAnswer(ragResponse.answer());
+        // 中文注释：保存 RAG 最终回答。
+        publishAssistantAnswer(
+                request,
+                stream,
+                runId,
+                ragResponse.answer()
+        );
 
         // 4. 推送引用来源。
         stream.send(
@@ -721,9 +753,31 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                         outcome
                 );
 
-        stream.publishAnswer(answer);
+        // 中文注释：保存工作流查询最终回答。
+        publishAssistantAnswer(request, stream, runId, answer);
         stream.complete();
 
         return outcome;
+    }
+    /**
+     * 中文注释：统一保存并发布助手回答。
+     *
+     * 所有文本回答都从这里发送，避免不同分支漏存历史消息。
+     */
+    private void publishAssistantAnswer(
+            AgentRequest request,
+            AgentStreamSession stream,
+            String runId,
+            String answer) throws Exception {
+
+        aiChatSessionService.saveAssistantMessage(
+                request.getUserId(),
+                request.getConversationId(),
+                answer,
+                runId,
+                request.getModelCode()
+        );
+
+        stream.publishAnswer(answer);
     }
 }

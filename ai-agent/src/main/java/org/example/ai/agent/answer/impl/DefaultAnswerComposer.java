@@ -105,28 +105,44 @@ public class DefaultAnswerComposer implements AnswerComposer {
                  8. 不要直接输出原始JSON。
                 """;
 
+        /*
+         * 中文注释：历史会话只用于理解追问和代词，
+         * 当前业务事实仍然必须以本次工具查询结果为准。
+         */
+        String conversationMemory = StringUtils.hasText(request.getConversationMemory())
+                ? request.getConversationMemory()
+                : "无历史会话";
         String userPrompt = """
-                用户问题：
-                    %s
-            
-                    任务目标：
-                    %s
-            
-                    本次真实业务事实：
-                    %s
-
-                    请生成简洁、准确的业务结论。
-                    明细数据将由系统自动展示，不需要你重复生成表格。
-                    """.formatted(
-                            safeText(request.getUserQuestion()),
-                            routePlan == null ? "": safeText(routePlan.getGoal()),
-                            businessDataJson
-                     );
+                            历史会话：
+                            %s
+                    
+                            当前用户问题：
+                            %s
+                    
+                            任务目标：
+                            %s
+                    
+                            本次真实业务事实：
+                            %s
+                    
+                            回答要求：
+                            1. 历史会话只能用于理解上下文，不得替代本次真实业务事实。
+                            2. 如果历史会话与本次业务事实冲突，以本次业务事实为准。
+                            3. 请生成简洁、准确的业务结论。
+                            4. 明细数据由系统自动展示，不需要重复生成表格。
+                            """.formatted(
+                                    conversationMemory,
+                                    safeText(request.getUserQuestion()),
+                                    routePlan == null ? "" : safeText(routePlan.getGoal()),
+                                    businessDataJson
+                            );
         ModelCallContext callContext = ModelCallContext.builder()
                 .runId(routePlan == null ? null : routePlan.getRunId())
                 .conversationId(request.getConversationId())
                 .userId(request.getUserId())
                 .callType(ModelCallType.ANSWER)
+                // 中文注释：最终回答使用用户当前选择的聊天模型。
+                .modelCode(request.getModelCode())
                 .callSequence(1)
                 .build();
         /*

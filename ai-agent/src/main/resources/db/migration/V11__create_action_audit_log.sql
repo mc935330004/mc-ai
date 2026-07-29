@@ -209,3 +209,29 @@ VALUES
         1,
         '应用重启或异常退出造成运行中断时产生告警'
     );
+
+CREATE TABLE ai_chat_session (
+ id VARCHAR(64) PRIMARY KEY COMMENT '会话ID',
+ user_id VARCHAR(64) NOT NULL COMMENT '用户ID',
+ title VARCHAR(128) NOT NULL COMMENT '会话标题',
+ model_code VARCHAR(64) NULL COMMENT '当前会话选择的模型编码',
+ last_message VARCHAR(512) NULL COMMENT '最后一条消息摘要',
+ message_count INT NOT NULL DEFAULT 0 COMMENT '消息数量',
+ deleted TINYINT NOT NULL DEFAULT 0 COMMENT '是否删除：0否，1是',
+ created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+ updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+ INDEX idx_chat_session_user_updated (user_id, updated_at)
+) COMMENT='AI聊天会话表';
+
+CREATE TABLE ai_chat_message (
+ id BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '消息ID',
+ session_id VARCHAR(64) NOT NULL COMMENT '会话ID',
+ user_id VARCHAR(64) NOT NULL COMMENT '用户ID',
+ role VARCHAR(16) NOT NULL COMMENT '消息角色：USER、ASSISTANT',
+ content LONGTEXT NOT NULL COMMENT '消息内容',
+ run_id VARCHAR(64) NULL COMMENT 'Agent运行ID',
+ model_code VARCHAR(64) NULL COMMENT '模型编码',
+ created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+ INDEX idx_chat_message_session_created (session_id, created_at),
+ INDEX idx_chat_message_user_created (user_id, created_at)
+) COMMENT='AI聊天消息表';

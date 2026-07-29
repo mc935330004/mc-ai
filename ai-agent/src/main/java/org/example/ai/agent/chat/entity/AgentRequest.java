@@ -70,4 +70,15 @@ public class AgentRequest {
      */
     @JsonIgnore
     private Integer streamVersion;
+
+    /**
+     * 中文注释：前端选择的大模型编码，只允许后端配置中的模型。
+     */
+    private String modelCode;
+
+    /**
+     * 中文注释：后端注入的最近历史对话，不允许前端传入伪造。
+     */
+    @JsonIgnore
+    private String conversationMemory;
 }

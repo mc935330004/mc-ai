@@ -34,7 +34,13 @@ public class ModelCallContext {
      * 模型调用类型。
      */
     private ModelCallType callType;
-
+    /**
+     * 中文注释：本次聊天调用使用的模型编码。
+     *
+     * 为空时使用 application.yml 配置的默认聊天模型。
+     * 该字段只控制 ChatClient，不控制 EmbeddingModel。
+     */
+    private String modelCode;
     /**
      * 同一调用类型下的调用序号。
      */

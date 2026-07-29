@@ -14,6 +14,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.SignalType;
+import org.example.ai.agent.common.config.AgentModelProperties;
 
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
@@ -34,6 +35,10 @@ public class DefaultTrackedChatClientService implements TrackedChatClientService
     private final ChatClient chatClient;
     private final ModelUsageService modelUsageService;
     private final TokenUsageExtractor tokenUsageExtractor;
+    /**
+     * 中文注释：聊天模型配置，只用于生成模型切换。
+     */
+    private final AgentModelProperties modelProperties;
 
     /**
      * 同步模型调用。
@@ -73,13 +78,17 @@ public class DefaultTrackedChatClientService implements TrackedChatClientService
             AtomicReference<String> requestId =
                     new AtomicReference<>();
 
-            AtomicReference<String> finishReason =
-                    new AtomicReference<>();
+            AtomicReference<String> finishReason =new AtomicReference<>();
 
             final Flux<ChatResponse> responseFlux;
 
             try {
+                /*
+                 * 中文注释：为当前请求设置聊天生成模型。
+                 * 此处不会影响向量化使用的 EmbeddingModel。
+                 */
                 responseFlux = chatClient.prompt()
+                        .options(buildModelOptions(context, null))
                         .system(safePrompt(systemPrompt))
                         .user(safePrompt(userPrompt))
                         .stream()
@@ -182,14 +191,15 @@ public class DefaultTrackedChatClientService implements TrackedChatClientService
         TokenUsageData observedUsage = TokenUsageData.unknown();
         String observedModelName = null;
         try {
-            ChatClient.ChatClientRequestSpec requestSpec =chatClient.prompt();
             /*
-             * Planner 可以指定 temperature=0，
-             * 普通答案生成仍然使用 application.yml 中的全局参数。
+             * 中文注释：合并业务参数和用户选择的聊天模型。
+             *
+             * Planner 传入的 temperature 等参数会保留，
+             * 最终 model 由后端配置中的 modelName 决定。
              */
-            if (optionsBuilder != null) {
-                requestSpec = requestSpec.options(optionsBuilder);
-            }
+            ChatClient.ChatClientRequestSpec requestSpec = chatClient.prompt()
+                    .options(buildModelOptions(context, optionsBuilder));
+
             ChatResponse response = requestSpec
                     .system(safePrompt(systemPrompt))
                     .user(safePrompt(userPrompt))
@@ -341,5 +351,27 @@ public class DefaultTrackedChatClientService implements TrackedChatClientService
 
     private String safePrompt(String prompt) {
         return prompt == null ? "" : prompt;
+    }
+    /**
+     * 中文注释：构建当前调用使用的聊天模型参数。
+     *
+     * 只覆盖 model，不修改 temperature、topK 等已有参数。
+     */
+    private ChatOptions.Builder<?> buildModelOptions(
+            ModelCallContext context,
+            ChatOptions.Builder<?> optionsBuilder) {
+
+        String modelCode = context == null ? null : context.getModelCode();
+        String modelName = modelProperties.resolve(modelCode).getModelName();
+
+        if (!StringUtils.hasText(modelName)) {
+            throw new IllegalStateException("聊天模型的 modelName 未配置");
+        }
+
+        ChatOptions.Builder<?> builder = optionsBuilder == null
+                ? ChatOptions.builder()
+                : optionsBuilder.clone();
+
+        return builder.model(modelName);
     }
 }

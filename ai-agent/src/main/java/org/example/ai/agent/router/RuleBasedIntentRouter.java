@@ -111,7 +111,11 @@ public class RuleBasedIntentRouter implements IntentRouter {
                 .userId(request == null ? null : request.getUserId())
                 .callType(ModelCallType.PLANNER)
                 .callSequence(1)
+                // 中文注释：工作流回答使用当前会话选择的聊天模型。
+                .modelCode(request.getModelCode())
                 .build();
+        // 中文注释：规则匹配只检查当前问题，模型规划同时参考历史上下文。
+        String plannerQuestion = buildPlannerQuestion(request, question);
         Map<String, Object> actionForm =readActionForm(request);
         if (actionForm != null) {
             WorkflowPlan workflowPlan =
@@ -152,14 +156,14 @@ public class RuleBasedIntentRouter implements IntentRouter {
         // 2. 判断是否为写操作或工作流动作。
         List<String> actionHits = matchKeywords(question, ACTION_KEYWORDS);
         if (!actionHits.isEmpty()) {
-            return routeAction(question, actionHits, plannerContext);
+            return routeAction(plannerQuestion, actionHits, plannerContext);
         }
 
         // 3. 判断统计分析类问题。
         List<String> statisticHits = matchKeywords(question, STATISTIC_KEYWORDS);
         if (!statisticHits.isEmpty()) {
             return routeBusiness(
-                    question,
+                    plannerQuestion,
                     RouteType.STATISTIC_QUERY,
                     statisticHits,
                     "用户问题包含统计、汇总、排名或趋势意图",
@@ -175,7 +179,7 @@ public class RuleBasedIntentRouter implements IntentRouter {
         // 5. 同时命中业务数据和文档/分析关键词，判断为混合问答。
         if (!businessHits.isEmpty() && (!ragHits.isEmpty() || !analysisHits.isEmpty())) {
             return routeBusiness(
-                    question,
+                    plannerQuestion,
                     RouteType.MIXED_QUERY,
                     mergeKeywords(businessHits, ragHits, analysisHits),
                     "用户问题同时包含业务数据和分析意图",
@@ -186,7 +190,7 @@ public class RuleBasedIntentRouter implements IntentRouter {
         // 6. 只命中业务关键词，判断为业务数据查询。
         if (!businessHits.isEmpty()) {
             return routeBusiness(
-                    question,
+                    plannerQuestion,
                     RouteType.BUSINESS_QUERY,
                     businessHits,
                     "用户问题属于业务数据查询",
@@ -210,7 +214,7 @@ public class RuleBasedIntentRouter implements IntentRouter {
         // 固定关键词没有命中时，再从数据库能力目录中动态匹配。
         // 这样新增里程碑、风险、成本等能力后不需要修改 Java 关键词。
         return routeBusiness(
-                question,
+                plannerQuestion,
                 RouteType.BUSINESS_QUERY,
                 List.of(),
                 "未命中固定关键词，尝试从已启用能力目录动态匹配",
@@ -274,9 +278,9 @@ public class RuleBasedIntentRouter implements IntentRouter {
     /**
      * 根据已启用能力目录判断问题是否属于业务查询。
      */
-    private IntentResult routeBusiness(String question, RouteType routeType,List<String> matchedKeywords,String routeReason,
+    private IntentResult routeBusiness(String plannerQuestion, RouteType routeType,List<String> matchedKeywords,String routeReason,
             double confidence,ModelCallContext plannerContext) {
-        WorkflowPlan workflowPlan =workflowPlanner.plan(question,plannerContext);
+        WorkflowPlan workflowPlan =workflowPlanner.plan(plannerQuestion,plannerContext);
 
         if (workflowPlan.getStatus()== WorkflowPlanStatus.NEED_CLARIFY) {
             return IntentResult.builder()
@@ -329,7 +333,7 @@ public class RuleBasedIntentRouter implements IntentRouter {
                     .workflowPlan(workflowPlan)
                     .build();
         }
-        DynamicCapabilityPlan dynamicPlan =dynamicCapabilityPlanner.plan(question, plannerContext);
+        DynamicCapabilityPlan dynamicPlan =dynamicCapabilityPlanner.plan(plannerQuestion, plannerContext);
         // 没有匹配能力时不能调用业务接口，转为追问用户
         if (!dynamicPlan.isMatched()) {
             String clarifyQuestion = StringUtils.hasText(dynamicPlan.getClarifyQuestion()) ? dynamicPlan.getClarifyQuestion()
@@ -376,12 +380,12 @@ public class RuleBasedIntentRouter implements IntentRouter {
     /**
      * 根据能力目录匹配写操作能力。
      */
-    private IntentResult routeAction(String question, List<String> actionHits,ModelCallContext plannerContext) {
+    private IntentResult routeAction(String plannerQuestion, List<String> actionHits,ModelCallContext plannerContext) {
         /*
          * 写操作优先匹配已经发布的 GraphSpec 工作流。
          * 没匹配到时，继续兼容原来的动态 WRITE 能力。
          */
-        WorkflowPlan workflowPlan = workflowPlanner.plan(question,plannerContext);
+        WorkflowPlan workflowPlan = workflowPlanner.plan(plannerQuestion,plannerContext);
 
         if (workflowPlan.isReady() && workflowPlan.isWriteAction()) {
             return buildWorkflowActionResult(
@@ -395,7 +399,7 @@ public class RuleBasedIntentRouter implements IntentRouter {
                     actionHits );
         }
 
-        DynamicCapabilityPlan dynamicPlan = dynamicCapabilityPlanner.plan(question, plannerContext);
+        DynamicCapabilityPlan dynamicPlan = dynamicCapabilityPlanner.plan(plannerQuestion, plannerContext);
         if (!dynamicPlan.isMatched()) {
             return clarify(dynamicPlan.getClarifyQuestion());
         }
@@ -425,6 +429,29 @@ public class RuleBasedIntentRouter implements IntentRouter {
                 .dynamicCapabilityPlan(dynamicPlan)
                 .build();
     }
+    /**
+     * 中文注释：为能力规划器补充会话上下文。
+     */
+    private String buildPlannerQuestion(AgentRequest request,String currentQuestion) {
+        if (request == null
+                || !StringUtils.hasText(request.getConversationMemory())) {
+            return currentQuestion;
+        }
+        return """
+            最近会话：
+            %s
+
+            当前问题：
+            %s
+
+            历史会话只用于解析代词、省略信息和追问，
+            最终业务参数必须以当前问题和真实查询结果为准。
+            """.formatted(
+                request.getConversationMemory(),
+                currentQuestion
+        );
+    }
+
     /**
      * 将工作流 WRITE 计划转换成现有动态能力计划。
      *

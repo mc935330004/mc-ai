@@ -53,7 +53,16 @@ public class KnowledgeDocumentQueryService {
     private final KnowledgeChunkService chunkService;
 
     private final TrackedChatClientService trackedChatClientService;
+    /**
+     * 中文注释：只有包含上下文指代词的追问才拼接历史，
+     * 避免普通问题被无关会话内容干扰。
+     */
+    private static final List<String> CONTEXT_REFERENCE_WORDS = List.of(
+            "这个", "那个", "这些", "那些", "它",
+            "上述", "前面", "刚才", "继续", "该流程", "该制度"
+    );
 
+    private static final int MAX_RETRIEVAL_MEMORY_CHARS = 2000;
     /**
      * 企业文档流式问答。
      *
@@ -98,8 +107,7 @@ public class KnowledgeDocumentQueryService {
             trackedChatClientService.stream(
                             modelCallContext,
                             buildSystemPrompt(),
-                            buildUserPrompt(question, buildContext(hits))
-                    )
+                            buildUserPrompt(question, buildContext(hits), ""))
                     .map(this::extractStreamContent)
                     .filter(StringUtils::hasText)
                     .doOnNext(content -> {
@@ -149,12 +157,22 @@ public class KnowledgeDocumentQueryService {
     }
 
     /**
+     * 中文注释：兼容普通知识库查询，默认没有会话记忆。
+     */
+    public KnowledgeDocumentQueryResponse query(
+            KnowledgeDocumentQueryRequest request,
+            ModelCallContext modelCallContext) {
+
+        return query(request, modelCallContext, "");
+    }
+    /**
      * Agent 内部 RAG 调用。
      *
      * Agent 编排器可以传入 runId、conversationId、userId，
      * 从而把 RAG Token 汇总到 ai_run_trace。
      */
-    public KnowledgeDocumentQueryResponse query(KnowledgeDocumentQueryRequest request,ModelCallContext modelCallContext) {
+    public KnowledgeDocumentQueryResponse query(KnowledgeDocumentQueryRequest request,ModelCallContext modelCallContext,
+                                                String conversationMemory) {
         long start = System.currentTimeMillis();
         String question = normalizeQuestion(request);
         int topK = normalizeTopK(request);
@@ -163,8 +181,17 @@ public class KnowledgeDocumentQueryService {
             if (!StringUtils.hasText(question)) {
                 throw new BusinessException( ErrorCode.BAD_REQUEST, "问题不能为空" );
             }
-
-            List<Document> hits =retrieveHits(request, question, topK, minScore);
+            // 中文注释：上下文追问使用历史信息补全检索语义，向量模型仍使用固定配置。
+            String retrievalQuestion = buildRetrievalQuestion(
+                    question,
+                    conversationMemory
+            );
+            List<Document> hits = retrieveHits(
+                    request,
+                    retrievalQuestion,
+                    topK,
+                    minScore
+            );
 
             if (hits.isEmpty()) {
                 saveQueryLog( question, NO_RESULT_RESPONSE, topK,
@@ -176,7 +203,12 @@ public class KnowledgeDocumentQueryService {
             ChatResponse response = trackedChatClientService.call(
                     modelCallContext,
                     buildSystemPrompt(),
-                    buildUserPrompt(question, buildContext(hits)));
+                    buildUserPrompt(
+                            question,
+                            buildContext(hits),
+                            conversationMemory
+                    )
+            );
 
             String answer = response.getResult().getOutput().getText();
             KnowledgeQueryLog queryLog = saveQueryLog(question,
@@ -205,7 +237,30 @@ public class KnowledgeDocumentQueryService {
             throw exception;
         }
     }
+    /**
+     * 中文注释：为包含代词或省略信息的追问补充最近会话，
+     * 这里只改变检索文本，不切换或动态配置向量模型。
+     */
+    private String buildRetrievalQuestion(
+            String question,
+            String conversationMemory) {
 
+        boolean requiresContext = CONTEXT_REFERENCE_WORDS.stream()
+                .anyMatch(question::contains);
+
+        if (!requiresContext || !StringUtils.hasText(conversationMemory)) {
+            return question;
+        }
+
+        // 中文注释：限制参与向量检索的历史长度，避免超过 Embedding 输入限制。
+        String memory = conversationMemory.length() > MAX_RETRIEVAL_MEMORY_CHARS
+                ? conversationMemory.substring(
+                conversationMemory.length() - MAX_RETRIEVAL_MEMORY_CHARS
+        )
+                : conversationMemory;
+
+        return memory + "\n当前追问：" + question;
+    }
 
     private List<Document> retrieveHits(KnowledgeDocumentQueryRequest request, String question, int topK, double minScore) {
         List<KnowledgeDocument> documents = findPublishedDocuments(request);
@@ -288,15 +343,37 @@ public class KnowledgeDocumentQueryService {
                 """;
     }
 
-    private String buildUserPrompt(String question, String context) {
-        return """
-                # 用户问题：
-                %s
+    /**
+     * 中文注释：构建带最近会话记忆的 RAG 提示词。
+     *
+     * 向量检索仍然只使用当前 question，
+     * conversationMemory 不参与 Embedding 计算。
+     */
+    private String buildUserPrompt(
+            String question,
+            String context,
+            String conversationMemory) {
 
-                # 知识库内容
+        String memory = StringUtils.hasText(conversationMemory)
+                ? conversationMemory
+                : "无历史会话";
+
+        return """
+                # 历史会话
                 %s
-                请基于以上资料回答用户问题，并使用 Markdown 格式输出。
-                """.formatted(question, context);
+    
+                # 当前用户问题
+                %s
+    
+                # 本次检索到的知识库内容
+                %s
+    
+                回答要求：
+                1. 历史会话只用于理解追问和代词。
+                2. 回答事实必须来自本次检索到的知识库内容。
+                3. 不得把历史回答当作最新知识库事实。
+                4. 请使用 Markdown 格式输出。
+                """.formatted(memory, question, context);
     }
 
     private List<KnowledgeDocumentQueryResponse.Reference> buildReferences(List<Document> documents) {
