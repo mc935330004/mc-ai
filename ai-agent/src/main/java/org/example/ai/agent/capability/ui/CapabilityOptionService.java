@@ -425,8 +425,11 @@ public class CapabilityOptionService {
     /**
      * 解析 OBJECT_LIST 中的每一行数据。
      *
-     * 请求参数中的 REMOTE_SELECT 保存真实值，
-     * 展示参数中的 REMOTE_SELECT 保存中文名称。
+     * 核心规则：
+     * 1. 普通字段先直接复制；
+     * 2. 远程下拉字段按照 dependsOn 依赖顺序执行；
+     * 3. 上游远程字段先转换成真实值，再传给下游选项能力；
+     * 4. 不依赖 JSON properties 的声明顺序。
      */
     private CapabilityOptionResolution resolveObjectListField(
             String writeCapabilityCode,
@@ -438,20 +441,12 @@ public class CapabilityOptionService {
             String authorization) {
 
         /*
-         * 如果输入不是数组，暂时保留原始值。
-         * 后续继续由现有 JSON Schema 校验器返回类型错误，
-         * 这里不重复实现一套 Schema 校验逻辑。
+         * 非数组参数继续交给现有 JSON Schema 校验器处理，
+         * 这里不重复实现类型校验。
          */
         if (!(rawValue instanceof List<?> rawRows)) {
-            requestInput.put(
-                    listField.name(),
-                    rawValue
-            );
-
-            displayInput.put(
-                    listField.name(),
-                    rawValue
-            );
+            requestInput.put(listField.name(), rawValue);
+            displayInput.put(listField.name(), rawValue);
 
             return CapabilityOptionResolution.builder()
                     .ready(true)
@@ -461,13 +456,13 @@ public class CapabilityOptionService {
         }
 
         List<Object> requestRows = new ArrayList<>();
+        List<Object> displayRows = new ArrayList<>();
 
-        List<Object> displayRows =
-                new ArrayList<>();
+        for (int rowIndex = 0;
+             rowIndex < rawRows.size();
+             rowIndex++) {
 
-        for (int rowIndex = 0; rowIndex < rawRows.size(); rowIndex++) {
-
-            Object rawRowValue =rawRows.get(rowIndex);
+            Object rawRowValue = rawRows.get(rowIndex);
 
             /*
              * 非对象行继续交给 JSON Schema 校验器处理。
@@ -478,38 +473,180 @@ public class CapabilityOptionService {
                 continue;
             }
 
-            Map<String, Object> requestRow =new LinkedHashMap<>();
+            Map<String, Object> requestRow =
+                    new LinkedHashMap<>();
 
-            Map<String, Object> displayRow =new LinkedHashMap<>();
+            Map<String, Object> displayRow =
+                    new LinkedHashMap<>();
+
+            List<CapabilityUiSchemaParser.Field> remoteFields =
+                    new ArrayList<>();
 
             /*
-             * 只复制 items.properties 中声明的字段，
-             * 防止模型凭空生成的字段进入业务 WRITE 接口。
+             * 第一遍只复制普通字段，同时收集远程下拉字段。
+             *
+             * 必须先复制全部普通字段，不能边遍历边调用远程能力，
+             * 因为发布快照会按照字段名重新排序 properties。
              */
-            for (CapabilityUiSchemaParser.Field childField : listField.itemFields().values()) {
+            for (CapabilityUiSchemaParser.Field childField
+                    : listField.itemFields().values()) {
 
-                if (!rawRow.containsKey( childField.name())) {
+                if ("REMOTE_SELECT".equals(
+                        childField.component()
+                )) {
+                    remoteFields.add(childField);
                     continue;
                 }
 
-                Object childRawValue =rawRow.get(childField.name());
+                if (!rawRow.containsKey(
+                        childField.name()
+                )) {
+                    continue;
+                }
 
-                if (!"REMOTE_SELECT".equals(childField.component())) {
-                    requestRow.put(childField.name(),childRawValue);
-                    displayRow.put(childField.name(),childRawValue);
+                Object childValue =
+                        rawRow.get(childField.name());
+
+                requestRow.put(
+                        childField.name(),
+                        childValue
+                );
+
+                displayRow.put(
+                        childField.name(),
+                        childValue
+                );
+            }
+
+            /*
+             * 按 dependsOn 拓扑顺序解析远程下拉。
+             *
+             * 示例：
+             * unitId 无依赖，先解析；
+             * linkUser、linkPhone 依赖 unitId，后解析。
+             */
+            while (!remoteFields.isEmpty()) {
+
+                Set<String> pendingNames =
+                        new LinkedHashSet<>();
+
+                for (CapabilityUiSchemaParser.Field field
+                        : remoteFields) {
+                    pendingNames.add(field.name());
+                }
+
+                /*
+                 * 查找一个不依赖其他待处理远程字段的节点。
+                 */
+                CapabilityUiSchemaParser.Field current =
+                        remoteFields.stream()
+                                .filter(field ->
+                                        field.dependsOn()
+                                                .stream()
+                                                .noneMatch(
+                                                        pendingNames::contains
+                                                )
+                                )
+                                .findFirst()
+                                .orElse(null);
+
+                /*
+                 * 找不到可执行字段，说明存在循环依赖。
+                 */
+                if (current == null) {
+                    requestRows.add(requestRow);
+                    displayRows.add(displayRow);
+
+                    requestInput.put(
+                            listField.name(),
+                            requestRows
+                    );
+
+                    displayInput.put(
+                            listField.name(),
+                            displayRows
+                    );
+
+                    return clarify(
+                            requestInput,
+                            displayInput,
+                            "字段【"
+                                    + listField.label()
+                                    + "】第"
+                                    + (rowIndex + 1)
+                                    + "行：远程下拉字段存在循环依赖，"
+                                    + "请检查x-ui.dependsOn配置"
+                    );
+                }
+
+                Object childRawValue =
+                        rawRow.get(current.name());
+
+                /*
+                 * 没填写的远程字段暂时跳过，
+                 * 后续统一交给 JSON Schema required 校验。
+                 */
+                if (isMissing(childRawValue)) {
+                    remoteFields.remove(current);
                     continue;
                 }
 
                 /*
-                 * 空的远程下拉字段不在这里补默认值。
-                 * 必填校验继续由 JSON Schema items.required 处理。
+                 * 查询当前远程选项前，确保依赖字段已经解析完成。
+                 *
+                 * 这里读取 requestRow，而不是 rawRow，
+                 * 保证传递的是上游字段转换后的真实值。
                  */
-                if (isMissing(childRawValue)) {
-                    continue;
+                for (String dependency
+                        : current.dependsOn()) {
+
+                    if (!isMissing(
+                            requestRow.get(dependency)
+                    )) {
+                        continue;
+                    }
+
+                    CapabilityUiSchemaParser.Field dependencyField =
+                            listField.itemFields()
+                                    .get(dependency);
+
+                    String dependencyLabel =
+                            dependencyField == null
+                                    ? dependency
+                                    : dependencyField.label();
+
+                    requestRows.add(requestRow);
+                    displayRows.add(displayRow);
+
+                    requestInput.put(
+                            listField.name(),
+                            requestRows
+                    );
+
+                    displayInput.put(
+                            listField.name(),
+                            displayRows
+                    );
+
+                    return clarify(
+                            requestInput,
+                            displayInput,
+                            "字段【"
+                                    + listField.label()
+                                    + "】第"
+                                    + (rowIndex + 1)
+                                    + "行：字段【"
+                                    + current.label()
+                                    + "】请先提供【"
+                                    + dependencyLabel
+                                    + "】"
+                    );
                 }
 
                 String childFieldPath =
-                        listField.name() + "[]."+ childField.name();
+                        listField.name()
+                                + "[]."
+                                + current.name();
 
                 List<CapabilityOptionVO> options =
                         queryOptions(
@@ -522,7 +659,7 @@ public class CapabilityOptionService {
 
                 CapabilityOptionResolution matched =
                         matchOption(
-                                childField,
+                                current,
                                 childRawValue,
                                 options,
                                 requestRow,
@@ -530,18 +667,22 @@ public class CapabilityOptionService {
                         );
 
                 if (!matched.isReady()) {
-                    /*
-                     * 把当前已经处理的行放回根对象，
-                     * 保证澄清结果仍然使用原有根级参数结构。
-                     */
                     requestRows.add(requestRow);
                     displayRows.add(displayRow);
 
-                    requestInput.put(listField.name(),requestRows );
+                    requestInput.put(
+                            listField.name(),
+                            requestRows
+                    );
 
-                    displayInput.put(listField.name(),displayRows);
+                    displayInput.put(
+                            listField.name(),
+                            displayRows
+                    );
 
-                    return clarify(requestInput,displayInput,
+                    return clarify(
+                            requestInput,
+                            displayInput,
                             "字段【"
                                     + listField.label()
                                     + "】第"
@@ -550,6 +691,8 @@ public class CapabilityOptionService {
                                     + matched.getClarifyQuestion()
                     );
                 }
+
+                remoteFields.remove(current);
             }
 
             requestRows.add(requestRow);
@@ -561,7 +704,10 @@ public class CapabilityOptionService {
                 requestRows
         );
 
-        displayInput.put(listField.name(),displayRows );
+        displayInput.put(
+                listField.name(),
+                displayRows
+        );
 
         return CapabilityOptionResolution.builder()
                 .ready(true)
