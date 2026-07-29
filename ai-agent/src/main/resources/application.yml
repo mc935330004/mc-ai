@@ -164,11 +164,13 @@ agent:
 ai:
   graph:
     runtime:
-      # DAG普通分支执行线程数。
-      # FOREACH并发限制将在L1-3单独控制。
+      # DAG普通节点线程数
       worker-threads: 8
-      # 项目级并发线程数，最大5
+      # FOREACH任务最大并发数
       foreach-worker-threads: 5
+      # 同时允许执行的根工作流数量
+      # 正式运行、失败重试、草稿调试共享该限制
+      max-concurrent-workflows: 8
   workflow:
     run-recovery:
       # 是否开启卡死运行自动恢复

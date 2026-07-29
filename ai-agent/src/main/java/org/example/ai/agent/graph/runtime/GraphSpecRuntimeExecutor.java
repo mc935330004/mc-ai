@@ -12,8 +12,9 @@ import org.example.ai.agent.plan.StepType;
 import org.example.ai.agent.trace.service.RunStepRecorder;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
+import org.springframework.beans.factory.annotation.Value;
 
-import java.util.ArrayList;
+import java.util.concurrent.Semaphore;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -30,6 +31,13 @@ public class GraphSpecRuntimeExecutor implements GraphSubgraphRunner{
     private final Executor taskExecutor;
     private final RunStepRecorder runStepRecorder;
     /**
+     * 根工作流并发许可。
+     *
+     * 正式执行、失败重试、草稿调试共享同一个容量限制。
+     * FOREACH内部子图不重复获取许可。
+     */
+    private final Semaphore workflowPermits;
+    /**
      * 当前线程同步执行器。
      *
      * 只用于FOREACH隔离任务内部的子图，
@@ -41,20 +49,78 @@ public class GraphSpecRuntimeExecutor implements GraphSubgraphRunner{
             GraphNodeExecutorRegistry registry,
             @Qualifier("graphRuntimeExecutor")
             Executor taskExecutor,
-            RunStepRecorder runStepRecorder) {
-
+            RunStepRecorder runStepRecorder,
+            @Value("${ai.graph.runtime.max-concurrent-workflows:8}")
+            int maxConcurrentWorkflows) {
         this.registry = registry;
         this.taskExecutor = taskExecutor;
         this.runStepRecorder = runStepRecorder;
+        /*
+         * 防止错误配置为0或过大的值。
+         * 默认8，配置范围限制为1到64。
+         */
+        int permitCount = Math.max(1,Math.min(maxConcurrentWorkflows, 64));
+        /*
+         * fair=true，按照等待顺序分配许可。
+         * 当前使用tryAcquire不等待，但公平模式便于以后安全扩展。
+         */
+        this.workflowPermits = new Semaphore(permitCount, true);
     }
+    /**
+     * 执行GraphSpec。
+     *
+     * 根工作流必须先获取容量许可；
+     * FOREACH内部子图同步执行，不重复占用许可。
+     */
     @Override
     public GraphExecutionResult execute(
             CompiledGraphSpec graph,
             GraphExecutionRequest request) {
 
-        long graphStartedAt =
-                System.currentTimeMillis();
+        boolean rootExecution =request == null || !request.isInlineExecution();
 
+        /*
+         * 子图已经属于某个根工作流，
+         * 直接执行，避免重复获取许可导致死锁。
+         */
+        if (!rootExecution) {
+            return executeInternal(graph, request);
+        }
+        long startedAt = System.currentTimeMillis();
+        /*
+         * 容量耗尽时立即失败。
+         * 不等待、不排队、不继续占用服务器请求线程。
+         */
+        if (!workflowPermits.tryAcquire()) {
+            return failure(
+                    request,
+                    graph,
+                    "GRAPH_RUNTIME_BUSY",
+                    "当前工作流执行数量已达到系统上限，请稍后重试",
+                    Map.of(),
+                    Map.of(),
+                    startedAt
+            );
+        }
+        try {
+            return executeInternal(graph, request);
+        } finally {
+            /*
+             * 无论执行成功、业务失败还是抛出异常，
+             * 都必须释放许可，避免容量永久丢失。
+             */
+            workflowPermits.release();
+        }
+    }
+
+    /**
+     * 实际执行GraphSpec。
+     *
+     * 只能由受容量保护的execute()或内部子图调用，
+     * 禁止外部代码绕过根工作流并发限制。
+     */
+    private GraphExecutionResult executeInternal(CompiledGraphSpec graph,GraphExecutionRequest request) {
+        long graphStartedAt =System.currentTimeMillis();
         if (graph == null) {
             return failure(
                     request,

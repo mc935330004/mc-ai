@@ -18,7 +18,6 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.*;
-import java.util.concurrent.Semaphore;
 
 /**
  * FOREACH节点执行器。
@@ -286,7 +285,10 @@ public class ForEachGraphNodeExecutor
     }
 
     /**
-     * continueOnItemError=true时并发执行全部项目。
+     * continueOnItemError=true 时并发处理全部记录。
+     *
+     * 业务记录不截断，但每批最多只提交5条任务，
+     * 防止一次性为全部记录创建Future并堆积在线程池队列中。
      */
     private List<ForEachItemResult> executeConcurrent(
             CompiledGraphNode node,
@@ -298,91 +300,64 @@ public class ForEachGraphNodeExecutor
 
         /*
          * processAllItems只解除记录总数限制，
-         * 不能解除并发限制。
+         * 不解除最大并发数限制。
          */
-        int concurrencyLimit =config.processAllItems()
-                        ? 5: Math.min(config.maxItems(),5);
+        int concurrencyLimit = config.processAllItems()
+                ? 5
+                : Math.min(config.maxItems(), 5);
 
-        int concurrency =Math.max(1,Math.min(config.concurrency(),
-                                concurrencyLimit));
-
-        Semaphore semaphore =new Semaphore(concurrency);
-
-        List<CompletableFuture<ForEachItemResult>>
-                futures =
-                new ArrayList<>();
-
-        for (int index = 0;
-             index < items.size();
-             index++) {
-
-            int itemIndex = index;
-            Object item = items.get(index);
-
-            CompletableFuture<ForEachItemResult> future =
-                    CompletableFuture.supplyAsync( () -> executeWithPermit(
-                                    semaphore,
-                                    node,
-                                    config,
-                                    itemIndex,
-                                    item,
-                                    parentContext,
-                                    parentVariables
-                            ),
-                            selectedItemExecutor
-                    );
-            futures.add(future);
-        }
+        int concurrency = Math.max( 1, Math.min(
+                        config.concurrency(),
+                        concurrencyLimit )
+        );
 
         /*
-         * 按future创建顺序join，
-         * 保证最终输出顺序与用户输入顺序一致。
+         * 预分配结果集合容量。
+         * 这里只分配结果引用，不会提前创建全部异步任务。
          */
-        return futures.stream()
-                .map(CompletableFuture::join)
-                .toList();
-    }
+        List<ForEachItemResult> results =new ArrayList<>(items.size());
 
-    private ForEachItemResult executeWithPermit(
-            Semaphore semaphore,
-            CompiledGraphNode node,
-            CompiledForEachNodeConfig config,
-            int index,
-            Object item,
-            GraphExecutionContext parentContext,
-            Map<String, Object> parentVariables) {
+        /*
+         * 按并发数分批提交。
+         *
+         * 例如共有1000条记录、并发数为5：
+         * 每次只创建5个Future，完成后再提交下一批，
+         * 最终仍然处理完整的1000条记录。
+         */
+        for (int batchStart = 0; batchStart < items.size(); batchStart += concurrency) {
 
-        boolean acquired = false;
+            int batchEnd = Math.min(batchStart + concurrency,items.size());
 
-        try {
-            semaphore.acquire();
-            acquired = true;
+            List<CompletableFuture<ForEachItemResult>>
+                    batchFutures = new ArrayList<>(batchEnd - batchStart );
 
-            return executeSingleItem(
-                    node,
-                    config,
-                    index,
-                    item,
-                    parentContext,
-                    parentVariables
-            );
+            for (int index = batchStart; index < batchEnd; index++) {
+                int itemIndex = index;
+                Object item = items.get(index);
+                CompletableFuture<ForEachItemResult> future =
+                        CompletableFuture.supplyAsync(() -> executeSingleItem(
+                                        node,
+                                        config,
+                                        itemIndex,
+                                        item,
+                                        parentContext,
+                                        parentVariables
+                                ),
+                                selectedItemExecutor
+                        );
 
-        } catch (InterruptedException exception) {
-            Thread.currentThread().interrupt();
+                batchFutures.add(future);
+            }
 
-            return ForEachItemResult.failure(
-                    index,
-                    item,
-                    "GRAPH_FOREACH_INTERRUPTED",
-                    "项目查询任务被中断",
-                    0
-            );
-
-        } finally {
-            if (acquired) {
-                semaphore.release();
+            /*
+             * 按提交顺序获取结果，
+             * 保证最终输出顺序与业务接口返回顺序一致。
+             */
+            for (CompletableFuture<ForEachItemResult> future : batchFutures) {
+                results.add(future.join());
             }
         }
+        return results;
     }
 
     /**

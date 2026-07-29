@@ -794,14 +794,11 @@ public class CapabilityOptionService {
 
         if (labelMatches.size() > 1) {
             String candidates =
-                    labelMatches.stream()
-                            .map(option ->
-                                    option.getLabel()
+                    labelMatches.stream().map(option ->option.getLabel()
                                             + "（"
                                             + option.getValue()
                                             + "）"
-                            )
-                            .reduce(
+                            ).reduce(
                                     (left, right) ->
                                             left + "、" + right
                             )
@@ -873,11 +870,9 @@ public class CapabilityOptionService {
                 .build();
     }
 
-    private CapabilityDefinition getRequiredCapability(
-            String capabilityCode) {
+    private CapabilityDefinition getRequiredCapability(String capabilityCode) {
 
-        CapabilityDefinition capability =
-                capabilityDefinitionService
+        CapabilityDefinition capability =capabilityDefinitionService
                         .getEnabledByCode(
                                 capabilityCode
                         );
@@ -911,11 +906,7 @@ public class CapabilityOptionService {
     }
 
     private boolean isMissing(Object value) {
-        return value == null
-                || (
-                value instanceof String text
-                        && !StringUtils.hasText(text)
-        );
+        return value == null || (value instanceof String text && !StringUtils.hasText(text));
     }
 
     private void requireText(
