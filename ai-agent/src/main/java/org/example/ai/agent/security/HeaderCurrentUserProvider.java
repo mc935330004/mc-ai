@@ -13,84 +13,114 @@ import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestClientResponseException;
 
+import java.util.HashSet;
+import java.util.Set;
+
 /**
- * PM 当前登录用户提供器。
+ * PM当前登录用户和权限提供器。
  *
- * PM 使用不透明 Token，Agent 不自行解析 Token。
- * Agent 将 Authorization 发送到 PM 的 /user/info，
- * 并以 PM 返回的 username 作为唯一可信用户身份。
+ * PM使用不透明Token，Agent不自行解析Token。
+ * 当前请求只访问一次PM的/user/info，
+ * 用户身份和权限只在HttpServletRequest生命周期内缓存。
  */
 @Component
 @RequiredArgsConstructor
 public class HeaderCurrentUserProvider implements CurrentUserProvider {
 
-    /**
-     * 当前请求已验证用户的缓存属性。
-     *
-     * 只保存在 HttpServletRequest 生命周期内，
-     * 不会写入数据库、日志或跨用户共享。
-     */
-    private static final String VERIFIED_USER_ATTRIBUTE =HeaderCurrentUserProvider.class.getName() + ".verifiedUserId";
+    private static final String VERIFIED_CONTEXT_ATTRIBUTE =HeaderCurrentUserProvider.class.getName()+ ".verifiedContext";
 
     private final HttpServletRequest request;
-    /**
-     * 手动解析PM响应，避免Spring Boot 4直接转换旧版JsonNode失败。
-     */
     private final ObjectMapper objectMapper;
-    /**
-     * 复用项目已有 RestClient。
-     *
-     * baseUrl 已由 agent.business-api.base-url 配置，
-     * 当前开发配置指向 http://pm.s-ic.cn/pm。
-     */
     private final RestClient restClient;
 
-    /**
-     * 获取经过 PM 业务系统验证的当前用户编码。
-     */
     @Override
     public String getRequiredUserId() {
-        Object cached =
-                request.getAttribute(
-                        VERIFIED_USER_ATTRIBUTE
-                );
+        return getRequiredContext() .userId();
+    }
 
-        if (cached instanceof String userId
-                && StringUtils.hasText(userId)) {
-            return userId;
+    @Override
+    public void requirePermission(String permission ) {
+        if (!StringUtils.hasText(permission)) {
+            throw new IllegalArgumentException(
+                    "权限编码不能为空"
+            );
         }
 
+        VerifiedUserContext context = getRequiredContext();
+
+        if (!context.permissions().contains(permission.trim())) {
+            throw new BusinessException(
+                    403,
+                    "当前用户没有操作权限"
+            );
+        }
+    }
+
+    /**
+     * 获取当前请求内已经验证的用户上下文。
+     */
+    private VerifiedUserContext
+    getRequiredContext() {
+        Object cached = request.getAttribute( VERIFIED_CONTEXT_ATTRIBUTE );
+
+        if (cached instanceof VerifiedUserContext context) {
+            return context;
+        }
+
+        VerifiedUserContext context =loadFromPm();
+
+        /*
+         * 只缓存用户编码和权限编码。
+         * 不缓存Authorization、Cookie和Token。
+         */
+        request.setAttribute( VERIFIED_CONTEXT_ATTRIBUTE,context);
+
+        return context;
+    }
+
+    /**
+     * 从PM的/user/info读取权威用户信息。
+     */
+    private VerifiedUserContext loadFromPm() {
         String authorization =
                 getRequiredAuthorization();
 
         JsonNode response;
 
         try {
-            String responseBody = restClient.get()
-                    .uri("/user/info")
-                    .header(
-                            HttpHeaders.AUTHORIZATION,
-                            authorization
-                    )
-                    .retrieve()
-                    .body(String.class);
+            String responseBody =
+                    restClient.get()
+                            .uri("/user/info")
+                            .header(
+                                    HttpHeaders.AUTHORIZATION,
+                                    authorization
+                            )
+                            .retrieve()
+                            .body(String.class);
 
-            if (!StringUtils.hasText(responseBody)) {
+            if (!StringUtils.hasText(
+                    responseBody)) {
                 throw new BusinessException(
                         401,
                         "业务系统没有返回当前用户信息"
                 );
             }
 
-            response = objectMapper.readTree(responseBody);
+            response =
+                    objectMapper.readTree(
+                            responseBody
+                    );
+
         } catch (JsonProcessingException exception) {
             throw new BusinessException(
                     502,
                     "业务系统用户信息返回格式不正确"
             );
+
         } catch (RestClientResponseException exception) {
             int status =
-                    exception.getStatusCode().value();
+                    exception.getStatusCode()
+                            .value();
 
             if (status == 401 || status == 403) {
                 throw new BusinessException(
@@ -111,12 +141,17 @@ public class HeaderCurrentUserProvider implements CurrentUserProvider {
             );
         }
 
-        String userId = response == null
-                ? null
-                : response.path("data")
-                .path("sysUser")
-                .path("username")
-                .asText(null);
+        JsonNode data =
+                response == null
+                        ? null
+                        : response.path("data");
+
+        String userId =
+                data == null
+                        ? null
+                        : data.path("sysUser")
+                        .path("username")
+                        .asText(null);
 
         if (!StringUtils.hasText(userId)) {
             throw new BusinessException(
@@ -125,22 +160,36 @@ public class HeaderCurrentUserProvider implements CurrentUserProvider {
             );
         }
 
-        String verifiedUserId =
-                userId.trim();
+        Set<String> permissions =
+                new HashSet<>();
 
-        // 只缓存经过 PM Token 校验后返回的用户编码。
-        request.setAttribute(
-                VERIFIED_USER_ATTRIBUTE,
-                verifiedUserId
+        JsonNode permissionArray =
+                data.path("permissions");
+
+        if (permissionArray.isArray()) {
+            for (JsonNode item :
+                    permissionArray) {
+                String value =
+                        item.asText(null);
+
+                if (StringUtils.hasText(value)) {
+                    permissions.add(
+                            value.trim()
+                    );
+                }
+            }
+        }
+
+        return new VerifiedUserContext(
+                userId.trim(),
+                Set.copyOf(permissions)
         );
-
-        return verifiedUserId;
     }
 
     /**
-     * 获取原始 PM 登录凭证。
+     * 获取原始PM登录凭证。
      *
-     * 不解析、不修改、不保存，也不重复添加 Bearer。
+     * 不解析、不修改、不保存，也不重复添加Bearer。
      */
     @Override
     public String getRequiredAuthorization() {
@@ -149,7 +198,8 @@ public class HeaderCurrentUserProvider implements CurrentUserProvider {
                         HttpHeaders.AUTHORIZATION
                 );
 
-        if (!StringUtils.hasText(authorization)) {
+        if (!StringUtils.hasText(
+                authorization)) {
             throw new BusinessException(
                     401,
                     "当前请求缺少 Authorization"
@@ -157,5 +207,12 @@ public class HeaderCurrentUserProvider implements CurrentUserProvider {
         }
 
         return authorization.trim();
+    }
+
+    /**
+     * 当前请求内可信的PM用户上下文。
+     */
+    private record VerifiedUserContext(String userId,Set<String> permissions ) {
+
     }
 }

@@ -1,0 +1,143 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="org.example.ai.agent.alert.mapper.AlertRecordMapper">
+
+    <!--
+        原子新增或累加活动告警。
+
+        active_key存在唯一索引：
+        1. 不存在活动告警时执行INSERT；
+        2. 已存在活动告警时执行UPDATE；
+        3. 已确认告警再次发生时重新变为OPEN；
+        4. 首次发生时间和首次运行ID保持不变。
+    -->
+    <insert id="upsertOccurrence">
+INSERT INTO ai_alert_record
+        (alert_no,
+            rule_id,
+            rule_code,
+            rule_name,
+            severity,
+            source_type,
+            first_source_id,
+            last_source_id,
+            workflow_id,
+            workflow_code,
+            workflow_name,
+            error_code,
+            error_message,
+            dedup_key,
+            active_key,
+            status,
+            occurrence_count,
+            first_occurred_at,
+            last_occurred_at,
+            created_at,
+            updated_at
+        )
+        VALUES
+            (
+                #{record.alertNo},
+                #{record.ruleId},
+                #{record.ruleCode},
+                #{record.ruleName},
+                #{record.severity},
+                #{record.sourceType},
+                #{record.firstSourceId},
+                #{record.lastSourceId},
+                #{record.workflowId},
+                #{record.workflowCode},
+                #{record.workflowName},
+                #{record.errorCode},
+                #{record.errorMessage},
+                #{record.dedupKey},
+                #{record.activeKey},
+                #{record.status},
+                #{record.occurrenceCount},
+                #{record.firstOccurredAt},
+                #{record.lastOccurredAt},
+                #{record.createdAt},
+                #{record.updatedAt}
+            )
+            ON DUPLICATE KEY UPDATE
+             last_source_id = VALUES(last_source_id),
+             workflow_id = VALUES(workflow_id),
+             workflow_code = VALUES(workflow_code),
+             workflow_name = VALUES(workflow_name),
+             severity = VALUES(severity),
+             error_code = VALUES(error_code),
+             error_message = VALUES(error_message),
+
+             occurrence_count = occurrence_count + 1,
+             last_occurred_at = VALUES(last_occurred_at),
+
+                                    -- 已确认的故障再次发生时重新提醒。
+             status = 'OPEN',
+             acknowledged_by = NULL,
+             acknowledged_at = NULL,
+
+             updated_at = CURRENT_TIMESTAMP
+    </insert>
+    <!--
+        告警中心顶部数量汇总。
+
+        严重等级只统计未解决告警，
+        已解决告警不进入导航角标和当前风险统计。
+    -->
+    <select id="selectSummary" resultType="org.example.ai.agent.alert.vo.AlertSummaryVO">
+        SELECT
+            SUM(CASE
+                WHEN status IN ('OPEN', 'ACKNOWLEDGED') THEN 1 ELSE 0
+                END) AS active_count,
+            SUM(CASE
+                    WHEN status = 'OPEN' THEN 1 ELSE 0
+                    END
+            ) AS open_count,
+            SUM(
+                CASE
+                    WHEN status = 'ACKNOWLEDGED'
+                        THEN 1 ELSE 0
+                    END
+            ) AS acknowledged_count,
+            SUM(
+                CASE
+                    WHEN status IN ('OPEN', 'ACKNOWLEDGED')
+                        AND severity = 'CRITICAL'
+                        THEN 1 ELSE 0
+                    END
+            ) AS critical_count,
+            SUM(
+                CASE
+                    WHEN status IN ('OPEN', 'ACKNOWLEDGED')
+                        AND severity = 'ERROR'
+                        THEN 1 ELSE 0
+                    END
+            ) AS error_count,
+            SUM(
+                CASE
+                    WHEN status IN ('OPEN', 'ACKNOWLEDGED')
+                        AND severity = 'WARNING'
+                        THEN 1 ELSE 0
+                    END
+            ) AS warning_count
+        FROM ai_alert_record
+    </select>
+    <select id="pageAlerts" resultType="org.example.ai.agent.alert.entity.AlertRecord">
+        SELECT * FROM ai_alert_record
+        <where>
+            <if test="status != null and status != ''">
+                 status = #{status}
+            </if>
+            <if test="severity != null and severity != ''">
+                and severity = #{severity}
+            </if>
+            <if test="workflowCode != null and workflowCode != ''">
+                and workflow_code = #{workflowCode}
+            </if>
+            <if test="errorCode != null and errorCode != ''">
+                and error_code = #{errorCode}
+            </if>
+        </where>
+        ORDER BY last_occurred_at DESC, id DESC
+    </select>
+</mapper>

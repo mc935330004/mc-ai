@@ -24,6 +24,8 @@ import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
+import org.example.ai.agent.alert.event.WorkflowRunFailedEvent;
+import org.springframework.context.ApplicationEventPublisher;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -41,6 +43,12 @@ public class WorkflowRunServiceImpl extends ServiceImpl<WorkflowRunMapper,Workfl
     private final WorkflowRunItemMapper itemMapper;
     private final RunStepMapper runStepMapper;
     private final ObjectMapper objectMapper;
+    /**
+     * 发布工作流失败事件。
+     *
+     * 事件监听器会在当前事务成功提交后执行。
+     */
+    private final ApplicationEventPublisher eventPublisher;
 
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -145,14 +153,9 @@ public class WorkflowRunServiceImpl extends ServiceImpl<WorkflowRunMapper,Workfl
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public void complete(
-            String runId,
-            WorkflowExecutionOutcome outcome) {
+    public void complete(String runId, WorkflowExecutionOutcome outcome) {
 
-        WorkflowRun run =
-                runMapper.selectByRunIdForUpdate(
-                        runId
-                );
+        WorkflowRun run =runMapper.selectByRunIdForUpdate( runId);
 
         if (run == null) {
             throw new IllegalStateException(
@@ -215,12 +218,21 @@ public class WorkflowRunServiceImpl extends ServiceImpl<WorkflowRunMapper,Workfl
         run.setFinishedAt(
                 LocalDateTime.now()
         );
-
         if (runMapper.updateById(run) != 1) {
             throw new IllegalStateException(
                     "工作流运行状态更新失败：" +
                             runId
             );
+        }
+
+        /*
+         * 只对最终FAILED状态发布事件。
+         *
+         * PARTIAL_SUCCESS表示工作流正常完成，
+         * 其中部分业务记录失败，不属于系统级告警。
+         */
+        if (WorkflowRunStatus.FAILED == status) {
+            eventPublisher.publishEvent(new WorkflowRunFailedEvent(runId));
         }
     }
 
@@ -277,12 +289,12 @@ public class WorkflowRunServiceImpl extends ServiceImpl<WorkflowRunMapper,Workfl
     }
 
     @Override
+    @Transactional(rollbackFor = Exception.class)
     public void markFailed(
             String runId,
             String errorCode,
             String errorMessage,
             long durationMs) {
-
         WorkflowRun update =
                 new WorkflowRun();
 
@@ -291,28 +303,43 @@ public class WorkflowRunServiceImpl extends ServiceImpl<WorkflowRunMapper,Workfl
         );
         update.setErrorCode(errorCode);
         update.setErrorMessage(
-                truncate(errorMessage, 1000)
+                truncate(
+                        errorMessage,
+                        1000
+                )
         );
         update.setDurationMs(durationMs);
         update.setFinishedAt(
                 LocalDateTime.now()
         );
 
-        runMapper.update(
-                update,
-                Wrappers
-                        .<WorkflowRun>lambdaUpdate()
-                        .eq(
-                                WorkflowRun::getRunId,
-                                runId
-                        )
-                        .eq(
-                                WorkflowRun::getStatus,
-                                WorkflowRunStatus
-                                        .RUNNING
-                                        .name()
-                        )
-        );
+        int affected =
+                runMapper.update(
+                        update,
+                        Wrappers.<WorkflowRun>lambdaUpdate()
+                                .eq(
+                                        WorkflowRun::getRunId,
+                                        runId
+                                )
+                                .eq(
+                                        WorkflowRun::getStatus,
+                                        WorkflowRunStatus
+                                                .RUNNING
+                                                .name()
+                                )
+                );
+
+        /*
+         * 只有本次真正完成RUNNING到FAILED转换时，
+         * 才发布一次失败事件。
+         */
+        if (affected == 1) {
+            eventPublisher.publishEvent(
+                    new WorkflowRunFailedEvent(
+                            runId
+                    )
+            );
+        }
     }
 
     @Override

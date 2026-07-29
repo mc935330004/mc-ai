@@ -9,12 +9,19 @@ package org.example.ai.agent.security;
 public interface CurrentUserProvider {
 
     /**
-     * 获取当前登录用户ID，不允许返回空值。
+     * 获取当前登录用户ID。
      */
     String getRequiredUserId();
 
     /**
-     * 获取当前请求携带的认证信息
+     * 获取当前请求携带的PM登录凭证。
      */
     String getRequiredAuthorization();
+
+    /**
+     * 校验当前PM用户是否具有指定权限。
+     *
+     * @param permission PM权限编码
+     */
+    void requirePermission(String permission );
 }

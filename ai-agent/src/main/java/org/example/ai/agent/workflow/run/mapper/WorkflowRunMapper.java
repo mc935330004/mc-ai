@@ -7,6 +7,7 @@ import org.apache.ibatis.annotations.Param;
 import org.example.ai.agent.workflow.run.entity.WorkflowRun;
 
 import java.time.LocalDateTime;
+import java.util.List;
 
 @Mapper
 public interface WorkflowRunMapper
@@ -21,13 +22,23 @@ public interface WorkflowRunMapper
             @Param("origin") String origin);
 
     /**
-     * 将超过截止时间仍然处于 RUNNING 的记录标记为失败。
+     * 查询已经超过截止时间的运行中记录。
      *
-     * 多实例同时执行时也安全，因为 SQL 只更新 RUNNING 状态。
+     * 这里先查询候选记录，
+     * 后续仍然通过带status条件的UPDATE争抢处理权。
      */
-    int failStaleRunningRuns(
-            @Param("cutoff")LocalDateTime cutoff,
-            @Param("finishedAt")LocalDateTime finishedAt,
+    List<WorkflowRun> selectStaleRunningRuns(@Param("cutoff")LocalDateTime cutoff);
+
+    /**
+     * 将指定运行记录从RUNNING更新为FAILED。
+     *
+     * 多实例同时恢复时，只有一个实例能够更新成功。
+     */
+    int failRunningRun(
+            @Param("runId")
+            String runId,
+            @Param("finishedAt")
+            LocalDateTime finishedAt,
             @Param("errorCode")
             String errorCode,
             @Param("errorMessage")

@@ -29,14 +29,28 @@
         </where>
         ORDER BY started_at DESC
     </select>
-    <update id="failStaleRunningRuns">
-        UPDATE ai_workflow_run
-        SET status = 'FAILED',
-            error_code = #{errorCode},
-            error_message = #{errorMessage},
-            duration_ms = GREATEST(0,TIMESTAMPDIFF( MICROSECOND, started_at,#{finishedAt} ) DIV 1000 ),
-            finished_at = #{finishedAt}
+    <!-- 查询等待恢复的僵尸运行记录。 -->
+    <select id="selectStaleRunningRuns"
+            resultType="org.example.ai.agent.workflow.run.entity.WorkflowRun">
+        SELECT * FROM ai_workflow_run
         WHERE status = 'RUNNING'
           AND started_at &lt; #{cutoff}
+        ORDER BY started_at ASC
+    </select>
+
+    <!--
+        按runId恢复单条运行记录。
+
+        status='RUNNING'是多实例并发安全的关键条件：
+        只有第一个实例能够更新成功。
+    -->
+    <update id="failRunningRun">
+        UPDATE ai_workflow_run SET status = 'FAILED',
+            error_code = #{errorCode},
+            error_message = #{errorMessage},
+            duration_ms = GREATEST( 0,
+            TIMESTAMPDIFF( MICROSECOND,started_at,#{finishedAt}) DIV 1000),
+            finished_at = #{finishedAt}
+        WHERE run_id = #{runId} AND status = 'RUNNING'
     </update>
 </mapper>
