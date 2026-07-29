@@ -3,6 +3,7 @@ package org.example.ai.agent.capability.ui;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.example.ai.agent.capability.entity.CapabilityDefinition;
 import org.example.ai.agent.capability.invocation.runtime.SimpleJsonPathReader;
 import org.example.ai.agent.capability.service.CapabilityDefinitionService;
@@ -34,6 +35,7 @@ import java.util.UUID;
  * 3. 统一输出label/value；
  * 4. 将中文名称安全转换成真实ID。
  */
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class CapabilityOptionService {
@@ -74,12 +76,7 @@ public class CapabilityOptionService {
                             + writeCapabilityCode
             );
         }
-
-        CapabilityUiSchemaParser.UiSchema writeSchema =
-                uiSchemaParser.parse(
-                        writeCapability
-                                .getInputSchemaJson()
-                );
+        CapabilityUiSchemaParser.UiSchema writeSchema =uiSchemaParser.parse( writeCapability.getInputSchemaJson());
 
         /*
          * 同时支持根字段和 OBJECT_LIST 子字段。
@@ -111,9 +108,7 @@ public class CapabilityOptionService {
                         source.capabilityCode()
                 );
 
-        if (!"READ".equalsIgnoreCase(
-                optionCapability.getSideEffect()
-        )) {
+        if (!"READ".equalsIgnoreCase(optionCapability.getSideEffect())) {
             throw badRequest(
                     "选项能力必须是READ："
                             + source.capabilityCode()
@@ -125,13 +120,13 @@ public class CapabilityOptionService {
         }
 
         Map<String, Object> optionInput =
-                buildOptionInput(
-                        source,
-                        form == null
-                                ? Map.of()
-                                : form
-                );
-
+                buildOptionInput(source,form == null? Map.of() : form );
+// 中文注释：只打印参数名称，不打印用户数据和敏感值。
+        log.info(
+                "远程选项能力入参检查，capabilityCode={}, inputKeys={}",
+                source.capabilityCode(),
+                optionInput.keySet()
+        );
         PlanStep optionStep =
                 PlanStep.builder()
                         .stepType(

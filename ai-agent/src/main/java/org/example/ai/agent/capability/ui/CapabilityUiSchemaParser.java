@@ -38,7 +38,6 @@ public class CapabilityUiSchemaParser {
      * 未配置 maxItems 时的默认最大行数。
      */
     private static final int OBJECT_LIST_DEFAULT_MAX_ITEMS = 20;
-
     /**
      * 当前前端支持的通用表单组件。
      */
@@ -48,7 +47,9 @@ public class CapabilityUiSchemaParser {
                     "NUMBER",
                     "DATE",
                     "RADIO",
+                    "SELECT",
                     "REMOTE_SELECT",
+                    "FILE_UPLOAD",
                     "OBJECT_LIST"
             );
 
@@ -203,12 +204,12 @@ public class CapabilityUiSchemaParser {
          */
         if (childField && component == null) {
             throw badRequest(
-                    "OBJECT_LIST子字段只支持INPUT、NUMBER、DATE、RADIO、REMOTE_SELECT："
+                    "OBJECT_LIST子字段只支持INPUT、NUMBER、DATE、RADIO、"
+                            + "SELECT、REMOTE_SELECT、FILE_UPLOAD："
                             + fieldName
             );
         }
-        if (childField
-                && "OBJECT_LIST".equals(component)) {
+        if (childField && "OBJECT_LIST".equals(component)) {
             throw badRequest(
                     "不支持嵌套OBJECT_LIST："
                             + fieldName
@@ -224,17 +225,6 @@ public class CapabilityUiSchemaParser {
                         propertyNames
                 );
 
-        /*
-         * 第一版列表子字段不处理同行字段依赖，
-         * 防止远程下拉请求错误地读取其他列表行。
-         */
-        if (childField
-                && !dependsOn.isEmpty()) {
-            throw badRequest(
-                    "OBJECT_LIST子字段暂不支持dependsOn："
-                            + fieldName
-            );
-        }
 
         if ("OBJECT_LIST".equals(component)) {
             return parseObjectList(
