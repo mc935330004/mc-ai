@@ -31,6 +31,12 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.example.ai.agent.capability.dto.CapabilityOptionQueryDTO;
 import org.example.ai.agent.capability.ui.CapabilityOptionService;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import org.example.ai.agent.capability.ui.CapabilityFileUploadService;
+import org.springframework.http.MediaType;
+import org.springframework.web.bind.annotation.RequestPart;
+import org.springframework.web.multipart.MultipartFile;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -59,6 +65,12 @@ public class CapabilityDefinitionController {
      * 通用WRITE远程选项服务。
      */
     private final CapabilityOptionService capabilityOptionService;
+    /**
+     * WRITE动态表单通用文件上传服务。
+     */
+    private final CapabilityFileUploadService capabilityFileUploadService;
+
+
     /**
      * 分页查询能力列表。
      */
@@ -198,6 +210,41 @@ public class CapabilityDefinitionController {
     }
 
     /**
+     * 上传WRITE动态表单字段文件。
+     *
+     * 前端固定提交：
+     * 1. file：文件内容；
+     * 2. form：当前动态表单JSON。
+     *
+     * 上传能力编码只能从WRITE能力Schema读取，
+     * 不允许前端通过请求参数指定。
+     */
+    @PostMapping(value = "/{writeCapabilityCode}/fields/{fieldPath}/upload",consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public Result<CapabilityFileUploadVO> uploadFieldFile(
+            @PathVariable String writeCapabilityCode,
+            @PathVariable String fieldPath,
+            @RequestPart("file") MultipartFile file,
+            @RequestParam(
+                    value = "form",
+                    required = false
+            )
+            String formJson) {
+
+        Map<String, Object> form = parseUploadForm(formJson);
+
+        CapabilityFileUploadVO result =capabilityFileUploadService.upload(
+                        writeCapabilityCode,
+                        fieldPath,
+                        file,
+                        form,
+                        currentUserProvider
+                                .getRequiredUserId(),
+                        currentUserProvider
+                                .getRequiredAuthorization()
+                );
+        return Result.success(result);
+    }
+    /**
      * 调用真实 READ 接口并发现未配置字段。
      *
      * 当前接口只返回字段候选，不自动保存。
@@ -294,5 +341,53 @@ public class CapabilityDefinitionController {
             return (Map<String, Object>) input;
         }
         return new LinkedHashMap<>();
+    }
+    /**
+     * 解析文件上传时携带的当前表单数据。
+     *
+     * 只允许JSON对象，避免数组、字符串等错误数据
+     * 进入能力参数绑定流程。
+     */
+    private Map<String, Object> parseUploadForm(
+            String formJson) {
+
+        if (!StringUtils.hasText(formJson)) {
+            return new LinkedHashMap<>();
+        }
+
+        /*
+         * 中文注释：
+         * form只用于补充上传能力的PATH、QUERY和普通BODY参数，
+         * 不允许携带无限大的JSON字符串。
+         */
+        if (formJson.length() > 256 * 1024) {
+            throw new BusinessException(
+                    400,
+                    "上传表单参数不能超过256KB"
+            );
+        }
+        JsonNode root;
+        try {
+            root = objectMapper.readTree(formJson);
+        } catch (JsonProcessingException exception) {
+            throw new BusinessException(
+                    400,
+                    "上传表单参数不是合法JSON"
+            );
+        }
+
+        if (root == null || !root.isObject()) {
+            throw new BusinessException(
+                    400,
+                    "上传表单参数必须是JSON对象"
+            );
+        }
+
+        return objectMapper.convertValue(
+                root,
+                new TypeReference<
+                        LinkedHashMap<String, Object>>() {
+                }
+        );
     }
 }

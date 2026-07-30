@@ -60,6 +60,16 @@ public class CapabilityUiSchemaParser {
             Pattern.compile(
                     "^\\$form\\.([A-Za-z_][A-Za-z0-9_]*)$"
             );
+    /**
+     * multipart 文件参数名只允许安全字符。
+     *
+     * 支持示例：
+     * file
+     * project_file
+     * attachment.file
+     */
+    private static final Pattern MULTIPART_PARAMETER_NAME =
+            Pattern.compile("^[A-Za-z_][A-Za-z0-9_.-]*$");
 
     private final ObjectMapper objectMapper;
 
@@ -237,7 +247,13 @@ public class CapabilityUiSchemaParser {
         }
 
         OptionSource optionSource = null;
+        UploadSource uploadSource = null;
 
+        /*
+         * 中文注释：
+         * 远程下拉和文件上传分别使用自己的配置协议，
+         * 防止普通字段伪造能力编码调用其他业务接口。
+         */
         if ("REMOTE_SELECT".equals(component)) {
             optionSource = readOptionSource(
                     fieldName,
@@ -245,10 +261,29 @@ public class CapabilityUiSchemaParser {
                     propertyNames,
                     dependsOn
             );
-        } else if (uiNode != null
+        }
+
+        if ("FILE_UPLOAD".equals(component)) {
+            uploadSource = readUploadSource(
+                    fieldName,
+                    uiNode
+            );
+        }
+
+        if (!"REMOTE_SELECT".equals(component)
+                && uiNode != null
                 && uiNode.has("optionSource")) {
             throw badRequest(
                     "只有REMOTE_SELECT可以配置optionSource："
+                            + fieldName
+            );
+        }
+
+        if (!"FILE_UPLOAD".equals(component)
+                && uiNode != null
+                && uiNode.has("uploadSource")) {
+            throw badRequest(
+                    "只有FILE_UPLOAD可以配置uploadSource："
                             + fieldName
             );
         }
@@ -264,6 +299,7 @@ public class CapabilityUiSchemaParser {
                 component,
                 dependsOn,
                 optionSource,
+                uploadSource,
                 Map.of(),
                 Set.of(),
                 0,
@@ -403,6 +439,8 @@ public class CapabilityUiSchemaParser {
                 type,
                 "OBJECT_LIST",
                 dependsOn,
+                null,
+
                 null,
                 Collections.unmodifiableMap(itemFields),
                 Collections.unmodifiableSet(
@@ -551,6 +589,124 @@ public class CapabilityUiSchemaParser {
         );
     }
 
+    /**
+     * 解析文件上传字段的能力配置。
+     *
+     * uploadSource 示例：
+     * {
+     *   "capabilityCode": "pm.uploadAttachment",
+     *   "fileParameterName": "file",
+     *   "resultValuePath": "$.id",
+     *   "limit": 5,
+     *   "maxSizeMb": 20,
+     *   "accept": ".pdf,.docx,image/*"
+     * }
+     */
+    private UploadSource readUploadSource(
+            String fieldName,
+            JsonNode uiNode) {
+
+        if (uiNode == null
+                || !uiNode.path("uploadSource").isObject()) {
+            throw badRequest(
+                    "FILE_UPLOAD必须配置uploadSource："
+                            + fieldName
+            );
+        }
+
+        JsonNode sourceNode = uiNode.get("uploadSource");
+
+        String capabilityCode = requiredUploadText(
+                sourceNode,
+                "capabilityCode",
+                fieldName
+        );
+
+        String fileParameterName = requiredUploadText(
+                sourceNode,
+                "fileParameterName",
+                fieldName
+        );
+
+        if (!MULTIPART_PARAMETER_NAME
+                .matcher(fileParameterName)
+                .matches()) {
+            throw badRequest(
+                    "字段" + fieldName
+                            + "的fileParameterName格式不合法"
+            );
+        }
+
+        String resultValuePath = requiredUploadText(
+                sourceNode,
+                "resultValuePath",
+                fieldName
+        );
+
+        if (!"$".equals(resultValuePath)
+                && !resultValuePath.startsWith("$.")) {
+            throw badRequest(
+                    "字段" + fieldName
+                            + "的resultValuePath必须以$或$.开头"
+            );
+        }
+
+        int limit = readIntegerLimit(
+                sourceNode.get("limit"),
+                "字段" + fieldName + ".uploadSource.limit",
+                1,
+                1
+        );
+
+        if (limit > 20) {
+            throw badRequest(
+                    "字段" + fieldName
+                            + "的上传文件数量不能超过20"
+            );
+        }
+
+        int maxSizeMb = readIntegerLimit(
+                sourceNode.get("maxSizeMb"),
+                "字段" + fieldName + ".uploadSource.maxSizeMb",
+                20,
+                1
+        );
+
+        if (maxSizeMb > 500) {
+            throw badRequest(
+                    "字段" + fieldName
+                            + "的单文件大小不能超过500MB"
+            );
+        }
+        return new UploadSource(
+                capabilityCode,
+                fileParameterName,
+                resultValuePath,
+                limit,
+                maxSizeMb,
+                text(sourceNode, "accept")
+        );
+    }
+
+    /**
+     * 读取 uploadSource 的必填字符串。
+     */
+    private String requiredUploadText(
+            JsonNode sourceNode,
+            String key,
+            String fieldName) {
+
+        String value = text(sourceNode, key);
+
+        if (!StringUtils.hasText(value)) {
+            throw badRequest("字段" + fieldName
+                            + "的uploadSource."
+                            + key
+                            + "不能为空");
+        }
+
+        return value;
+    }
     /**
      * 读取字段依赖。
      */
@@ -877,32 +1033,19 @@ public class CapabilityUiSchemaParser {
                 return fields.get(fieldPath);
             }
 
-            String rootName =
-                    fieldPath.substring(
-                            0,
-                            separatorIndex
-                    );
+            String rootName =fieldPath.substring(0,separatorIndex);
 
-            String childName =
-                    fieldPath.substring(
-                            separatorIndex + 3
-                    );
+            String childName =fieldPath.substring(separatorIndex + 3);
 
             /*
              * 第一版明确禁止多层列表路径。
              */
-            if (!StringUtils.hasText(childName)
-                    || childName.contains("[].")) {
+            if (!StringUtils.hasText(childName) || childName.contains("[].")) {
                 return null;
             }
+            Field rootField =fields.get(rootName);
 
-            Field rootField =
-                    fields.get(rootName);
-
-            if (rootField == null
-                    || !"OBJECT_LIST".equals(
-                    rootField.component()
-            )) {
+            if (rootField == null || !"OBJECT_LIST".equals(rootField.component())) {
                 return null;
             }
 
@@ -925,6 +1068,7 @@ public class CapabilityUiSchemaParser {
             String component,
             List<String> dependsOn,
             OptionSource optionSource,
+            UploadSource uploadSource,
             Map<String, Field> itemFields,
             Set<String> itemRequiredFields,
             int minItems,
@@ -940,5 +1084,19 @@ public class CapabilityUiSchemaParser {
             String labelField,
             String valueField,
             Map<String, String> inputMapping) {
+    }
+    /**
+     * 文件上传字段的数据源配置。
+     *
+     * capabilityCode由WRITE能力的Schema固定指定，
+     * Controller不能接收前端临时传入的上传能力编码。
+     */
+    public record UploadSource(
+            String capabilityCode,
+            String fileParameterName,
+            String resultValuePath,
+            int limit,
+            int maxSizeMb,
+            String accept) {
     }
 }

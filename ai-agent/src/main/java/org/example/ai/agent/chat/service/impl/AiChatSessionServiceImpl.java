@@ -36,7 +36,7 @@ public class AiChatSessionServiceImpl implements AiChatSessionService {
     private final AiChatSessionMapper sessionMapper;
     private final AiChatMessageMapper messageMapper;
     private final AgentModelProperties modelProperties;
-
+    private static final String MESSAGE_TYPE_TEXT = "TEXT";
     @Override
     public List<ChatModelVO> listModels() {
         return modelProperties.getModels().stream()
@@ -155,7 +155,16 @@ public class AiChatSessionServiceImpl implements AiChatSessionService {
             String sessionId,
             String content,
             String modelCode) {
-        saveMessage(userId, sessionId, "USER", content, null, modelCode);
+        saveMessage(
+                userId,
+                sessionId,
+                "USER",
+                content,
+                null,
+                modelCode,
+                MESSAGE_TYPE_TEXT,
+                null
+        );
     }
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -164,40 +173,66 @@ public class AiChatSessionServiceImpl implements AiChatSessionService {
             String sessionId,
             String content,
             String runId,
-            String modelCode) {
-        saveMessage(userId, sessionId, "ASSISTANT", content, runId, modelCode);
+            String modelCode, String messageType,String payloadJson) {
+        saveMessage(
+                userId,
+                sessionId,
+                "ASSISTANT",
+                content,
+                runId,
+                modelCode,
+                messageType,
+                payloadJson
+        );
     }
 
-    private void saveMessage(String userId, String sessionId, String role, String content, String runId, String modelCode) {
+    private void saveMessage( String userId,
+            String sessionId,
+            String role,
+            String content,
+            String runId,
+            String modelCode,
+            String messageType,
+            String payloadJson) {
+
         if (!StringUtils.hasText(sessionId) || !StringUtils.hasText(content)) {
             return;
         }
-        // 中文注释：所有会话操作必须先验证当前用户的会话归属。
+
+        // 中文注释：保存前验证会话属于当前登录用户。
         requireSession(userId, sessionId);
+
         AiChatMessage message = new AiChatMessage();
         message.setSessionId(sessionId);
         message.setUserId(userId);
         message.setRole(role);
         message.setContent(content);
+        message.setMessageType( StringUtils.hasText(messageType)
+                        ? messageType
+                        : MESSAGE_TYPE_TEXT );
+        message.setPayloadJson(payloadJson);
         message.setRunId(runId);
         message.setModelCode(modelCode);
-        messageMapper.insert(message);
+        message.setCreatedAt(LocalDateTime.now());
 
+        messageMapper.insert(message);
         int updated = sessionMapper.update(
                 null,
                 new LambdaUpdateWrapper<AiChatSession>()
                         .eq(AiChatSession::getId, sessionId)
                         .eq(AiChatSession::getUserId, userId)
                         .eq(AiChatSession::getDeleted, 0)
-                        .set(AiChatSession::getLastMessage,
+                        .set(
+                                AiChatSession::getLastMessage,
                                 content.length() > 200
                                         ? content.substring(0, 200)
-                                        : content)
+                                        : content
+                        )
                         .setSql("message_count = message_count + 1")
         );
 
         if (updated != 1) {
-            // 中文注释：事务回滚已经插入的消息，保证消息和会话计数一致。
+            // 中文注释：事务会同时回滚已经插入的聊天消息。
             throw new BusinessException(
                     ErrorCode.BAD_REQUEST,
                     "会话已删除或无权访问"
@@ -221,6 +256,8 @@ public class AiChatSessionServiceImpl implements AiChatSessionService {
                 .id(message.getId())
                 .role(message.getRole())
                 .content(message.getContent())
+                .messageType(message.getMessageType())
+                .payloadJson(message.getPayloadJson())
                 .runId(message.getRunId())
                 .modelCode(message.getModelCode())
                 .createdAt(message.getCreatedAt())

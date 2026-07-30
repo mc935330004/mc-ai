@@ -55,7 +55,18 @@ public interface AiChatSessionService {
     void saveUserMessage(String userId, String sessionId, String content, String modelCode);
 
     /**
-     * 中文注释：保存AI助手消息。
+     * 保存AI助手消息。
+     *
+     * @param messageType 消息类型：TEXT、ACTION_FORM、ACTION_PREVIEW
+     * @param payloadJson 结构化载荷JSON，普通文本消息传null
      */
-    void saveAssistantMessage(String userId, String sessionId, String content, String runId, String modelCode);
+    void saveAssistantMessage(
+            String userId,
+            String sessionId,
+            String content,
+            String runId,
+            String modelCode,
+            String messageType,
+            String payloadJson
+    );
 }

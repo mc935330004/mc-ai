@@ -227,6 +227,7 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                  */
                 if (workflowPlan != null && workflowPlan.isWriteAction() && workflowPlan.getActionInputSchema() != null) {
                     sendActionForm(
+                            request,
                             stream,
                             runId,
                             workflowPlan
@@ -310,7 +311,13 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
             if (intentResult.getRouteType() == RouteType.WORKFLOW_ACTION) {
                 PendingAction pendingAction =pendingActionService.createPendingAction( runId,request.getUserId(),
                         intentResult.getDynamicCapabilityPlan());
-                sendActionPreview(stream, runId, intentResult.getDynamicCapabilityPlan(), pendingAction);
+                sendActionPreview(
+                        request,
+                        stream,
+                        runId,
+                        intentResult.getDynamicCapabilityPlan(),
+                        pendingAction
+                );
                 runTraceService.markSuccess(runId,System.currentTimeMillis() - startTime);
                 stream.complete();
                 return;
@@ -329,7 +336,13 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
             if (selectedPlan != null && "WRITE".equalsIgnoreCase(selectedPlan.getSideEffect())) {
                 PendingAction pendingAction =pendingActionService.createPendingAction( runId,request.getUserId(),
                         selectedPlan);
-                sendActionPreview(stream, runId, selectedPlan, pendingAction);
+                sendActionPreview(
+                        request,
+                        stream,
+                        runId,
+                        selectedPlan,
+                        pendingAction
+                );
                 runTraceService.markSuccess(runId,System.currentTimeMillis() - startTime);
                 stream.complete();
                 return;
@@ -552,37 +565,47 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
      * 此方法只发送Schema和初始值，
      * 不创建PendingAction，不调用WRITE接口。
      */
+    /**
+     * 向前端发送 WRITE 参数收集表单，同时保存助手提示语。
+     */
     private void sendActionForm(
+            AgentRequest request,
             AgentStreamSession stream,
             String runId,
-            WorkflowPlan workflowPlan)
-            throws Exception {
+            WorkflowPlan workflowPlan) throws Exception {
 
-        ActionFormVO form =ActionFormVO.builder()
-                        .workflowCode( workflowPlan.getWorkflowCode())
-                        .workflowVersionId(workflowPlan.getVersionId())
-                        .capabilityCode(workflowPlan.getActionCapabilityCode())
-                        .capabilityVersionId(workflowPlan.getActionCapabilityVersionId())
-                        .capabilityName(workflowPlan.getActionCapabilityName())
-                        /*
-                         * 中文注释：
-                         * SSE 输出边界不直接暴露 Jackson 2 JsonNode，
-                         * 转成标准 JSON 字符串，防止被序列化成 array、object、nodeType 等 Bean 属性。
-                         */
-                        .schema(workflowPlan.getActionInputSchema().toString())
-                        .initialValue(new LinkedHashMap<>( workflowPlan.getInput()))
-                        .clarifyQuestion(workflowPlan.getClarifyQuestion())
-                        .build();
+        ActionFormVO form = ActionFormVO.builder()
+                .workflowCode(workflowPlan.getWorkflowCode())
+                .workflowVersionId(workflowPlan.getVersionId())
+                .capabilityCode(workflowPlan.getActionCapabilityCode())
+                .capabilityVersionId(workflowPlan.getActionCapabilityVersionId())
+                .capabilityName(workflowPlan.getActionCapabilityName())
+                .schema(workflowPlan.getActionInputSchema().toString())
+                .initialValue(new LinkedHashMap<>(workflowPlan.getInput()))
+                .clarifyQuestion(workflowPlan.getClarifyQuestion())
+                .build();
+
+        String messageContent = StringUtils.hasText(workflowPlan.getClarifyQuestion())
+                ? workflowPlan.getClarifyQuestion()
+                : "请填写操作所需的信息。";
+
+        // 中文注释：保存表单提示语和当时使用的发布版本表单快照。
+        aiChatSessionService.saveAssistantMessage(
+                request.getUserId(),
+                request.getConversationId(),
+                messageContent,
+                runId,
+                request.getModelCode(),
+                "ACTION_FORM",
+                objectMapper.writeValueAsString(form)
+        );
 
         stream.send(
                 "action_form",
                 AgentStreamEvent.of(
                         runId,
-                        AgentStreamEventType
-                                .ACTION_FORM
-                                .name(),
-                        workflowPlan
-                                .getClarifyQuestion(),
+                        AgentStreamEventType.ACTION_FORM.name(),
+                        messageContent,
                         form
                 )
         );
@@ -590,7 +613,7 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
     /**
      * 向聊天端发送写操作预览。
      */
-    private void sendActionPreview( AgentStreamSession stream,
+    private void sendActionPreview( AgentRequest request,AgentStreamSession stream,
                                     String runId,
                                     DynamicCapabilityPlan plan,
                                     PendingAction pendingAction) throws Exception {
@@ -622,6 +645,18 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                     .append("\n\n");
         }
         markdown.append("请确认以上操作是否继续执行。");
+        String messageContent = markdown.toString();
+
+        // 中文注释：保存操作确认文字和待确认操作快照。
+        aiChatSessionService.saveAssistantMessage(
+                request.getUserId(),
+                request.getConversationId(),
+                messageContent,
+                runId,
+                request.getModelCode(),
+                "ACTION_PREVIEW",
+                objectMapper.writeValueAsString(preview)
+        );
         // data 只返回稳定的预览 VO，不再暴露 DynamicCapabilityPlan。
         stream.send(
                 "action_preview",
@@ -775,7 +810,9 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                 request.getConversationId(),
                 answer,
                 runId,
-                request.getModelCode()
+                request.getModelCode(),
+                "TEXT",
+                null
         );
 
         stream.publishAnswer(answer);

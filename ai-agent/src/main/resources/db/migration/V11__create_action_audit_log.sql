@@ -235,3 +235,11 @@ CREATE TABLE ai_chat_message (
  INDEX idx_chat_message_session_created (session_id, created_at),
  INDEX idx_chat_message_user_created (user_id, created_at)
 ) COMMENT='AI聊天消息表';
+
+ALTER TABLE ai_chat_message
+    ADD COLUMN message_type VARCHAR(32) NOT NULL DEFAULT 'TEXT'
+    COMMENT '消息类型：TEXT、ACTION_FORM、ACTION_PREVIEW'
+        AFTER content,
+    ADD COLUMN payload_json LONGTEXT NULL
+        COMMENT '结构化消息载荷JSON快照'
+        AFTER message_type;

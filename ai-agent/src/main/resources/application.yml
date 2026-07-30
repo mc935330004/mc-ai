@@ -67,8 +67,9 @@ spring:
     baseline-version: 4
   servlet:
     multipart:
-      max-file-size: 100MB
-      max-request-size: 100MB
+      # 全局安全硬上限；每个字段仍由uploadSource.maxSizeMb进一步限制。
+      max-file-size: 500MB
+      max-request-size: 510MB
 
 document:
   parse:
