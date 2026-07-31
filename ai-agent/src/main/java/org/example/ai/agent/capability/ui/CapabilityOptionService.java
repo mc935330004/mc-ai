@@ -392,16 +392,9 @@ public class CapabilityOptionService {
         /*
          * 远程字段解析完成后检查必填项。
          */
-        for (String requiredField :
-                schema.requiredFields()) {
-
-            if (isMissing(
-                    requestInput.get(requiredField)
-            )) {
-                CapabilityUiSchemaParser.Field field =
-                        schema.fields()
-                                .get(requiredField);
-
+        for (String requiredField : schema.requiredFields()) {
+            if (isMissing(requestInput.get(requiredField))) {
+                CapabilityUiSchemaParser.Field field =schema.fields().get(requiredField);
                 return clarify(
                         requestInput,
                         displayInput,
@@ -716,31 +709,47 @@ public class CapabilityOptionService {
                 .build();
     }
     /**
-     * 根据Schema inputMapping构造OPTION_SOURCE能力入参。
+     * 根据Schema配置构造OPTION_SOURCE能力请求参数。
+     *
+     * 请求参数由两部分组成：
+     * 1. fixedInput：页面配置的固定请求参数。
+     * 2. inputMapping：从当前表单读取的动态依赖参数。
      */
     private Map<String, Object> buildOptionInput(
             CapabilityUiSchemaParser.OptionSource source,
             Map<String, Object> form) {
-
         Map<String, Object> result = new LinkedHashMap<>();
-
+        /*
+         * 先放入固定参数。
+         *
+         * 例如：
+         * {
+         *   "type": "business_type"
+         * }
+         */
+        if (source.fixedInput() != null) {
+            result.putAll(source.fixedInput());
+        }
+        /*
+         * 再读取动态依赖参数。
+         *
+         * 例如：
+         * {
+         *   "unitId": "$form.unitId"
+         * }
+         */
         for (Map.Entry<String, String> mapping : source.inputMapping().entrySet()) {
-
-            String expression =mapping.getValue();
-
+            String expression = mapping.getValue();
             String sourceField =expression.substring("$form.".length());
-
-            Object value =form.get(sourceField);
-
+            Object value = form.get(sourceField);
             if (isMissing(value)) {
                 throw badRequest(
                         "请先提供远程选项依赖字段："
                                 + sourceField
                 );
             }
-            result.put(mapping.getKey(),value);
+            result.put(mapping.getKey(), value);
         }
-
         return result;
     }
 

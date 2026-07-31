@@ -99,26 +99,118 @@ public class PendingActionServiceImpl extends ServiceImpl<PendingActionMapper, P
         return action;
     }
 
+    /**
+     * 取消尚未执行的待确认操作。
+     *
+     * 状态处理规则：
+     * 1. PENDING：正常取消并记录审计日志；
+     * 2. CANCELLED：重复取消，直接返回当前记录；
+     * 3. EXPIRED：操作已经安全过期，直接返回，由前端恢复原表单；
+     * 4. 其他状态：禁止取消。
+     */
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public PendingAction cancelAction(String runId, String userId) {
-        // 先触发过期检查和用户归属校验
+    public PendingAction cancelAction(
+            String runId,
+            String userId) {
+
+        /*
+         * getAction会完成：
+         * 1. 当前用户归属校验；
+         * 2. PENDING操作的过期检查；
+         * 3. 已过期操作自动转换为EXPIRED。
+         */
         PendingAction action = getAction(runId, userId);
-        if (!PendingActionStatus.PENDING.getCode().equals(action.getStatus())) {
-            throw new BusinessException( 400,"当前操作状态为 " + action.getStatus() + "，不能取消");
+
+        /*
+         * CANCELLED属于幂等取消。
+         * 用户重复点击时不需要再次更新数据库。
+         */
+        if (PendingActionStatus.CANCELLED
+                .getCode()
+                .equals(action.getStatus())) {
+            return action;
         }
-        // 只有 PENDING 才能更新，避免与确认操作并发冲突
+
+        /*
+         * EXPIRED表示该操作已经失效，不可能再写入业务系统。
+         *
+         * 这里保持EXPIRED审计状态，不强行改成CANCELLED，
+         * 但不再向前端抛出“不能取消”的异常。
+         * 前端收到EXPIRED后会恢复原始动态表单。
+         */
+        if (PendingActionStatus.EXPIRED
+                .getCode()
+                .equals(action.getStatus())) {
+            return action;
+        }
+
+        /*
+         * CONFIRMED、EXECUTING、SUCCESS、FAILED等状态
+         * 不能通过取消按钮重新编辑。
+         */
+        if (!PendingActionStatus.PENDING
+                .getCode()
+                .equals(action.getStatus())) {
+            throw new BusinessException(
+                    400,
+                    "当前操作状态为 "
+                            + action.getStatus()
+                            + "，不能取消"
+            );
+        }
+
+        /*
+         * 使用状态条件完成原子更新，
+         * 防止取消和确认请求同时执行。
+         */
         boolean updated = lambdaUpdate()
                 .eq(PendingAction::getId, action.getId())
                 .eq(PendingAction::getUserId, userId)
-                .eq(PendingAction::getStatus, PendingActionStatus.PENDING.getCode())
-                .set(PendingAction::getStatus, PendingActionStatus.CANCELLED.getCode())
+                .eq(PendingAction::getStatus,PendingActionStatus.PENDING.getCode())
+                .set(PendingAction::getStatus,PendingActionStatus.CANCELLED.getCode())
+                .set(
+                        PendingAction::getUpdatedAt,
+                        LocalDateTime.now()
+                )
                 .update();
+
+        /*
+         * 更新失败可能是并发请求已经改变了状态。
+         * 对CANCELLED和EXPIRED继续保持幂等返回，
+         * 其他状态提示用户刷新。
+         */
         if (!updated) {
-            throw new BusinessException(409, "操作状态已经发生变化，请刷新后重试");
+            PendingAction latest = getAction(runId, userId);
+
+            if (PendingActionStatus.CANCELLED
+                    .getCode()
+                    .equals(latest.getStatus())
+                    || PendingActionStatus.EXPIRED
+                    .getCode()
+                    .equals(latest.getStatus())) {
+                return latest;
+            }
+
+            throw new BusinessException(
+                    409,
+                    "操作状态已经发生变化，请刷新后重试"
+            );
         }
-        PendingAction cancelledAction = getById(action.getId());
-        actionAuditRecorder.record( cancelledAction, ActionAuditRecorder.CANCELLED,null );
+
+        PendingAction cancelledAction =
+                getById(action.getId());
+
+        /*
+         * 只有真正从PENDING转换为CANCELLED时，
+         * 才记录一次取消审计。
+         */
+        actionAuditRecorder.record(
+                cancelledAction,
+                ActionAuditRecorder.CANCELLED,
+                null
+        );
+
         return cancelledAction;
     }
 

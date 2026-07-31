@@ -61,6 +61,11 @@ public class CapabilityUiSchemaParser {
                     "^\\$form\\.([A-Za-z_][A-Za-z0-9_]*)$"
             );
     /**
+     * 选项能力固定参数名称只允许使用安全的字段名。
+     */
+    private static final Pattern OPTION_INPUT_NAME =
+            Pattern.compile("^[A-Za-z_][A-Za-z0-9_]*$");
+    /**
      * multipart 文件参数名只允许安全字符。
      *
      * 支持示例：
@@ -266,7 +271,8 @@ public class CapabilityUiSchemaParser {
         if ("FILE_UPLOAD".equals(component)) {
             uploadSource = readUploadSource(
                     fieldName,
-                    uiNode
+                    uiNode,
+                    propertyNames
             );
         }
 
@@ -488,22 +494,23 @@ public class CapabilityUiSchemaParser {
             List<String> dependsOn) {
 
         if (uiNode == null
-                || !uiNode.path("optionSource")
-                .isObject()) {
+                || !uiNode.path("optionSource").isObject()) {
             throw badRequest(
                     "REMOTE_SELECT必须配置optionSource："
                             + fieldName
             );
         }
 
-        JsonNode sourceNode =
-                uiNode.get("optionSource");
+        JsonNode sourceNode = uiNode.get("optionSource");
 
-        Map<String, String> inputMapping =
-                new LinkedHashMap<>();
-
-        JsonNode mappingNode =
-                sourceNode.get("inputMapping");
+        /*
+         * 解析动态参数映射。
+         *
+         * 例如：
+         * "unitId": "$form.unitId"
+         */
+        Map<String, String> inputMapping = new LinkedHashMap<>();
+        JsonNode mappingNode = sourceNode.get("inputMapping");
 
         if (mappingNode != null
                 && !mappingNode.isObject()) {
@@ -526,10 +533,7 @@ public class CapabilityUiSchemaParser {
                         .asText("")
                         .trim();
 
-                Matcher matcher =
-                        FORM_EXPRESSION.matcher(
-                                expression
-                        );
+                Matcher matcher = FORM_EXPRESSION.matcher(expression);
 
                 if (!matcher.matches()) {
                     throw badRequest(
@@ -538,8 +542,7 @@ public class CapabilityUiSchemaParser {
                     );
                 }
 
-                String sourceField =
-                        matcher.group(1);
+                String sourceField = matcher.group(1);
 
                 if (!propertyNames.contains(sourceField)) {
                     throw badRequest(
@@ -558,6 +561,31 @@ public class CapabilityUiSchemaParser {
                 inputMapping.put(
                         mapping.getKey(),
                         expression
+                );
+            }
+        }
+
+        /*
+         * 解析选项能力固定请求参数。
+         *
+         * 例如：
+         * "fixedInput": {
+         *   "type": "business_type"
+         * }
+         */
+        Map<String, Object> fixedInput = readOptionFixedInput(fieldName, sourceNode);
+
+        /*
+         * 同一个目标参数不能同时配置固定值和动态映射，
+         * 防止系统无法确定应该采用哪个值。
+         */
+        for (String targetName : fixedInput.keySet()) {
+            if (inputMapping.containsKey(targetName)) {
+                throw badRequest(
+                        "远程选项固定参数与依赖参数重复："
+                                + fieldName
+                                + "."
+                                + targetName
                 );
             }
         }
@@ -583,12 +611,80 @@ public class CapabilityUiSchemaParser {
                         "valueField",
                         fieldName
                 ),
-                Collections.unmodifiableMap(
-                        inputMapping
-                )
+                Collections.unmodifiableMap(inputMapping),
+                fixedInput
         );
     }
+    /**
+     * 读取选项能力的固定请求参数。
+     *
+     * 固定参数只参与选项能力调用，
+     * 不会写入用户最终提交的业务表单。
+     */
+    private Map<String, Object> readOptionFixedInput(
+            String fieldName,
+            JsonNode sourceNode) {
 
+        JsonNode fixedInputNode = sourceNode.get("fixedInput");
+
+        /*
+         * 未配置固定参数时保持原有行为。
+         */
+        if (fixedInputNode == null
+                || fixedInputNode.isNull()) {
+            return Map.of();
+        }
+
+        if (!fixedInputNode.isObject()) {
+            throw badRequest(
+                    "optionSource.fixedInput必须是JSON对象："
+                            + fieldName
+            );
+        }
+
+        Map<String, Object> fixedInput = new LinkedHashMap<>();
+        Iterator<Map.Entry<String, JsonNode>> iterator = fixedInputNode.fields();
+        while (iterator.hasNext()) {
+            Map.Entry<String, JsonNode> entry = iterator.next();
+
+            String targetName = entry.getKey().trim();
+            JsonNode valueNode = entry.getValue();
+
+            if (!OPTION_INPUT_NAME.matcher(targetName).matches()) {
+                throw badRequest(
+                        "选项能力固定参数名称不合法："
+                                + fieldName
+                                + "."
+                                + targetName
+                );
+            }
+
+            /*
+             * 固定参数只接受字符串、数字和布尔值，
+             * 不接受对象、集合和null。
+             */
+            if (valueNode == null
+                    || valueNode.isNull()
+                    || !valueNode.isValueNode()) {
+                throw badRequest(
+                        "选项能力固定参数必须是字符串、数字或布尔值："
+                                + fieldName
+                                + "."
+                                + targetName
+                );
+            }
+
+            fixedInput.put(
+                    targetName,
+                    objectMapper.convertValue(
+                            valueNode,
+                            Object.class
+                    )
+            );
+        }
+
+        return Collections.unmodifiableMap(fixedInput);
+    }
     /**
      * 解析文件上传字段的能力配置。
      *
@@ -604,7 +700,8 @@ public class CapabilityUiSchemaParser {
      */
     private UploadSource readUploadSource(
             String fieldName,
-            JsonNode uiNode) {
+            JsonNode uiNode,
+            Set<String> propertyNames) {
 
         if (uiNode == null
                 || !uiNode.path("uploadSource").isObject()) {
@@ -643,14 +740,42 @@ public class CapabilityUiSchemaParser {
                 fieldName
         );
 
-        if (!"$".equals(resultValuePath)
-                && !resultValuePath.startsWith("$.")) {
+        if (!"$".equals(resultValuePath) && !resultValuePath.startsWith("$.")) {
             throw badRequest(
                     "字段" + fieldName
                             + "的resultValuePath必须以$或$.开头"
             );
         }
+        /*
+         * 中文注释：
+         * resultObjectPath表示从responseBinding已经提取出的data中，
+         * 读取完整文件对象。
+         *
+         * 示例：
+         * responseBinding.dataPath = $.data
+         * resultObjectPath = $
+         *
+         * 表示整个data对象就是需要保存到fileList中的文件对象。
+         */
+        String resultObjectPath =text(sourceNode,"resultObjectPath");
 
+        if (StringUtils.hasText(resultObjectPath)
+                && !"$".equals(resultObjectPath)
+                && !resultObjectPath.startsWith("$.")) {
+
+            throw badRequest(
+                    "字段" + fieldName
+                            + "的resultObjectPath必须以$或$.开头"
+            );
+        }
+
+        SubmitMapping submitMapping =
+                readUploadSubmitMapping(
+                        fieldName,
+                        sourceNode,
+                        propertyNames,
+                        resultObjectPath
+                );
         int limit = readIntegerLimit(
                 sourceNode.get("limit"),
                 "字段" + fieldName + ".uploadSource.limit",
@@ -682,12 +807,130 @@ public class CapabilityUiSchemaParser {
                 capabilityCode,
                 fileParameterName,
                 resultValuePath,
+                resultObjectPath,
+                submitMapping,
                 limit,
                 maxSizeMb,
                 text(sourceNode, "accept")
         );
     }
 
+    /**
+     * 解析文件上传双输出映射。
+     *
+     * 该配置不包含任何具体业务字段硬编码：
+     * idsTarget可以配置为fileIds、attachmentIds等；
+     * objectsTarget可以配置为fileList、attachments等。
+     */
+    private SubmitMapping readUploadSubmitMapping(
+            String fieldName,
+            JsonNode sourceNode,
+            Set<String> propertyNames,
+            String resultObjectPath) {
+
+        JsonNode mappingNode =
+                sourceNode.get("submitMapping");
+
+        /*
+         * 中文注释：
+         * 没有submitMapping表示继续使用原有单值或ID数组模式。
+         */
+        if (mappingNode == null
+                || mappingNode.isNull()) {
+            return null;
+        }
+
+        if (!mappingNode.isObject()) {
+            throw badRequest(
+                    "字段" + fieldName
+                            + "的submitMapping必须是JSON对象"
+            );
+        }
+
+        if (!StringUtils.hasText(resultObjectPath)) {
+            throw badRequest(
+                    "字段" + fieldName
+                            + "配置submitMapping时必须配置resultObjectPath"
+            );
+        }
+
+        String idsTarget =
+                text(mappingNode, "idsTarget");
+
+        String objectsTarget =
+                text(mappingNode, "objectsTarget");
+
+        String separator =
+                text(mappingNode, "separator");
+
+        if (!StringUtils.hasText(idsTarget)) {
+            throw badRequest(
+                    "字段" + fieldName
+                            + "的submitMapping.idsTarget不能为空"
+            );
+        }
+
+        if (!StringUtils.hasText(objectsTarget)) {
+            throw badRequest(
+                    "字段" + fieldName
+                            + "的submitMapping.objectsTarget不能为空"
+            );
+        }
+
+        /*
+         * 中文注释：
+         * 文件对象集合必须写回当前FILE_UPLOAD字段，
+         * 避免页面同时维护第三份重复状态。
+         */
+        if (!fieldName.equals(objectsTarget)) {
+            throw badRequest(
+                    "字段" + fieldName
+                            + "的objectsTarget必须与当前字段名一致"
+            );
+        }
+
+        if (idsTarget.equals(objectsTarget)) {
+            throw badRequest(
+                    "字段" + fieldName
+                            + "的idsTarget不能与objectsTarget相同"
+            );
+        }
+
+        if (!propertyNames.contains(idsTarget)) {
+            throw badRequest(
+                    "字段" + fieldName
+                            + "的ID目标字段未在properties中声明："
+                            + idsTarget
+            );
+        }
+
+        if (!propertyNames.contains(objectsTarget)) {
+            throw badRequest(
+                    "字段" + fieldName
+                            + "的文件对象字段未在properties中声明："
+                            + objectsTarget
+            );
+        }
+
+        /*
+         * 未配置分隔符时默认使用英文逗号。
+         */
+        if (!StringUtils.hasText(separator)) {
+            separator = ",";
+        }
+
+        if (separator.length() > 10) {
+            throw badRequest(
+                    "字段" + fieldName
+                            + "的文件ID分隔符长度不能超过10"
+            );
+        }
+        return new SubmitMapping(
+                idsTarget,
+                objectsTarget,
+                separator
+        );
+    }
     /**
      * 读取 uploadSource 的必填字符串。
      */
@@ -1077,26 +1320,50 @@ public class CapabilityUiSchemaParser {
 
     /**
      * 远程下拉选项配置。
+     *
+     * inputMapping：
+     * 从当前表单读取的动态请求参数。
+     *
+     * fixedInput：
+     * 配置人员设置的固定请求参数。
      */
     public record OptionSource(
             String capabilityCode,
             String itemsPath,
             String labelField,
             String valueField,
-            Map<String, String> inputMapping) {
+            Map<String, String> inputMapping,
+            Map<String, Object> fixedInput) {
     }
     /**
      * 文件上传字段的数据源配置。
      *
-     * capabilityCode由WRITE能力的Schema固定指定，
-     * Controller不能接收前端临时传入的上传能力编码。
+     * resultValuePath：
+     * 提取文件ID等标量值。
+     *
+     * resultObjectPath：
+     * 提取完整文件对象；未配置时保持原有行为。
+     *
+     * submitMapping：
+     * 控制ID字符串和文件对象集合写入哪个表单字段。
      */
     public record UploadSource(
             String capabilityCode,
             String fileParameterName,
             String resultValuePath,
+            String resultObjectPath,
+            SubmitMapping submitMapping,
             int limit,
             int maxSizeMb,
             String accept) {
+    }
+
+    /**
+     * 文件上传双输出映射。
+     */
+    public record SubmitMapping(
+            String idsTarget,
+            String objectsTarget,
+            String separator) {
     }
 }

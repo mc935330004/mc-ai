@@ -279,8 +279,7 @@ public class CapabilityResponseInterpreter {
             return false;
         }
 
-        if (actual.isNumber()
-                || expected.isNumber()) {
+        if (actual.isNumber() || expected.isNumber()) {
 
             BigDecimal actualNumber =
                     parseNumber(actual);

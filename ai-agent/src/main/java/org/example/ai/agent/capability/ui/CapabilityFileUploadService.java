@@ -201,12 +201,78 @@ public class CapabilityFileUploadService {
                 uploadSource.resultValuePath()
         );
 
+        /*
+         * 中文注释：
+         * 只有配置了resultObjectPath才提取文件对象。
+         * 旧的上传配置不会返回item，也不会改变原有提交结构。
+         */
+        Object item = readResultObject(
+                interpreted.data(),
+                uploadSource.resultObjectPath()
+        );
+
         return CapabilityFileUploadVO.builder()
                 .value(value)
                 .label(resolveFileName(file))
+                .item(item)
                 .build();
     }
+    /**
+     * 从上传能力标准data中提取完整文件对象。
+     *
+     * 例如：
+     * responseBinding.dataPath = $.data
+     * resultObjectPath = $
+     *
+     * 此时返回整个data对象。
+     */
+    private Object readResultObject(
+            Object data,
+            String resultObjectPath) {
 
+        /*
+         * 中文注释：
+         * 没有配置对象路径时保持旧上传协议，
+         * 返回null即可。
+         */
+        if (!StringUtils.hasText(resultObjectPath)) {
+            return null;
+        }
+
+        JsonNode root = data == null
+                        ? objectMapper.nullNode()
+                        : objectMapper.valueToTree(data);
+
+        SimpleJsonPathReader.ReadResult result =
+                jsonPathReader.read(
+                        root,
+                        resultObjectPath
+                );
+
+        if (!result.found() || result.value() == null || result.value().isNull()) {
+
+            throw new BusinessException(
+                    502,
+                    "上传能力未返回文件对象，resultObjectPath="
+                            + resultObjectPath
+            );
+        }
+
+        /*
+         * 文件对象必须是JSON对象，不能是字符串、数组或数字。
+         */
+        if (!result.value().isObject()) {
+            throw new BusinessException(
+                    502,
+                    "上传能力文件对象路径不是JSON对象，resultObjectPath="
+                            + resultObjectPath
+            );
+        }
+        return objectMapper.convertValue(
+                result.value(),
+                Object.class
+        );
+    }
     /**
      * 创建现有能力请求构建器需要的上下文。
      */
