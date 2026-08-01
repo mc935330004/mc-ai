@@ -75,11 +75,9 @@ public class DeterministicMarkdownRenderer {
     private Map<String, List<AnswerFact>>
     groupCollectionFacts(List<AnswerFact> facts) {
         Map<String, List<AnswerFact>> grouped = new LinkedHashMap<>();
-
         if (facts == null) {
             return grouped;
         }
-
         for (AnswerFact fact : facts) {
             if (!StringUtils.hasText(fact.getCollectionKey())) {
                 continue;
@@ -125,7 +123,6 @@ public class DeterministicMarkdownRenderer {
         for (AnswerFact fact : facts) {
             rows.computeIfAbsent(fact.getRecordPath(),ignored -> new LinkedHashMap<>()).put(fact.getLabel(), fact);
         }
-
         for (Map<String, AnswerFact> row : rows.values()) {
             markdown.append("| ");
             for (String label : labels) {

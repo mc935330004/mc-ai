@@ -41,9 +41,7 @@ public class HeaderCurrentUserProvider implements CurrentUserProvider {
     @Override
     public void requirePermission(String permission ) {
         if (!StringUtils.hasText(permission)) {
-            throw new IllegalArgumentException(
-                    "权限编码不能为空"
-            );
+            throw new IllegalArgumentException("权限编码不能为空");
         }
 
         VerifiedUserContext context = getRequiredContext();
@@ -62,19 +60,15 @@ public class HeaderCurrentUserProvider implements CurrentUserProvider {
     private VerifiedUserContext
     getRequiredContext() {
         Object cached = request.getAttribute( VERIFIED_CONTEXT_ATTRIBUTE );
-
         if (cached instanceof VerifiedUserContext context) {
             return context;
         }
-
         VerifiedUserContext context =loadFromPm();
-
         /*
          * 只缓存用户编码和权限编码。
          * 不缓存Authorization、Cookie和Token。
          */
         request.setAttribute( VERIFIED_CONTEXT_ATTRIBUTE,context);
-
         return context;
     }
 
@@ -82,35 +76,18 @@ public class HeaderCurrentUserProvider implements CurrentUserProvider {
      * 从PM的/user/info读取权威用户信息。
      */
     private VerifiedUserContext loadFromPm() {
-        String authorization =
-                getRequiredAuthorization();
-
+        String authorization = getRequiredAuthorization();
         JsonNode response;
-
         try {
-            String responseBody =
-                    restClient.get()
-                            .uri("/user/info")
-                            .header(
-                                    HttpHeaders.AUTHORIZATION,
-                                    authorization
-                            )
+            String responseBody =restClient.get() .uri("/user/info")
+                            .header(HttpHeaders.AUTHORIZATION,authorization)
                             .retrieve()
                             .body(String.class);
 
-            if (!StringUtils.hasText(
-                    responseBody)) {
-                throw new BusinessException(
-                        401,
-                        "业务系统没有返回当前用户信息"
-                );
+            if (!StringUtils.hasText(responseBody)) {
+                throw new BusinessException( 401,"业务系统没有返回当前用户信息");
             }
-
-            response =
-                    objectMapper.readTree(
-                            responseBody
-                    );
-
+            response =objectMapper.readTree(responseBody);
         } catch (JsonProcessingException exception) {
             throw new BusinessException(
                     502,

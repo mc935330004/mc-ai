@@ -55,10 +55,11 @@ public interface AiChatSessionService {
     void saveUserMessage(String userId, String sessionId, String content, String modelCode);
 
     /**
-     * 保存AI助手消息。
+     * 中文注释：保存 AI 助手消息。
      *
      * @param messageType 消息类型：TEXT、ACTION_FORM、ACTION_PREVIEW
-     * @param payloadJson 结构化载荷JSON，普通文本消息传null
+     * @param payloadJson 结构化载荷 JSON；TEXT 可保存 ChatTextPayloadVO，
+     *                    没有结构化展示数据时传 null
      */
     void saveAssistantMessage(
             String userId,

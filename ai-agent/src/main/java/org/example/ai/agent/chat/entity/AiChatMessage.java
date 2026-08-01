@@ -39,11 +39,12 @@ public class AiChatMessage {
     private String messageType;
 
     /**
-     * 结构化消息载荷JSON。
+     * 中文注释：结构化消息载荷 JSON。
      *
      * ACTION_FORM 保存 ActionFormVO；
      * ACTION_PREVIEW 保存 ActionPreviewVO；
-     * TEXT 消息为空。
+     * TEXT 可保存 ChatTextPayloadVO，用于恢复事实卡片、RAG 引用和工作流结果。
+     * 普通文本回答没有结构化数据时传 null。
      */
     private String payloadJson;
     /**

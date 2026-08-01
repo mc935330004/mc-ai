@@ -6,6 +6,7 @@ import org.example.ai.agent.answer.AnswerComposer;
 import org.example.ai.agent.chat.entity.AgentRequest;
 import org.example.ai.agent.chat.entity.AgentStreamEvent;
 import org.example.ai.agent.chat.service.AgentOrchestrator;
+import org.example.ai.agent.chat.vo.ChatTextPayloadVO;
 import org.example.ai.agent.vo.ActionFormVO;
 import org.example.ai.agent.chat.support.AgentStreamSession;
 import org.example.ai.agent.chat.support.AgentStreamSessionFactory;
@@ -419,24 +420,28 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                             factPreview
                     )
             );
-        // 5. 如果存在失败步骤，直接返回失败摘要。
+        // 中文注释：FACTS 已实时发送，最终 TEXT 同时保存快照供历史会话恢复。
+        ChatTextPayloadVO factPayload = ChatTextPayloadVO.builder()
+                .facts(factPreview)
+                .build();
+
+        // 5. 如果存在失败步骤，仍保留已提取的事实卡片。
         ToolResult failedResult = findFirstFailedResult(toolResults);
         if (failedResult != null) {
-            // 失败摘要同样走统一回答协议，且不泄露完整 ToolResult。
-            // 中文注释：保存业务能力失败回答。
             publishAssistantAnswer(
                     request,
                     stream,
                     runId,
-                    buildFailedAnswer(failedResult)
+                    buildFailedAnswer(failedResult),
+                    factPayload
             );
             stream.complete();
             return;
         }
-        // 基于真实业务数据生成最终回答。
+
+        // 中文注释：业务查询最终回答与事实卡片写入同一条 TEXT 消息。
         String finalAnswer = answerComposer.compose(request, routePlan, toolResults);
-        // 中文注释：保存业务查询最终回答。
-        publishAssistantAnswer(request, stream, runId, finalAnswer);
+        publishAssistantAnswer(request, stream, runId, finalAnswer, factPayload);
         stream.complete();
     }
     /**
@@ -537,12 +542,17 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
         // 2. 调用现有 RAG 服务。
         KnowledgeDocumentQueryResponse ragResponse =executeRagQuery(request, runId);
 
-        // 中文注释：保存 RAG 最终回答。
+        // 中文注释：引用既实时发送，也写入 TEXT 载荷供历史会话恢复。
+        ChatTextPayloadVO ragPayload = ChatTextPayloadVO.builder()
+                .references(ragResponse.references())
+                .build();
+
         publishAssistantAnswer(
                 request,
                 stream,
                 runId,
-                ragResponse.answer()
+                ragResponse.answer(),
+                ragPayload
         );
 
         // 4. 推送引用来源。
@@ -788,23 +798,24 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                         outcome
                 );
 
-        // 中文注释：保存工作流查询最终回答。
-        publishAssistantAnswer(request, stream, runId, answer);
+        // 中文注释：工作流执行结果写入 TEXT 载荷，历史会话恢复后继续展示结果卡片。
+        ChatTextPayloadVO workflowPayload = ChatTextPayloadVO.builder()
+                .workflow(outcome)
+                .build();
+        publishAssistantAnswer(request, stream, runId, answer, workflowPayload);
         stream.complete();
 
         return outcome;
     }
     /**
-     * 中文注释：统一保存并发布助手回答。
-     *
-     * 所有文本回答都从这里发送，避免不同分支漏存历史消息。
+     * 中文注释：最终 Markdown 与结构化展示快照必须在同一条 TEXT 消息中保存。
      */
     private void publishAssistantAnswer(
             AgentRequest request,
             AgentStreamSession stream,
             String runId,
-            String answer) throws Exception {
-
+            String answer,
+            ChatTextPayloadVO payload) throws Exception {
         aiChatSessionService.saveAssistantMessage(
                 request.getUserId(),
                 request.getConversationId(),
@@ -812,9 +823,20 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                 runId,
                 request.getModelCode(),
                 "TEXT",
-                null
+                payload == null ? null : objectMapper.writeValueAsString(payload)
         );
-
         stream.publishAnswer(answer);
+    }
+
+    /**
+     * 中文注释：普通文本回答不携带额外结构化展示数据。
+     */
+    private void publishAssistantAnswer(
+            AgentRequest request,
+            AgentStreamSession stream,
+            String runId,
+            String answer) throws Exception {
+
+        publishAssistantAnswer(request, stream, runId, answer, null);
     }
 }
