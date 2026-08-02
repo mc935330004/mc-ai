@@ -859,18 +859,76 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
             String runId,
             String answer,
             ChatTextPayloadVO payload) throws Exception {
+        // 中文注释：所有回答在保存和发送前统一清理用户不需要的内部信息。
+        String visibleAnswer = sanitizeUserVisibleAnswer(answer);
         aiChatSessionService.saveAssistantMessage(
                 request.getUserId(),
                 request.getConversationId(),
-                answer,
+                visibleAnswer,
                 runId,
                 request.getModelCode(),
                 "TEXT",
                 payload == null ? null : objectMapper.writeValueAsString(payload)
         );
-        stream.publishAnswer(answer);
-    }
 
+        stream.publishAnswer(visibleAnswer);
+    }
+    /**
+     * 中文注释：过滤明确属于系统执行过程的信息，保留业务结果和统计数据。
+     */
+    private String sanitizeUserVisibleAnswer(String answer) {
+        if (!StringUtils.hasText(answer)) {
+            return "";
+        }
+
+        StringBuilder result = new StringBuilder();
+        boolean skippingInternalSection = false;
+
+        for (String line : answer.replace("\r\n", "\n").split("\n", -1)) {
+            String trimmed = line.trim();
+
+            if (trimmed.matches("^(#{1,6}\\s*)?.*跳过记录.*$")) {
+                skippingInternalSection = true;
+                continue;
+            }
+
+            // 中文注释：分隔线只负责结束内部区段，不需要保留。
+            if (skippingInternalSection && trimmed.matches("^-{3,}$")) {
+                skippingInternalSection = false;
+                continue;
+            }
+
+            // 中文注释：新标题表示进入正常业务区段，标题本身必须继续保留。
+            if (skippingInternalSection && trimmed.matches("^#{1,6}\\s+.+$")) {
+                skippingInternalSection = false;
+            }
+
+            if (skippingInternalSection) {
+                continue;
+            }
+
+            if (trimmed.matches(
+                    ".*(?:SKIPPED_NO_ID|节点ID|能力编码|字段路径|异常堆栈|鉴权信息).*")) {
+                continue;
+            }
+
+            if (trimmed.matches(
+                    "^(?:工作流编码|工作流版本|运行耗时|批处理节点|Token消耗|模型名称|生成时间|数据来源)\\s*[：:].*$")) {
+                continue;
+            }
+
+            // 中文注释：隐藏面向内部排查的数组索引标记。
+            String visibleLine = line
+                    .replaceAll("[（(]\\s*索引\\s*\\d+\\s*[）)]", "")
+                    .replaceAll("^(\\s*(?:#{1,6}\\s*)?)[✅⏭️⚠️❌📊]\\s*", "$1");
+
+            result.append(visibleLine).append('\n');
+        }
+
+        return result.toString()
+                .replaceAll("\\n{3,}", "\n\n")
+                .trim();
+    }
     /**
      * 中文注释：普通文本回答不携带额外结构化展示数据。
      */

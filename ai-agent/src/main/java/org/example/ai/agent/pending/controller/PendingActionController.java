@@ -118,23 +118,14 @@ public class PendingActionController {
                     .append("** 已执行完成。\n\n");
             appendOutput(markdown, output);
         } else if ("FAILED".equals(action.getStatus())) {
-            markdown.append("## 操作失败\n\n")
-                    .append("- 操作：")
-                    .append(escapeMarkdown(action.getCapabilityName()))
-                    .append("\n- 原因：")
-                    .append(escapeMarkdown(action.getErrorMessage()));
+        // 中文注释：禁止向用户直接展示后台异常和内部状态码。
+        markdown.append("## 操作未完成\n\n")
+                .append("业务操作未完成，请检查提交的信息后重试。");
         } else {
-            markdown.append("## 操作状态\n\n")
-                    .append("- 操作：")
-                    .append(escapeMarkdown(action.getCapabilityName()))
-                    .append("\n- 当前状态：`")
-                    .append(action.getStatus())
-                    .append("`");
+                // 中文注释：未完成状态只展示用户可以理解的结果。
+                markdown.append("## 操作处理中\n\n")
+                        .append("当前操作尚未完成。");
         }
-        markdown.append("\n\n操作编号：`")
-                .append(action.getRunId())
-                .append("`");
-
         return markdown.toString();
     }
 
@@ -160,10 +151,11 @@ public class PendingActionController {
             return;
         }
         // 数组或复杂对象使用 JSON 代码块，避免丢失业务字段
-        markdown.append("```json\n")
-                .append(objectMapper.writerWithDefaultPrettyPrinter()
-                        .writeValueAsString(output))
-                .append("\n```\n");
+        markdown.append("业务系统已返回处理结果。需要展示明细时，应转换为业务字段或表格。");
+//        markdown.append("```json\n")
+//                .append(objectMapper.writerWithDefaultPrettyPrinter()
+//                        .writeValueAsString(output))
+//                .append("\n```\n");
     }
 
     /**
