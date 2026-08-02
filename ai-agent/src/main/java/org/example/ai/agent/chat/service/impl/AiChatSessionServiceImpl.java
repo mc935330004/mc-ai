@@ -18,7 +18,7 @@ import org.example.ai.agent.common.exception.ErrorCode;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
-
+import org.example.ai.agent.chat.memory.service.ConversationStateService;
 import java.time.LocalDateTime;
 import java.util.Collections;
 import java.util.List;
@@ -36,6 +36,10 @@ public class AiChatSessionServiceImpl implements AiChatSessionService {
     private final AiChatSessionMapper sessionMapper;
     private final AiChatMessageMapper messageMapper;
     private final AgentModelProperties modelProperties;
+    /**
+     * 中文注释：管理聊天会话对应的结构化业务状态。
+     */
+    private final ConversationStateService conversationStateService;
     private static final String MESSAGE_TYPE_TEXT = "TEXT";
     @Override
     public List<ChatModelVO> listModels() {
@@ -93,14 +97,34 @@ public class AiChatSessionServiceImpl implements AiChatSessionService {
                 .set(AiChatSession::getModelCode, resolvedModelCode));
     }
 
+    /**
+     * 中文注释：删除会话和清理上下文必须位于同一个事务中。
+     */
     @Override
-    public void deleteSession(String userId, String sessionId) {
-        // 中文注释：所有会话操作必须先验证当前用户的会话归属。
+    @Transactional(rollbackFor = Exception.class)
+    public void deleteSession( String userId,String sessionId) {
+        // 中文注释：清理前必须验证会话存在且属于当前用户。
         requireSession(userId, sessionId);
-        sessionMapper.update(null, new LambdaUpdateWrapper<AiChatSession>()
-                .eq(AiChatSession::getId, sessionId)
-                .eq(AiChatSession::getUserId, userId)
-                .set(AiChatSession::getDeleted, 1));
+        /*
+         * 中文注释：必须在会话逻辑删除前清理状态。
+         * 状态服务读取会话时要求会话仍处于未删除状态。
+         */
+        conversationStateService.clearState(
+                userId,
+                sessionId
+        );
+
+        int updated = sessionMapper.update(null,new LambdaUpdateWrapper<AiChatSession>()
+                        .eq(AiChatSession::getId, sessionId)
+                        .eq(AiChatSession::getUserId, userId)
+                        .eq(AiChatSession::getDeleted, 0)
+                        .set(AiChatSession::getDeleted, 1));
+        if (updated != 1) {
+            throw new BusinessException(
+                    409,
+                    "会话状态已发生变化，请刷新后重试"
+            );
+        }
     }
 
     @Override

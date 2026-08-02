@@ -30,7 +30,7 @@ import org.example.ai.agent.capability.entity.CapabilityDefinition;
 import org.example.ai.agent.capability.service.CapabilityDefinitionService;
 import org.example.ai.agent.capability.ui.CapabilityOptionService;
 import org.example.ai.agent.capability.vo.CapabilityOptionResolution;
-
+import org.example.ai.agent.capability.parameter.UserFriendlyClarifyQuestionBuilder;
 import java.util.Optional;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -56,6 +56,10 @@ public class WorkflowPlanner {
     private final TrackedChatClientService chatClientService;
     private final ObjectMapper objectMapper;
     /**
+     * 中文注释：将 Schema 校验结果转换成业务人员能理解的提示。
+     */
+    private final UserFriendlyClarifyQuestionBuilder clarifyQuestionBuilder;
+    /**
      * 读取发布能力的副作用类型。
      */
     private final GraphCapabilityCatalog capabilityCatalog;
@@ -73,9 +77,22 @@ public class WorkflowPlanner {
      * 解析远程下拉中文名称和真实ID。
      */
     private final CapabilityOptionService capabilityOptionService;
-
-    public WorkflowPlan plan(String userQuestion, ModelCallContext sourceContext) {
-
+    /**
+     * 中文注释：非聊天入口不携带会话参数，保持原有调用行为。
+     */
+    public WorkflowPlan plan(String userQuestion,ModelCallContext sourceContext) {
+        return plan(
+                userQuestion,
+                sourceContext,
+                null,
+                Map.of()
+        );
+    }
+    public WorkflowPlan plan(String userQuestion,
+                             ModelCallContext sourceContext,
+                             String previousWorkflowCode,
+                             Map<String, Object> inheritedInput) {
+        // 中文注释：从这里开始保留原 plan 方法的全部业务代码。
         List<WorkflowDefinition> candidates =workflowService.listAgentCallableDefinitions();
 
         if (candidates.isEmpty()) {
@@ -153,6 +170,13 @@ public class WorkflowPlanner {
                         userQuestion,
                         published,
                         sourceContext);
+        // 中文注释：只有再次命中同一工作流时才继承旧参数。
+        Map<String, Object> effectiveInput = mergeInheritedInput(
+                        selected.getWorkflowCode(),
+                        previousWorkflowCode,
+                        inheritedInput,
+                        extraction.input()
+                );
         /*
          * 即使工作流输入还没有通过校验，
          * 也先按受限inputMapping生成WRITE表单初始值。
@@ -163,14 +187,14 @@ public class WorkflowPlanner {
                 writeConfig == null? new LinkedHashMap<>()
                         : resolveWriteInput(
                         writeConfig,
-                        extraction.input(),
+                        effectiveInput,
                         sourceContext);
         String schemaJson =writeJson(published.inputSchema());
 
         CapabilityInputValidationResult validation =
                 inputValidator.validate(
                         schemaJson,
-                        extraction.input()
+                        effectiveInput
                 );
 
         if (!validation.isValid()) {
@@ -192,7 +216,9 @@ public class WorkflowPlanner {
                     .confidence(confidence)
                     .reason("工作流参数未通过Schema校验")
                     .clarifyQuestion(
-                            buildClarifyQuestion(
+                            clarifyQuestionBuilder.build(
+                                    published.compiledGraph().name(),
+                                    schemaJson,
                                     validation
                             )
                     )
@@ -208,15 +234,14 @@ public class WorkflowPlanner {
                                     : writeNode.name()
                     ).input(
                             writeConfig == null
-                                    ? extraction.input()
+                                    ? effectiveInput
                                     : rawActionInput
                     )
                     .actionCapabilityVersionId(
                             writeCapability == null
                                     ? null
                                     : writeCapability.getActiveVersionId()
-                    )
-                    .actionInputSchema(actionInputSchema)
+                    ).actionInputSchema(actionInputSchema)
                     .build();
         }
         Map<String, Object> actionInput =new LinkedHashMap<>();
@@ -451,7 +476,11 @@ public class WorkflowPlanner {
                             "WRITE表单参数未通过Schema校验"
                     )
                     .clarifyQuestion(
-                            buildClarifyQuestion(validation)
+                            clarifyQuestionBuilder.build(
+                                    published.compiledGraph().name(),
+                                    schemaJson,
+                                    validation
+                            )
                     )
                     .sideEffect("WRITE")
                     .actionCapabilityCode(
@@ -538,26 +567,36 @@ public class WorkflowPlanner {
                     .append("\n\n");
         }
 
+        /*
+         * 中文注释：工作流是业务编排的最高优先级入口。
+         * 只要用户意图匹配已发布工作流，就必须选择工作流；
+         * 只有没有任何匹配工作流时，才允许回退普通能力。
+         */
         String systemPrompt = """
-                你是企业PM系统的工作流选择器。
+        你是企业PM系统的工作流选择器。
 
-                规则：
-                1. 只能从候选工作流中选择。
-                2. 不允许生成工作流输入参数。
-                3. 单接口查询优先返回matched=false，由后端走普通能力。
-                4. 只有用户需要多步骤、批量或综合查询时才选择工作流。
-                5. 禁止编造候选列表之外的workflowCode。
-                6. 只输出JSON，不输出Markdown。
+        路由优先级：
+        已发布工作流 > 普通业务能力。
 
-                输出格式：
-                {
-                  "matched": true,
-                  "workflowCode": "候选编码",
-                  "confidence": 0.90,
-                  "reason": "选择原因",
-                  "clarifyQuestion": null
-                }
-                """;
+        规则：
+        1. 只能从候选工作流中选择。
+        2. 用户意图与候选工作流的名称或用途匹配时，必须选择该工作流。
+        3. 不得因为工作流只有一个能力节点、属于单接口查询或步骤较少而拒绝选择。
+        4. matched=false 仅表示所有候选工作流都与用户意图不匹配。
+        5. 不允许生成工作流输入参数。
+        6. 禁止编造候选列表之外的workflowCode。
+        7. confidence 表示用户意图与工作流用途的匹配程度。
+        8. 只输出JSON，不输出Markdown。
+
+        输出格式：
+        {
+          "matched": true,
+          "workflowCode": "候选编码",
+          "confidence": 0.90,
+          "reason": "用户意图与该工作流用途匹配",
+          "clarifyQuestion": null
+        }
+        """;
 
         String userPrompt = """
                 用户问题：
@@ -737,41 +776,31 @@ public class WorkflowPlanner {
         }
     }
 
-    private String buildClarifyQuestion(
-            CapabilityInputValidationResult result) {
+    /**
+     * 中文注释：同一工作流继承旧参数，当前问题提取的参数拥有最高优先级。
+     */
+    private Map<String, Object> mergeInheritedInput(
+            String selectedWorkflowCode,
+            String previousWorkflowCode,
+            Map<String, Object> inheritedInput,
+            Map<String, Object> currentInput) {
+        Map<String, Object> merged =
+                new LinkedHashMap<>();
 
-        StringBuilder builder =
-                new StringBuilder(
-                        "已确定需要执行工作流，但还需要补充参数。"
-                );
-
-        if (!result.getMissingParameters()
-                .isEmpty()) {
-            builder.append("缺少：")
-                    .append(
-                            String.join(
-                                    "、",
-                                    result.getMissingParameters()
-                            )
-                    )
-                    .append("。");
+        if (Objects.equals(
+                selectedWorkflowCode,
+                previousWorkflowCode
+        ) && inheritedInput != null) {
+            merged.putAll(inheritedInput);
         }
 
-        if (!result.getValidationErrors()
-                .isEmpty()) {
-            builder.append("参数问题：")
-                    .append(
-                            String.join(
-                                    "；",
-                                    result.getValidationErrors()
-                            )
-                    )
-                    .append("。");
+        // 中文注释：后写入的当前参数覆盖同名历史参数。
+        if (currentInput != null) {
+            merged.putAll(currentInput);
         }
 
-        return builder.toString();
+        return merged;
     }
-
     private WorkflowPlan notMatched(
             String reason) {
 

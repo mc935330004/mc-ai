@@ -243,3 +243,15 @@ ALTER TABLE ai_chat_message
     ADD COLUMN payload_json LONGTEXT NULL
         COMMENT '结构化消息载荷JSON快照'
         AFTER message_type;
+
+-- 中文注释：每个聊天会话只保存一份最新业务状态。
+CREATE TABLE ai_conversation_state (
+   session_id VARCHAR(64) PRIMARY KEY COMMENT '会话ID',
+   user_id VARCHAR(64) NOT NULL COMMENT '用户ID',
+   state_json LONGTEXT NOT NULL COMMENT '结构化业务状态JSON',
+   version INT NOT NULL DEFAULT 0 COMMENT '乐观锁版本',
+   created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+   updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+       ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
+   INDEX idx_conversation_state_user (user_id)
+) COMMENT='AI会话业务状态表';

@@ -19,6 +19,7 @@ import org.example.ai.agent.workflow.vo.WorkflowValidationVO;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
+import org.example.ai.agent.capability.parameter.UserFacingSchemaValidator;
 
 import java.time.LocalDateTime;
 import java.util.List;
@@ -32,7 +33,10 @@ import java.util.regex.Pattern;
 @RequiredArgsConstructor
 public class WorkflowDefinitionServiceImpl extends ServiceImpl< WorkflowDefinitionMapper, WorkflowDefinition>
         implements WorkflowDefinitionService {
-
+    /**
+     * 中文注释：保证工作流澄清时不会退化成内部字段路径。
+     */
+    private final UserFacingSchemaValidator userFacingSchemaValidator;
     private static final int MAX_GRAPH_JSON_LENGTH =
             1_000_000;
 
@@ -324,7 +328,11 @@ public class WorkflowDefinitionServiceImpl extends ServiceImpl< WorkflowDefiniti
                     )
                     .build();
         }
-
+        // 中文注释：工作流发布前校验所有必填输入的用户名称。
+        userFacingSchemaValidator.validateWorkflowGraph(
+                definition.getWorkflowCode(),
+                material.normalizedGraphSpecJson()
+        );
         WorkflowVersion version;
         boolean reused = false;
 

@@ -30,7 +30,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 import org.example.ai.agent.capability.ui.CapabilityUiSchemaParser;
-
+import org.example.ai.agent.capability.parameter.UserFacingSchemaValidator;
 import java.time.LocalDateTime;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -52,6 +52,10 @@ public class CapabilityDefinitionServiceImpl extends ServiceImpl<CapabilityDefin
     private final CapabilityVersionSnapshotFactory snapshotFactory;
     private final CapabilityVersionService capabilityVersionService;
     private final CapabilityRuntimeSnapshotResolver runtimeSnapshotResolver;
+    /**
+     * 中文注释：保证能力缺少参数时可以生成用户可读提示。
+     */
+    private final UserFacingSchemaValidator userFacingSchemaValidator;
     /**
      * 能力请求和响应绑定配置服务。
      */
@@ -613,6 +617,8 @@ public class CapabilityDefinitionServiceImpl extends ServiceImpl<CapabilityDefin
         validateBusinessSystem(capability);
         validateSideEffect(capability);
         validateSchema(capability.getCapabilityCode(),"inputSchemaJson",capability.getInputSchemaJson());
+        // 中文注释：输入 Schema 合法后，再校验必填字段用户名称。
+        userFacingSchemaValidator.validateCapabilitySchema(capability.getCapabilityCode(),capability.getInputSchemaJson());
         validateWritePermission(capability);
         /*
          * 草稿可以暂存。

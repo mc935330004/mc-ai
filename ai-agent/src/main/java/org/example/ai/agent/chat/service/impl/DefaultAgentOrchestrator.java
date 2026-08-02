@@ -40,6 +40,10 @@ import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import org.example.ai.agent.chat.service.AiChatSessionService;
+// 中文注释：用于保存成功业务查询的结构化会话状态。
+import org.example.ai.agent.chat.memory.service.ConversationStateRecorder;
+// 中文注释：负责在路由前补全省略式追问。
+import org.example.ai.agent.chat.memory.service.ConversationContextResolver;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -96,6 +100,14 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
      */
     private final AiChatSessionService aiChatSessionService;
     /**
+     * 中文注释：保存成功业务查询产生的可复用上下文。
+     */
+    private final ConversationStateRecorder conversationStateRecorder;
+    /**
+     * 中文注释：读取上一轮结构化状态并补全当前追问。
+     */
+    private final ConversationContextResolver conversationContextResolver;
+    /**
      * 使用显式构造器注入命名线程池。
      *
      * Executor 类型可能存在多个 Bean，必须使用 Qualifier 指定
@@ -114,6 +126,8 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
             ObjectMapper objectMapper,
             WorkflowExecutionFacade workflowExecutionFacade,
             WorkflowAnswerComposer workflowAnswerComposer,
+            ConversationStateRecorder conversationStateRecorder,
+            ConversationContextResolver conversationContextResolver,
             // 中文注释：注入会话服务，统一保存助手回答。
             AiChatSessionService aiChatSessionService
     ) {
@@ -129,6 +143,8 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
         this.objectMapper = objectMapper;
         this.workflowExecutionFacade = workflowExecutionFacade;
         this.workflowAnswerComposer = workflowAnswerComposer;
+        this.conversationStateRecorder = conversationStateRecorder;
+        this.conversationContextResolver = conversationContextResolver;
         this.aiChatSessionService = aiChatSessionService;
 
     }
@@ -165,19 +181,26 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                             null
                     )
             );
+            // 中文注释：runId 用于记录上下文改写模型的调用链路。
+            String contextualQuestion =conversationContextResolver.resolve(request,runId );
+
+            request.setContextualQuestion(contextualQuestion);
             /*
-             * 在调用 RAG 之前，先进行意图路由。
-             *
-             * 这一步很关键：
-             * 不能所有问题都直接丢给 RAG。
-             *
-             * 例如：
-             * - “合同审批流程是什么？”          -> RAG_ONLY
-             * - “查询 A 项目合同金额”           -> BUSINESS_QUERY
-             * - “查询 A 项目回款并分析风险”     -> MIXED_QUERY
-             * - “本月合同金额统计一下”          -> STATISTIC_QUERY
+             * 中文注释：纯“清除上下文”命令不需要进入工作流、
+             * 能力模块或 RAG，直接返回确定性结果。
              */
-            IntentResult intentResult = intentRouter.route(request, runId);
+            if (request.isContextReset()&& !StringUtils.hasText(contextualQuestion)) {
+                publishAssistantAnswer(
+                        request,
+                        stream,
+                        runId,
+                        "当前会话上下文已清除。"
+                );
+                runTraceService.markSuccess(runId,System.currentTimeMillis() - startTime);
+                stream.complete();
+                return;
+            }
+            IntentResult intentResult =intentRouter.route(request, runId);
             //  更新路由类型。
             runTraceService.updateRouteType(runId, intentResult.getRouteType());
             // 推送路由结果，方便前端展示和后端排查。
@@ -442,6 +465,13 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
         // 中文注释：业务查询最终回答与事实卡片写入同一条 TEXT 消息。
         String finalAnswer = answerComposer.compose(request, routePlan, toolResults);
         publishAssistantAnswer(request, stream, runId, finalAnswer, factPayload);
+        // 中文注释：回答与事实快照保存成功后，再记录本轮能力查询上下文。
+        conversationStateRecorder.recordToolResult(
+                request,
+                routePlan,
+                runId,
+                toolResults
+        );
         stream.complete();
     }
     /**
@@ -468,7 +498,8 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                 new KnowledgeDocumentQueryRequest(
                         request.getCategoryIds(),
                         request.getDocumentIds(),
-                        request.getUserQuestion(),
+                        // 中文注释：RAG 追问同样使用后端补全后的有效问题。
+                        request.getEffectiveQuestion(),
                         request.getTopK(),
                         request.getMinScore()
                 );
@@ -526,8 +557,7 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
             AgentRequest request,
             AgentStreamSession stream,
             String runId,
-            RoutePlan routePlan
-    ) throws Exception {
+            RoutePlan routePlan ) throws Exception {
         // 1. 推送 RAG 检索提示。
         stream.send(
                 "thinking",
@@ -554,7 +584,11 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                 ragResponse.answer(),
                 ragPayload
         );
-
+        // 中文注释：回答保存成功后，将 RAG 设置为当前最新会话主题。
+        conversationStateRecorder.recordRagResult(
+                request,
+                runId
+        );
         // 4. 推送引用来源。
         stream.send(
                 "references",
@@ -803,6 +837,13 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                 .workflow(outcome)
                 .build();
         publishAssistantAnswer(request, stream, runId, answer, workflowPayload);
+        // 中文注释：工作流结果保存成功后，记录工作流身份和本轮实际输入。
+        conversationStateRecorder.recordWorkflowResult(
+                request,
+                plan,
+                outcome,
+                runId
+        );
         stream.complete();
 
         return outcome;

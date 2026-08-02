@@ -1,6 +1,5 @@
 package org.example.ai.agent.plan;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import org.example.ai.agent.capability.entity.CapabilityDefinition;
@@ -21,7 +20,9 @@ import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.prompt.ChatOptions;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
-
+import java.util.Map;
+import java.util.Objects;
+import org.example.ai.agent.capability.parameter.UserFriendlyClarifyQuestionBuilder;
 import java.util.LinkedHashMap;
 import java.util.List;
 
@@ -51,6 +52,10 @@ public class DynamicCapabilityPlanner {
     private final TrackedChatClientService trackedChatClientService;
     private final CapabilityRouteAuditService routeAuditService;
     /**
+     * 中文注释：隐藏能力参数名、JSON Path 和 Schema 校验细节。
+     */
+    private final UserFriendlyClarifyQuestionBuilder clarifyQuestionBuilder;
+    /**
      * 已选能力的参数提取器。
      */
     private final CapabilityParameterExtractor parameterExtractor;
@@ -60,11 +65,26 @@ public class DynamicCapabilityPlanner {
      */
     private final CapabilityInputSchemaValidator inputSchemaValidator;
     /**
-     * 根据用户问题选择业务能力。
+     * 中文注释：非聊天调用保持原行为，不继承会话参数。
      */
     public DynamicCapabilityPlan plan(
             String userQuestion,
             ModelCallContext callContext) {
+        return plan(
+                userQuestion,
+                callContext,
+                null,
+                Map.of()
+        );
+    }
+    /**
+     * 根据用户问题选择业务能力。
+     */
+    public DynamicCapabilityPlan plan(
+            String userQuestion,
+            ModelCallContext callContext,
+            String previousCapabilityCode,
+            Map<String, Object> inheritedInput) {
         long planningStartTime =System.currentTimeMillis();
 
         List<CapabilityCandidate> candidates = List.of();
@@ -179,6 +199,13 @@ public class DynamicCapabilityPlanner {
                             selectedCapability,
                             parameterContext
                     );
+            // 中文注释：能力相同时用旧参数补缺，当前提取结果覆盖旧值。
+            Map<String, Object> effectiveInput = mergeInheritedInput(
+                            selectedCapability.getCapabilityCode(),
+                            previousCapabilityCode,
+                            inheritedInput,
+                            extractionResult.getInput()
+                    );
             /*
              * 模型输出不能直接写入 plan。
              * 必须先经过 JSON Schema 白名单、类型和必填校验。
@@ -186,7 +213,8 @@ public class DynamicCapabilityPlanner {
             CapabilityInputValidationResult validationResult =
                     inputSchemaValidator.validate(
                             selectedCapability.getInputSchemaJson(),
-                            extractionResult.getInput());
+                            effectiveInput
+                    );
 
             if (!validationResult.isValid()) {
                 return convertToClarify(
@@ -225,7 +253,27 @@ public class DynamicCapabilityPlanner {
             );
         }
     }
+    /**
+     * 中文注释：只有同一能力才能继承参数，防止跨业务接口串用条件。
+     */
+    private Map<String, Object> mergeInheritedInput(
+            String selectedCapabilityCode,
+            String previousCapabilityCode,
+            Map<String, Object> inheritedInput,
+            Map<String, Object> currentInput) {
+        Map<String, Object> merged = new LinkedHashMap<>();
 
+        if (Objects.equals(selectedCapabilityCode,previousCapabilityCode) && inheritedInput != null) {
+            merged.putAll(inheritedInput);
+        }
+
+        // 中文注释：当前问题明确提供的新参数覆盖上一轮参数。
+        if (currentInput != null) {
+            merged.putAll(currentInput);
+        }
+
+        return merged;
+    }
     /**
      * 构建能力精排系统提示词。
      */
@@ -455,41 +503,30 @@ public class DynamicCapabilityPlanner {
     }
 
     /**
-     * 参数缺失或格式不合法时转为追问。
-     *
-     * 不能因为参数不完整就调用业务接口，
-     * 也不应该把这类情况作为系统异常返回给用户。
+     * 中文注释：参数不完整时返回业务提示，不暴露接口和 JSON 信息。
      */
-    private DynamicCapabilityPlan convertToClarify( DynamicCapabilityPlan plan,
+    private DynamicCapabilityPlan convertToClarify(
+            DynamicCapabilityPlan plan,
             CapabilityDefinition capability,
-            CapabilityInputValidationResult validationResult) {
-
-        StringBuilder question = new StringBuilder();
-
-        question.append("已确定你需要使用【")
-                .append(capability.getCapabilityName())
-                .append("】，但还需要补充或修正接口参数。");
-
-        if (!validationResult.getMissingParameters() .isEmpty()) {
-
-            question.append(" 缺少必填参数：")
-                    .append( String.join("、", validationResult
-                                            .getMissingParameters())
-                    ).append("。");
-        }
-
-        if (!validationResult.getValidationErrors().isEmpty()) {
-
-            question.append(" 参数格式问题：")
-                    .append(String.join("；", validationResult.getValidationErrors()))
-                    .append("。");
-        }
+            CapabilityInputValidationResult validation) {
         plan.setMatched(false);
         plan.setCapabilityCode(null);
         plan.setCapabilityName(null);
         plan.setInput(new LinkedHashMap<>());
-        plan.setReason("能力已经确定，但接口参数未通过 JSON Schema 校验");
-        plan.setClarifyQuestion(question.toString());
+
+        // 中文注释：reason 仅供后台排查，不作为用户回答展示。
+        plan.setReason(
+                "能力已确定，但查询条件不完整"
+        );
+
+        plan.setClarifyQuestion(
+                clarifyQuestionBuilder.build(
+                        capability.getCapabilityName(),
+                        capability.getInputSchemaJson(),
+                        validation
+                )
+        );
+
         return plan;
     }
 
