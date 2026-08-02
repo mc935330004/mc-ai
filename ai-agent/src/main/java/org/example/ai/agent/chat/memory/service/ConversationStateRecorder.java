@@ -10,7 +10,8 @@ import org.example.ai.agent.workflow.plan.WorkflowPlan;
 import org.example.ai.agent.workflow.runtime.WorkflowExecutionOutcome;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
-
+import org.example.ai.agent.router.IntentResult;
+import org.example.ai.agent.plan.DynamicCapabilityPlan;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -51,6 +52,66 @@ public class ConversationStateRecorder {
         );
         state.setLastRunId(runId);
 
+        saveSafely(request, state);
+    }
+
+    /**
+     * 中文注释：记录工作流或普通能力等待用户补参时的业务上下文。
+     */
+    public void recordClarification(
+            AgentRequest request,
+            IntentResult intentResult,
+            String runId) {
+
+        WorkflowPlan workflowPlan = intentResult.getWorkflowPlan();
+        DynamicCapabilityPlan capabilityPlan =
+                intentResult.getDynamicCapabilityPlan();
+
+        BusinessConversationState state =
+                new BusinessConversationState();
+
+        if (workflowPlan != null
+                && StringUtils.hasText(workflowPlan.getWorkflowCode())) {
+
+            // 中文注释：工作流补参状态保存工作流身份和部分输入。
+            state.setRouteType("WORKFLOW_QUERY");
+            state.setBusinessTopic(resolveTopic(
+                    workflowPlan.getWorkflowName(),
+                    request.getUserQuestion()
+            ));
+            state.setWorkflowCode(workflowPlan.getWorkflowCode());
+            state.setWorkflowVersionId(workflowPlan.getVersionId());
+            // 中文注释：WRITE 的 input 是能力表单参数，不能作为下一轮工作流输入继承。
+            state.setLastInput(
+                    workflowPlan.isWriteAction()
+                            ? new LinkedHashMap<>()
+                            : copyInput(workflowPlan.getInput())
+            );
+
+        } else if (capabilityPlan != null && StringUtils.hasText(capabilityPlan.getCapabilityCode())) {
+
+            // 中文注释：能力补参状态保存能力身份和已经通过校验的部分输入。
+            state.setRouteType("CAPABILITY_QUERY");
+            state.setBusinessTopic(resolveTopic(
+                    capabilityPlan.getCapabilityName(),
+                    request.getUserQuestion()
+            ));
+            state.setCapabilityCode(
+                    capabilityPlan.getCapabilityCode()
+            );
+            state.setLastInput(
+                    copyInput(capabilityPlan.getInput())
+            );
+
+        } else {
+            // 中文注释：没有明确业务身份的普通追问不能覆盖已有上下文。
+            return;
+        }
+
+        state.setActiveObjectIds(
+                extractObjectIdentifiers(state.getLastInput())
+        );
+        state.setLastRunId(runId);
         saveSafely(request, state);
     }
 

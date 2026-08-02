@@ -503,22 +503,24 @@ public class DynamicCapabilityPlanner {
     }
 
     /**
-     * 中文注释：参数不完整时返回业务提示，不暴露接口和 JSON 信息。
+     * 中文注释：能力已经确定但参数不完整时，保留能力身份和已清洗参数。
      */
     private DynamicCapabilityPlan convertToClarify(
             DynamicCapabilityPlan plan,
             CapabilityDefinition capability,
             CapabilityInputValidationResult validation) {
-        plan.setMatched(false);
-        plan.setCapabilityCode(null);
-        plan.setCapabilityName(null);
-        plan.setInput(new LinkedHashMap<>());
 
-        // 中文注释：reason 仅供后台排查，不作为用户回答展示。
-        plan.setReason(
-                "能力已确定，但查询条件不完整"
-        );
+        // 中文注释：matched 继续表示能力已经匹配，needClarify 阻止能力立即执行。
+        plan.setMatched(true);
+        plan.setNeedClarify(true);
+        plan.setCapabilityCode(capability.getCapabilityCode());
+        plan.setCapabilityName(capability.getCapabilityName());
+        plan.setInput(new LinkedHashMap<>(
+                validation.getSanitizedInput()
+        ));
 
+        // 中文注释：reason 只用于后台排查，不展示接口参数。
+        plan.setReason("能力已确定，但查询条件不完整");
         plan.setClarifyQuestion(
                 clarifyQuestionBuilder.build(
                         capability.getCapabilityName(),

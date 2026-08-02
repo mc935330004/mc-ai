@@ -242,9 +242,13 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
              * 不应该继续调用 RAG 或业务接口。
              */
             if (intentResult.isNeedClarify()) {
-                WorkflowPlan workflowPlan =
-                        intentResult.getWorkflowPlan();
-
+                // 中文注释：先保存已选工作流和部分参数，下一轮补充内容才能续接执行。
+                conversationStateRecorder.recordClarification(
+                        request,
+                        intentResult,
+                        runId
+                );
+                WorkflowPlan workflowPlan = intentResult.getWorkflowPlan();
                 /*
                  * WRITE参数不足时发送结构化表单，
                  * 不能只返回一段纯文本。
@@ -757,9 +761,7 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
             String runId,
             IntentResult intentResult) throws Exception {
 
-        WorkflowPlan plan =
-                intentResult.getWorkflowPlan();
-
+        WorkflowPlan plan =intentResult.getWorkflowPlan();
         if (plan == null || !plan.isReady()) {
             throw new IllegalStateException(
                     "缺少可执行工作流计划"

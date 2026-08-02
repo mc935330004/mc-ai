@@ -234,7 +234,8 @@ public class WorkflowPlanner {
                                     : writeNode.name()
                     ).input(
                             writeConfig == null
-                                    ? effectiveInput
+                                    // 中文注释：READ 工作流只保存通过 Schema 清洗的部分参数。
+                                    ? validation.getSanitizedInput()
                                     : rawActionInput
                     )
                     .actionCapabilityVersionId(

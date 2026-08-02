@@ -110,7 +110,7 @@ public class ConversationContextRewriteService {
                 - FOLLOW_UP：当前问题包含代词、省略条件、继续分析或修改上一轮查询。
                 - NEW_TOPIC：当前问题本身完整，或者明确切换了业务主题。
                 - UNCERTAIN：无法可靠判断。
-
+                - 用户正在回答上一轮助手要求补充的条件时，必须判定为 FOLLOW_UP；即使当前问题只有编号、名称、日期或数值。
                 必须遵守：
                 1. 不回答用户问题。
                 2. 不调用业务能力。

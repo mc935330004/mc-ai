@@ -267,19 +267,30 @@ public class RuleBasedIntentRouter implements IntentRouter {
     }
 
     /**
-     * 构造追问结果。
-     *
-     * 当路由不明确时，不要贸然调用业务接口。
+     * 中文注释：构建普通澄清结果。
      */
     private IntentResult clarify(String question) {
+        return clarify(question, null);
+    }
+
+    /**
+     * 中文注释：能力已确定时保留能力计划，供会话状态记录器保存。
+     */
+    private IntentResult clarify(String question,DynamicCapabilityPlan dynamicPlan) {
         return IntentResult.builder()
                 .routeType(RouteType.CLARIFY)
-                .confidence(0.4)
-                .reason("问题信息不足，无法稳定判断路由")
+                .confidence( dynamicPlan == null
+                                ? 0.4D
+                                : dynamicPlan.getConfidence())
+                .reason(dynamicPlan == null
+                                ? "问题信息不足，无法稳定判断路由"
+                                : dynamicPlan.getReason()
+                )
                 .needClarify(true)
                 .clarifyQuestion(question)
                 .matchedKeywords(List.of())
                 .entities(Map.of())
+                .dynamicCapabilityPlan(dynamicPlan)
                 .build();
     }
 
@@ -358,7 +369,14 @@ public class RuleBasedIntentRouter implements IntentRouter {
                 plannerQuestion,
                 plannerContext,
                 request.getPreviousCapabilityCode(),
-                request.getInheritedInput() );
+                request.getInheritedInput());
+        // 中文注释：能力已经确定但参数不足时，保留能力计划并向用户追问。
+        if (dynamicPlan.isNeedClarify()) {
+            return clarify(
+                    dynamicPlan.getClarifyQuestion(),
+                    dynamicPlan
+            );
+        }
         // 没有匹配能力时不能调用业务接口，转为追问用户
         if (!dynamicPlan.isMatched()) {
             String clarifyQuestion = StringUtils.hasText(dynamicPlan.getClarifyQuestion()) ? dynamicPlan.getClarifyQuestion()
@@ -425,6 +443,13 @@ public class RuleBasedIntentRouter implements IntentRouter {
         }
 
         DynamicCapabilityPlan dynamicPlan = dynamicCapabilityPlanner.plan(plannerQuestion, plannerContext);
+        // 中文注释：写能力参数不足时同样保留能力身份，禁止直接进入操作预览。
+        if (dynamicPlan.isNeedClarify()) {
+            return clarify(
+                    dynamicPlan.getClarifyQuestion(),
+                    dynamicPlan
+            );
+        }
         if (!dynamicPlan.isMatched()) {
             return clarify(dynamicPlan.getClarifyQuestion());
         }

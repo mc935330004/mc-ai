@@ -85,4 +85,8 @@ public class DynamicCapabilityPlan {
      * displayInput保存用户看到的中文名称。
      */
     private Map<String, Object> displayInput =new LinkedHashMap<>();
+    /**
+     * 中文注释：能力已确定，但参数不完整，需要等待用户补充。
+     */
+    private boolean needClarify;
 }
