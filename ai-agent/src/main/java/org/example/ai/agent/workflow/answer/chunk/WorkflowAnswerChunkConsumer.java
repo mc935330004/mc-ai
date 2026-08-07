@@ -80,28 +80,12 @@ public class WorkflowAnswerChunkConsumer {
         for (WorkflowAnswerChunk chunk :  plan.chunks()) {
 
             try {
-                ModelCallContext context =buildContext(
+                String summary =consumeChunkWithRetry(
                                 request,
                                 runId,
-                                chunk.index()
-                        );
-
-                String userPrompt =buildUserPrompt(
-                                request,
                                 fieldSemanticsJson,
                                 plan,
-                                chunk
-                        );
-
-                ChatResponse response = chatClientService.call(
-                                context,
-                                SYSTEM_PROMPT,
-                                userPrompt
-                        );
-
-                String summary =extractResponseText(
-                                response
-                        );
+                                chunk);
 
                 analyses.add(new WorkflowAnswerChunkAnalysis(
                                 chunk.index(),
@@ -158,29 +142,96 @@ public class WorkflowAnswerChunkConsumer {
 
         return coverage;
     }
+    /**
+     * 单个分块最多调用两次。
+     *
+     * 第一次失败后立即重试一次：
+     * 1. 不重新请求PM；
+     * 2. 不改变原始分块；
+     * 3. 不跳过失败分块；
+     * 4. 第二次仍失败才交给外层终止本次报告生成。
+     */
+    private String consumeChunkWithRetry(
+            AgentRequest request,
+            String runId,
+            String fieldSemanticsJson,
+            WorkflowAnswerChunkPlan plan,
+            WorkflowAnswerChunk chunk) {
 
+        String userPrompt =
+                buildUserPrompt(
+                        request,
+                        fieldSemanticsJson,
+                        plan,
+                        chunk
+                );
+
+        Exception lastException = null;
+
+        for (int attempt = 1;attempt <= 2;attempt++) {
+            ModelCallType callType =
+                    attempt == 1
+                            ? ModelCallType.ANSWER
+                            : ModelCallType.ANSWER_RETRY;
+
+            ModelCallContext context =
+                    buildContext(
+                            request,
+                            runId,
+                            chunk.index(),
+                            callType);
+
+            try {
+                ChatResponse response =
+                        chatClientService.call(
+                                context,
+                                SYSTEM_PROMPT,
+                                userPrompt
+                        );
+
+                /*
+                 * 空响应也视为失败并进入重试，
+                 * 不能把空字符串登记成成功分块。
+                 */
+                return extractResponseText(response);
+
+            } catch (Exception exception) {
+                lastException = exception;
+
+                if (attempt == 1) {
+                    log.warn(
+                            "工作流回答分块首次调用失败，准备重试，"
+                                    + "runId={}，chunkIndex={}，errorType={}",
+                            runId,
+                            chunk.index(),
+                            exception.getClass()
+                                    .getSimpleName()
+                    );
+                }
+            }
+        }
+
+        throw new IllegalStateException(
+                "模型分块连续两次处理失败",
+                lastException
+        );
+    }
     private ModelCallContext buildContext(
             AgentRequest request,
             String runId,
-            int callSequence) {
+            int callSequence,
+            ModelCallType callType) {
 
         return ModelCallContext.builder()
                 .runId(runId)
-                .conversationId(
-                        request.getConversationId()
-                )
-                .userId(
-                        request.getUserId()
-                )
-                .callType(
-                        ModelCallType.ANSWER
-                )
+                .conversationId(request.getConversationId())
+                .userId(request.getUserId())
                 /*
-                 * 每个分块使用独立调用序号，
-                 * P2-3最终汇总调用将使用totalChunks + 1。
+                 * 首次调用使用ANSWER，
+                 * 重试使用ANSWER_RETRY。
                  */
+                .callType(callType)
                 .callSequence(callSequence)
-                // 中文注释：工作流回答使用当前会话选择的聊天模型。
                 .modelCode(request.getModelCode())
                 .build();
     }
@@ -212,7 +263,7 @@ public class WorkflowAnswerChunkConsumer {
                 不要生成跨分块最终结论。
                 """.formatted(
                 safeText(
-                        request.getUserQuestion(),
+                        request.getEffectiveQuestion(),
                         "用户未提供具体问题"
                 ),
                 safeText(

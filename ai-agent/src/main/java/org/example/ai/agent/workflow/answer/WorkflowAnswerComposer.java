@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.example.ai.agent.chat.entity.AgentRequest;
+import org.example.ai.agent.workflow.answer.artifact.ResultArtifactService;
 import org.example.ai.agent.workflow.answer.chunk.*;
 import org.example.ai.agent.workflow.answer.trace.WorkflowAnswerTraceRecorder;
 import org.example.ai.agent.workflow.runtime.WorkflowExecutionOutcome;
@@ -43,7 +44,10 @@ public class WorkflowAnswerComposer {
     private final WorkflowAnswerSummaryReducer
             summaryReducer;
     private final WorkflowAnswerTraceRecorder traceRecorder;
-
+    /**
+     * 保存经过字段过滤后的安全结果快照。
+     */
+    private final ResultArtifactService resultArtifactService;
     /**
      * 根据工作流执行结果生成最终中文回答。
      *
@@ -56,19 +60,26 @@ public class WorkflowAnswerComposer {
      * 6. 对分块摘要进行分层汇总；
      * 7. 记录安全的 P2 回答链路遥测。
      */
-    public String compose(
+    public WorkflowAnswerComposeResult compose(
             AgentRequest request,
             WorkflowExecutionOutcome outcome) {
 
         if (outcome == null) {
-            return "工作流没有返回查询结果。";
+            return WorkflowAnswerComposeResult.text("工作流没有返回查询结果。");
         }
-
         if (!outcome.success()) {
-            return "工作流执行失败："
-                    + safeText(outcome.errorMessage());
+            return WorkflowAnswerComposeResult.text("工作流执行失败："+ safeText(outcome.errorMessage()) );
         }
-
+        /*
+         * 中文注释：
+         * 先记录工作流实际返回的业务对象和明细数量，
+         * 后续即使字段策略、模型分块或最终汇总失败，
+         * 仍然可以判断数据是否在进入回答链路前已经缺失。
+         *
+         * 当前工作流业务查询预期使用REPORT展示。
+         * P6-2阶段会将该类型正式写入前后端消息协议。
+         */
+        traceRecorder.recordWorkflowResult(outcome.runId(),outcome,"REPORT");
         /*
          * 第一阶段：加载字段展示策略。
          *
@@ -90,9 +101,11 @@ public class WorkflowAnswerComposer {
                     exception.getClass().getSimpleName()
             );
 
-            return "查询已经完成，但字段展示策略加载失败。"
-                    + "为保护业务数据，本次未生成详细回答，"
-                    + "请管理员检查字段字典发布状态。";
+            return WorkflowAnswerComposeResult.text(
+                    "查询已经完成，但字段展示策略加载失败。"
+                            + "为保护业务数据，本次未生成详细回答，"
+                            + "请管理员检查字段字典发布状态。"
+            );
         }
 
         /*
@@ -120,6 +133,7 @@ public class WorkflowAnswerComposer {
 
         WorkflowAnswerChunkPlan chunkPlan = null;
         WorkflowAnswerChunkCoverage coverage;
+        String artifactId = null;
 
         try {
             /*
@@ -127,6 +141,13 @@ public class WorkflowAnswerComposer {
              */
             chunkPlan =chunkPlanner.plan(modelPayload );
 
+            /*
+             * 结果快照必须在调用回答模型前保存。
+             * 这样即使后续模型分块消费或汇总失败，
+             * 已经查询到的安全业务数据仍然可以保留，
+             * 后续能够重新生成报告而不必再次请求PM系统。
+             */
+            artifactId = resultArtifactService.save(request, outcome, fieldPolicy, chunkPlan);
             /*
              * 注意：
              * chunkConsumer.consume() 在整个方法中只能调用一次。
@@ -159,10 +180,6 @@ public class WorkflowAnswerComposer {
             );
         } catch (
                 WorkflowAnswerChunkConsumeException exception) {
-
-            /*
-             * 分块消费失败时，异常中携带当前覆盖率台账。
-             */
             traceRecorder.recordChunkFailure(
                     outcome.runId(),
                     chunkPlan,
@@ -171,6 +188,17 @@ public class WorkflowAnswerComposer {
                             - chunkStartedAt,
                     safeText(exception.getMessage())
             );
+
+            /*
+             * Artifact已经在模型调用前保存成功。
+             * 模型连续失败不能导致业务查询结果一起丢失。
+             */
+            if (artifactId != null) {
+                return WorkflowAnswerComposeResult.recoverable(
+                        buildRecoverableAnswer(outcome),
+                        artifactId
+                );
+            }
 
             throw exception;
         } catch (RuntimeException exception) {
@@ -229,17 +257,12 @@ public class WorkflowAnswerComposer {
                     System.currentTimeMillis()
                             - reductionStartedAt
             );
-
-            return reductionResult.finalAnswer();
+            return WorkflowAnswerComposeResult.report(
+                    reductionResult.finalAnswer(),
+                    artifactId);
         } catch (
                 WorkflowAnswerReduceException exception) {
 
-            /*
-             * 汇总器明确抛出的异常中包含：
-             * - 失败层级；
-             * - 调用序号；
-             * - 已覆盖分块编号。
-             */
             traceRecorder.recordReductionFailure(
                     outcome.runId(),
                     coverage,
@@ -249,7 +272,14 @@ public class WorkflowAnswerComposer {
                     safeText(exception.getMessage())
             );
 
-            throw exception;
+            /*
+             * 分块数据和Artifact都已经完整保存，
+             * 这里只是最终AI报告生成失败。
+             */
+            return WorkflowAnswerComposeResult.recoverable(
+                    buildRecoverableAnswer(outcome),
+                    artifactId
+            );
         } catch (RuntimeException exception) {
             /*
              * 覆盖率防御校验失败等普通运行异常，
@@ -279,7 +309,35 @@ public class WorkflowAnswerComposer {
             );
         }
     }
+    /**
+     * AI报告连续生成失败时的确定性保底回答。
+     *
+     * 不能把模型异常详情暴露给用户，
+     * 也不能让用户误以为需要重新查询PM系统。
+     */
+    private String buildRecoverableAnswer(
+            WorkflowExecutionOutcome outcome) {
 
+        String queryStatus =outcome.partialSuccess()
+                        ? "业务查询已完成，但部分业务记录查询失败；"
+                          + "成功返回的数据已经完整保存。"
+                        : "业务查询已成功完成，查询结果已经完整保存。";
+
+        return """
+            ## 查询结果已保存
+
+            %s
+
+            本次 AI 报告生成暂时失败，但不需要重新查询业务系统。
+
+            你可以继续输入：
+
+            - 根据刚才的数据重新生成报告
+            - 汇总刚才的数据
+            - 统计刚才的某个金额字段
+            - 分析刚才查询结果中的异常情况
+            """.formatted(queryStatus);
+    }
     private String safeText(String value) {
         return value == null
                 || value.isBlank()

@@ -51,12 +51,26 @@ public enum ModelCallType {
      */
     WORKFLOW_PLANNER,
 
-/**
- * 已选工作流参数提取。
- */
+    /**
+     * 已选工作流参数提取。
+     */
     WORKFLOW_PARAMETER_EXTRACTOR,
     /**
      * 中文注释：判断当前问题是否依赖上一轮会话，并生成独立完整问题。
      */
     CONTEXT_REWRITE,
+    /**
+     * 上一轮结果本地统计规划。
+     *
+     * 大模型只选择统计方式和字段，
+     * 不读取完整业务数据，也不执行金额计算。
+     */
+    RESULT_ANALYSIS_PLANNER,
+    /**
+     * 工作流回答模型重试。
+     *
+     * 与ANSWER分开记录，避免正常调用和重试调用
+     * 使用相同callSequence时无法区分。
+     */
+    ANSWER_RETRY,
 }

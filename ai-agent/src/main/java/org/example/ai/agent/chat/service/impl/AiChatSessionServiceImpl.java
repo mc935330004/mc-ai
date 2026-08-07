@@ -305,10 +305,7 @@ public class AiChatSessionServiceImpl implements AiChatSessionService {
         );
 
         if (session == null) {
-            throw new BusinessException(
-                    ErrorCode.BAD_REQUEST,
-                    "会话不存在或无权访问"
-            );
+            throw new BusinessException( ErrorCode.BAD_REQUEST,"会话不存在或无权访问");
         }
         return session;
     }

@@ -21,5 +21,10 @@ public class BusinessConversationState {
     private String capabilityCode;
     private Map<String, Object> lastInput = new LinkedHashMap<>();
     private String lastRunId;
-    private Long factMessageId;
+    /**
+     * 中文注释：
+     * 上一轮工作流安全结果快照ID。
+     * 后续追问统计时直接读取该快照，不再重新路由工作流。
+     */
+    private String resultArtifactId;
 }

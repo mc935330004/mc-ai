@@ -30,6 +30,7 @@ import org.example.ai.agent.tool.ToolExecutor;
 import org.example.ai.agent.tool.ToolResult;
 import org.example.ai.agent.trace.service.RunTraceService;
 import org.example.ai.agent.vo.ActionPreviewVO;
+import org.example.ai.agent.workflow.answer.WorkflowAnswerComposeResult;
 import org.example.ai.agent.workflow.answer.WorkflowAnswerComposer;
 import org.example.ai.agent.workflow.plan.WorkflowPlan;
 import org.example.ai.agent.workflow.runtime.WorkflowExecutionCommand;
@@ -40,10 +41,10 @@ import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import org.example.ai.agent.chat.service.AiChatSessionService;
-// 中文注释：用于保存成功业务查询的结构化会话状态。
 import org.example.ai.agent.chat.memory.service.ConversationStateRecorder;
-// 中文注释：负责在路由前补全省略式追问。
 import org.example.ai.agent.chat.memory.service.ConversationContextResolver;
+import org.example.ai.agent.workflow.answer.artifact.ResultArtifactAnalysisResult;
+import org.example.ai.agent.workflow.answer.artifact.ResultArtifactAnalysisService;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -58,7 +59,10 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
 
     private final Executor agentChatExecutor;
     private final WorkflowExecutionFacade workflowExecutionFacade;
-
+    /**
+     * 中文注释：基于上一轮安全结果快照回答追问。
+     */
+    private final ResultArtifactAnalysisService resultArtifactAnalysisService;
     private final WorkflowAnswerComposer workflowAnswerComposer;
     /**
      * 意图路由器。
@@ -129,7 +133,8 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
             ConversationStateRecorder conversationStateRecorder,
             ConversationContextResolver conversationContextResolver,
             // 中文注释：注入会话服务，统一保存助手回答。
-            AiChatSessionService aiChatSessionService
+            AiChatSessionService aiChatSessionService,
+            ResultArtifactAnalysisService resultArtifactAnalysisService
     ) {
         this.streamSessionFactory = streamSessionFactory;
         this.knowledgeDocumentQueryService = knowledgeDocumentQueryService;
@@ -146,6 +151,7 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
         this.conversationStateRecorder = conversationStateRecorder;
         this.conversationContextResolver = conversationContextResolver;
         this.aiChatSessionService = aiChatSessionService;
+        this.resultArtifactAnalysisService = resultArtifactAnalysisService;
 
     }
     @Override
@@ -198,6 +204,55 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                 );
                 runTraceService.markSuccess(runId,System.currentTimeMillis() - startTime);
                 stream.complete();
+                return;
+            }
+            /*
+             * 结果追问必须在普通工作流和能力路由之前处理。
+             */
+            if (request.isResultAnalysisRequest()) {
+                runTraceService.updateRouteType(runId,RouteType.RESULT_ANALYSIS );
+
+                /*
+                 * 模型识别为结果分析，
+                 * 但当前会话没有可复用快照时，
+                 * 直接给出下一步操作指引。
+                 *
+                 * 禁止继续匹配其他工作流或者能力接口。
+                 */
+                if (!StringUtils.hasText(request.getResultArtifactId())) {
+
+                    publishAssistantAnswer(
+                            request,
+                            stream,
+                            runId,
+                            "当前会话没有可复用的查询结果。"
+                                    + "请先查询需要分析的业务数据，"
+                                    + "然后再进行汇总、统计、筛选或对比。"
+                    );
+
+                    runTraceService.markSuccess(runId,
+                            System.currentTimeMillis()- startTime);
+                    stream.complete();
+                    return;
+                }
+
+                stream.send("thinking",
+                        AgentStreamEvent.of(
+                                runId,
+                                AgentStreamEventType
+                                        .THINKING
+                                        .name(),
+                                "正在分析上一轮查询结果。",
+                                null
+                        )
+                );
+                executeResultAnalysis(
+                        request,
+                        stream,
+                        runId
+                );
+
+                runTraceService.markSuccess(runId,System.currentTimeMillis()- startTime);
                 return;
             }
             IntentResult intentResult =intentRouter.route(request, runId);
@@ -389,6 +444,27 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
             stream.error(exception);
         }
     }
+    /**
+     * 基于上一轮结果快照回答追问。
+     *
+     * 不调用工作流执行器，
+     * 不调用ToolExecutor，
+     * 不请求PM业务接口。
+     */
+    private void executeResultAnalysis( AgentRequest request,AgentStreamSession stream,String runId) throws Exception {
+        ResultArtifactAnalysisResult result = resultArtifactAnalysisService.analyze(request,runId);
+        ChatTextPayloadVO payload =ChatTextPayloadVO.builder().presentationType("REPORT")
+                        .presentationTitle(result.reportTitle() )
+                        .build();
+        publishAssistantAnswer(
+                request,
+                stream,
+                runId,
+                result.answer(),
+                payload
+        );
+        stream.complete();
+    }
 
     /**
      * 执行业务工具计划。
@@ -447,10 +523,11 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                             factPreview
                     )
             );
-        // 中文注释：FACTS 已实时发送，最终 TEXT 同时保存快照供历史会话恢复。
-        ChatTextPayloadVO factPayload = ChatTextPayloadVO.builder()
-                .facts(factPreview)
-                .build();
+        ChatTextPayloadVO factPayload =ChatTextPayloadVO.builder()
+                        .facts(factPreview)
+                        .presentationType("REPORT")
+                        .presentationTitle("业务数据分析报告")
+                        .build();
 
         // 5. 如果存在失败步骤，仍保留已提取的事实卡片。
         ToolResult failedResult = findFirstFailedResult(toolResults);
@@ -576,11 +653,9 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
         // 2. 调用现有 RAG 服务。
         KnowledgeDocumentQueryResponse ragResponse =executeRagQuery(request, runId);
 
-        // 中文注释：引用既实时发送，也写入 TEXT 载荷供历史会话恢复。
-        ChatTextPayloadVO ragPayload = ChatTextPayloadVO.builder()
-                .references(ragResponse.references())
-                .build();
-
+        ChatTextPayloadVO ragPayload =ChatTextPayloadVO.builder().references(ragResponse.references())
+                        .presentationType("MARKDOWN")
+                        .build();
         publishAssistantAnswer(
                 request,
                 stream,
@@ -828,26 +903,64 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                 )
         );
 
-        String answer =
-                workflowAnswerComposer.compose(
-                        request,
-                        outcome
-                );
+        WorkflowAnswerComposeResult composeResult =workflowAnswerComposer.compose(request, outcome);
+        String answer = composeResult.answer();
 
-        // 中文注释：工作流执行结果写入 TEXT 载荷，历史会话恢复后继续展示结果卡片。
+        /*
+         * 中文注释：
+         * 工作流业务查询明确使用REPORT展示。
+         * 报告标题直接使用工作流名称，不再由前端分析回答内容。
+         */
+        String reportTitle =StringUtils.hasText(outcome.workflowName())
+                        ? outcome.workflowName()
+                        : "业务数据分析报告";
+
+        /*
+         * AI报告生成成功才使用REPORT组件。
+         * 保底提示使用普通Markdown，避免空报告卡片。
+         */
+        String presentationType =
+                composeResult.reportGenerated()
+                        ? "REPORT"
+                        : "MARKDOWN";
+
+        String presentationTitle =
+                composeResult.reportGenerated()
+                        ? reportTitle
+                        : "查询结果已保存";
+
         ChatTextPayloadVO workflowPayload = ChatTextPayloadVO.builder()
-                .workflow(outcome)
-                .build();
-        publishAssistantAnswer(request, stream, runId, answer, workflowPayload);
-        // 中文注释：工作流结果保存成功后，记录工作流身份和本轮实际输入。
+                        .workflow(outcome)
+                        .presentationType(
+                                presentationType
+                        )
+                        .presentationTitle(
+                                presentationTitle
+                        )
+                        .build();
+
+        /*
+         * 必须先保存会话状态和Artifact关联，
+         * 再发送SSE。
+         *
+         * 即使浏览器断开、刷新或者网络中断，
+         * 下一轮仍能找到上一轮完整查询结果。
+         */
         conversationStateRecorder.recordWorkflowResult(
                 request,
                 plan,
                 outcome,
-                runId
+                runId,
+                composeResult.artifactId()
+        );
+        publishAssistantAnswer(
+                request,
+                stream,
+                runId,
+                answer,
+                workflowPayload
         );
         stream.complete();
-
         return outcome;
     }
     /**
@@ -871,7 +984,16 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                 payload == null ? null : objectMapper.writeValueAsString(payload)
         );
 
-        stream.publishAnswer(visibleAnswer);
+        /*
+         * 中文注释：
+         * 实时SSE与历史消息使用同一份展示协议。
+         */
+        stream.publishAnswer(visibleAnswer,
+                payload == null ? "MARKDOWN"
+                        : payload.getPresentationType(),
+                payload == null ? null
+                        : payload.getPresentationTitle()
+        );
     }
     /**
      * 中文注释：过滤明确属于系统执行过程的信息，保留业务结果和统计数据。

@@ -255,3 +255,92 @@ CREATE TABLE ai_conversation_state (
        ON UPDATE CURRENT_TIMESTAMP COMMENT '更新时间',
    INDEX idx_conversation_state_user (user_id)
 ) COMMENT='AI会话业务状态表';
+
+-- ============================================================
+-- P6-1：工作流安全结果快照
+-- 说明：
+-- 1. 只保存经过字段隐藏策略过滤后的数据；
+-- 2. 不保存 Token、Authorization、Cookie；
+-- 3. 一个 runId 对应一份结果快照；
+-- 4. expires_at 用于后续清理过期数据。
+-- ============================================================
+
+CREATE TABLE ai_result_artifact
+(
+    id                       VARCHAR(32)  NOT NULL COMMENT '结果快照ID',
+    run_id                   VARCHAR(64)  NOT NULL COMMENT '工作流运行ID',
+    session_id               VARCHAR(64)  NOT NULL COMMENT '聊天会话ID',
+    user_id                  VARCHAR(64)  NOT NULL COMMENT '业务用户ID',
+
+    workflow_code            VARCHAR(128) NOT NULL COMMENT '工作流编码',
+    workflow_name            VARCHAR(128) NULL COMMENT '工作流名称',
+    workflow_version_id      BIGINT       NULL COMMENT '工作流版本ID',
+
+    status                   VARCHAR(16)  NOT NULL COMMENT 'WRITING/COMPLETE',
+    partial_success          TINYINT(1)   NOT NULL DEFAULT 0 COMMENT '是否部分成功',
+    data_complete            TINYINT(1)   NOT NULL DEFAULT 0 COMMENT '工作流业务数据是否完整',
+
+    top_level_total_count    BIGINT       NOT NULL DEFAULT 0 COMMENT '顶层业务对象总数',
+    top_level_success_count  BIGINT       NOT NULL DEFAULT 0 COMMENT '顶层成功数',
+    top_level_failure_count  BIGINT       NOT NULL DEFAULT 0 COMMENT '顶层失败数',
+    top_level_skipped_count  BIGINT       NOT NULL DEFAULT 0 COMMENT '顶层跳过数',
+
+    descendant_total_count   BIGINT       NOT NULL DEFAULT 0 COMMENT '明细总数',
+    descendant_success_count BIGINT       NOT NULL DEFAULT 0 COMMENT '明细成功数',
+    descendant_failure_count BIGINT       NOT NULL DEFAULT 0 COMMENT '明细失败数',
+    descendant_skipped_count BIGINT       NOT NULL DEFAULT 0 COMMENT '明细跳过数',
+
+    planned_chunk_count      INT          NOT NULL DEFAULT 0 COMMENT '计划分块数',
+    stored_chunk_count       INT          NOT NULL DEFAULT 0 COMMENT '实际保存分块数',
+    source_char_count        INT          NOT NULL DEFAULT 0 COMMENT '安全结果原始字符数',
+    chunk_char_count         INT          NOT NULL DEFAULT 0 COMMENT '分块JSON字符总数',
+
+    payload_checksum         CHAR(64)     NOT NULL COMMENT '全部分块有序摘要',
+    field_semantics_json     LONGTEXT     NULL COMMENT '字段中文语义快照',
+
+    expires_at               DATETIME     NOT NULL COMMENT '过期时间',
+    created_at               DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    completed_at             DATETIME     NULL COMMENT '快照写入完成时间',
+
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_result_artifact_run (run_id),
+    KEY idx_result_artifact_session (
+        user_id,
+        session_id,
+        created_at
+    ),
+    KEY idx_result_artifact_expire (
+        expires_at
+    )
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4
+  COMMENT = '工作流安全结果快照';
+
+
+CREATE TABLE ai_result_artifact_chunk
+(
+    id              BIGINT      NOT NULL AUTO_INCREMENT COMMENT '主键ID',
+    artifact_id     VARCHAR(32) NOT NULL COMMENT '结果快照ID',
+    chunk_no        INT         NOT NULL COMMENT '分块序号，从1开始',
+
+    source_pointer  VARCHAR(512) NOT NULL COMMENT '数据在安全结果中的JSON Pointer',
+    start_index     INT          NULL COMMENT '数组起始下标',
+    end_index       INT          NULL COMMENT '数组结束下标',
+
+    payload_json    LONGTEXT     NOT NULL COMMENT '经过字段过滤后的合法JSON分块',
+    payload_sha256  CHAR(64)     NOT NULL COMMENT '当前分块SHA-256',
+    char_count      INT          NOT NULL COMMENT '当前分块字符数',
+
+    created_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+
+    PRIMARY KEY (id),
+    UNIQUE KEY uk_result_artifact_chunk (
+        artifact_id,
+        chunk_no
+        ),
+    KEY idx_result_chunk_artifact (
+        artifact_id
+    )
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4
+  COMMENT = '工作流安全结果快照分块';

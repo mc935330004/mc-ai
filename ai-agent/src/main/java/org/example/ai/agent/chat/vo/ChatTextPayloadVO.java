@@ -23,4 +23,17 @@ public class ChatTextPayloadVO {
 
     /** 中文注释：用于历史会话恢复工作流执行结果。 */
     private WorkflowExecutionOutcome workflow;
+
+    /**
+     * 消息展示类型。
+     *
+     * REPORT：使用AI报告组件展示；
+     * MARKDOWN：使用普通Markdown组件展示。
+     */
+    private String presentationType;
+
+    /**
+     * 报告标题。
+     */
+    private String presentationTitle;
 }

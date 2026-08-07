@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
 import org.example.ai.agent.common.exception.BusinessException;
+import org.example.ai.agent.sso.AgentSessionService;
 import org.springframework.http.HttpHeaders;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
@@ -32,7 +33,7 @@ public class HeaderCurrentUserProvider implements CurrentUserProvider {
     private final HttpServletRequest request;
     private final ObjectMapper objectMapper;
     private final RestClient restClient;
-
+    private final AgentSessionService agentSessionService;
     @Override
     public String getRequiredUserId() {
         return getRequiredContext() .userId();
@@ -43,15 +44,22 @@ public class HeaderCurrentUserProvider implements CurrentUserProvider {
         if (!StringUtils.hasText(permission)) {
             throw new IllegalArgumentException("权限编码不能为空");
         }
-
-        VerifiedUserContext context = getRequiredContext();
-
-        if (!context.permissions().contains(permission.trim())) {
+        if (!hasPermission(permission)) {
             throw new BusinessException(
                     403,
                     "当前用户没有操作权限"
             );
         }
+    }
+
+    @Override
+    public boolean hasPermission(String permission) {
+        if (!StringUtils.hasText(permission)) {
+            return false;
+        }
+        return getRequiredContext()
+                .permissions()
+                .contains(permission.trim());
     }
 
     /**
@@ -95,17 +103,14 @@ public class HeaderCurrentUserProvider implements CurrentUserProvider {
             );
 
         } catch (RestClientResponseException exception) {
-            int status =
-                    exception.getStatusCode()
-                            .value();
-
+            int status =exception.getStatusCode().value();
             if (status == 401 || status == 403) {
-                throw new BusinessException(
-                        401,
-                        "业务系统登录状态已失效或没有访问权限"
-                );
+                /*
+                 * PM Token失效后立即清除Agent会话。
+                 */
+                agentSessionService.deleteCurrentSession();
+                throw new BusinessException(401,"业务系统登录状态已失效或没有访问权限");
             }
-
             throw new BusinessException(
                     502,
                     "业务系统用户身份校验失败"
@@ -118,14 +123,11 @@ public class HeaderCurrentUserProvider implements CurrentUserProvider {
             );
         }
 
-        JsonNode data =
-                response == null
+        JsonNode data =response == null
                         ? null
                         : response.path("data");
 
-        String userId =
-                data == null
-                        ? null
+        String userId =data == null ? null
                         : data.path("sysUser")
                         .path("username")
                         .asText(null);
@@ -136,31 +138,18 @@ public class HeaderCurrentUserProvider implements CurrentUserProvider {
                     "业务系统未返回有效的当前用户身份"
             );
         }
-
-        Set<String> permissions =
-                new HashSet<>();
-
-        JsonNode permissionArray =
-                data.path("permissions");
-
+        Set<String> permissions =new HashSet<>();
+        JsonNode permissionArray =data.path("permissions");
         if (permissionArray.isArray()) {
-            for (JsonNode item :
-                    permissionArray) {
-                String value =
-                        item.asText(null);
-
+            for (JsonNode item : permissionArray) {
+                String value = item.asText(null);
                 if (StringUtils.hasText(value)) {
-                    permissions.add(
-                            value.trim()
-                    );
+                    permissions.add(value.trim());
                 }
             }
         }
 
-        return new VerifiedUserContext(
-                userId.trim(),
-                Set.copyOf(permissions)
-        );
+        return new VerifiedUserContext(userId.trim(),Set.copyOf(permissions));
     }
 
     /**
@@ -170,20 +159,20 @@ public class HeaderCurrentUserProvider implements CurrentUserProvider {
      */
     @Override
     public String getRequiredAuthorization() {
-        String authorization =
-                request.getHeader(
-                        HttpHeaders.AUTHORIZATION
-                );
-
-        if (!StringUtils.hasText(
-                authorization)) {
-            throw new BusinessException(
-                    401,
-                    "当前请求缺少 Authorization"
-            );
+        /*
+         * 兼容原有接口调用方式：
+         * 如果请求头已经携带Authorization，继续使用原有Token。
+         */
+        String authorization =request.getHeader(HttpHeaders.AUTHORIZATION);
+        if (StringUtils.hasText(authorization)) {
+            return authorization.trim();
         }
-
-        return authorization.trim();
+        /*
+         * SSO方式：
+         * 浏览器不再传PM Token，
+         * 从Agent服务端Redis会话中恢复PM Token。
+         */
+        return agentSessionService.getRequiredAuthorization();
     }
 
     /**

@@ -58,6 +58,15 @@ public class AgentStreamSession {
      * 最终完整 Markdown。
      */
     private volatile String finalMarkdown = "";
+    /**
+     * 中文注释：当前回答最终展示类型。
+     */
+    private volatile String finalPresentationType ="MARKDOWN";
+
+    /**
+     * 中文注释：当前回答报告标题。
+     */
+    private volatile String finalPresentationTitle;
 
     public AgentStreamSession(
             SseEmitter emitter,
@@ -114,52 +123,124 @@ public class AgentStreamSession {
     /**
      * 发布最终回答。
      *
-     * v1：保留原有单个answer事件。
-     * v2：发送start、delta和snapshot。
+     * presentationType由后端明确决定，
+     * 前端不再检查Markdown内容猜测报告类型。
      */
-    public void publishAnswer(String markdown) throws Exception {
-        finalMarkdown = markdown == null ? "" : markdown;
+    public void publishAnswer(
+            String markdown,
+            String presentationType,
+            String presentationTitle)
+            throws Exception {
+        finalMarkdown = markdown == null ? "": markdown;
 
         /*
-         * 必须在v1/v2分支前记录，
-         * 保证两个协议都能统计回答长度。
+         * 中文注释：
+         * 当前协议只开放REPORT和MARKDOWN。
+         * 其他值统一降级为普通Markdown。
          */
-        agentMetrics.recordAnswerLength(protocolVersion,finalMarkdown.length());
+        finalPresentationType =
+                "REPORT".equalsIgnoreCase(presentationType)
+                        ? "REPORT"
+                        : "MARKDOWN";
+
+        String normalizedTitle =presentationTitle == null ? null
+                        : presentationTitle.trim();
+
+        /*
+         * 中文注释：
+         * 报告标题不允许无限增长。
+         */
+        finalPresentationTitle =normalizedTitle == null
+                        || normalizedTitle.isBlank()
+                        ? null
+                        : normalizedTitle.substring(
+                        0,
+                        Math.min(normalizedTitle.length(),128 ));
+
+        agentMetrics.recordAnswerLength(
+                protocolVersion,
+                finalMarkdown.length()
+        );
+
+        /*
+         * v1协议使用单个ANSWER事件。
+         */
         if (protocolVersion == 1) {
-            send("answer",
-                AgentStreamEvent.of(
-                        runId,
-                        "ANSWER",
-                        finalMarkdown,
-                        null)
+            send("answer",AgentStreamEvent.builder()
+                            .runId(runId)
+                            .type("ANSWER")
+                            .content(finalMarkdown)
+                            .presentationType(
+                                    finalPresentationType
+                            )
+                            .presentationTitle(
+                                    finalPresentationTitle
+                            )
+                            .build()
             );
             return;
         }
 
+        /*
+         * v2开始事件携带展示协议。
+         */
         send("answer_start",
-                AgentStreamEvent.of(
-                        runId,
-                        AgentStreamEventType.ANSWER_START.name(),
-                        "",
-                        null) );
+                AgentStreamEvent.builder()
+                        .runId(runId)
+                        .type(AgentStreamEventType.ANSWER_START.name())
+                        .content("")
+                        .presentationType(
+                                finalPresentationType
+                        )
+                        .presentationTitle(
+                                finalPresentationTitle
+                        )
+                        .build()
+        );
+
         List<String> chunks =
-                markdownChunker.split(finalMarkdown,
-                        properties.getChunkSize());
+                markdownChunker.split(
+                        finalMarkdown,
+                        properties.getChunkSize()
+                );
 
         for (String chunk : chunks) {
             send("answer_delta",
-                    AgentStreamEvent.of( runId,AgentStreamEventType .ANSWER_DELTA.name(),
+                    AgentStreamEvent.of( runId,
+                            AgentStreamEventType.ANSWER_DELTA.name(),
                             chunk,
                             null));
         }
 
+        /*
+         * 最终快照再次携带展示协议，
+         * 防止ANSWER_START事件丢失。
+         */
         if (properties.isSnapshotEnabled()) {
-            send("answer_snapshot",
-                    AgentStreamEvent.builder().runId(runId)
-                            .type(AgentStreamEventType.ANSWER_SNAPSHOT.name()
-                            ).content(finalMarkdown)
-                            .contentLength(finalMarkdown.length())
-                            .contentHash(ContentHashUtils.sha256(finalMarkdown))
+            send(
+                    "answer_snapshot",
+                    AgentStreamEvent.builder()
+                            .runId(runId)
+                            .type(
+                                    AgentStreamEventType
+                                            .ANSWER_SNAPSHOT
+                                            .name()
+                            )
+                            .content(finalMarkdown)
+                            .contentLength(
+                                    finalMarkdown.length()
+                            )
+                            .contentHash(
+                                    ContentHashUtils.sha256(
+                                            finalMarkdown
+                                    )
+                            )
+                            .presentationType(
+                                    finalPresentationType
+                            )
+                            .presentationTitle(
+                                    finalPresentationTitle
+                            )
                             .build()
             );
         }
@@ -205,6 +286,8 @@ public class AgentStreamSession {
                             .contentLength(finalMarkdown.length())
                             .contentHash(contentHash)
                             .timestamp(System.currentTimeMillis())
+                            .presentationType( finalPresentationType)
+                            .presentationTitle(finalPresentationTitle)
                             .build();
 
             emitter.send(SseEmitter.event()

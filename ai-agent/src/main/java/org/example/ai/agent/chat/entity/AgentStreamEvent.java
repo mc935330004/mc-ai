@@ -76,6 +76,19 @@ public class AgentStreamEvent {
     private String contentHash;
 
     /**
+     * 中文注释：当前回答的展示类型。
+     *
+     * REPORT：报告组件；
+     * MARKDOWN：普通Markdown。
+     */
+    private String presentationType;
+
+    /**
+     * 中文注释：报告标题。
+     */
+    private String presentationTitle;
+
+    /**
      * 事件产生时间戳。
      */
     private Long timestamp;

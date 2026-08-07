@@ -7,10 +7,12 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.example.ai.agent.trace.entity.RunStep;
 import org.example.ai.agent.trace.mapper.RunStepMapper;
+import org.example.ai.agent.workflow.answer.WorkflowResultTraceData;
 import org.example.ai.agent.workflow.answer.chunk.WorkflowAnswerChunkCoverage;
 import org.example.ai.agent.workflow.answer.chunk.WorkflowAnswerChunkPlan;
 import org.example.ai.agent.workflow.answer.chunk.WorkflowAnswerReduceException;
 import org.example.ai.agent.workflow.answer.chunk.WorkflowAnswerReductionResult;
+import org.example.ai.agent.workflow.runtime.WorkflowExecutionOutcome;
 import org.springframework.stereotype.Component;
 
 /**
@@ -32,11 +34,53 @@ public class WorkflowAnswerTraceRecorder {
 
     public static final String REDUCTION_STEP_TYPE =
             "WORKFLOW_ANSWER_REDUCE";
-
+    /**
+     * 工作流业务结果准备完成。
+     *
+     * 该步骤发生在字段过滤、模型分块和最终汇总之前，
+     * 用于判断进入回答链路时到底有多少业务记录。
+     */
+    public static final String RESULT_STEP_TYPE ="WORKFLOW_RESULT_PREPARED";
     private final RunStepMapper runStepMapper;
 
     private final ObjectMapper objectMapper;
+    /**
+     * 记录进入回答链路之前的工作流业务结果数量。
+     *
+     * 只写入计数和状态，不保存任何原始业务数据。
+     */
+    public void recordWorkflowResult(
+            String runId,
+            WorkflowExecutionOutcome outcome,
+            String expectedPresentationType) {
 
+        WorkflowResultTraceData data =WorkflowResultTraceData.from(
+                        outcome,
+                        expectedPresentationType
+                );
+
+        String status;
+
+        if (outcome == null || !outcome.success()) {
+            status = "FAILED";
+        } else if (outcome.partialSuccess()) {
+            status = "PARTIAL_SUCCESS";
+        } else {
+            status = "SUCCESS";
+        }
+        recordSafely(
+                runId,
+                RESULT_STEP_TYPE,
+                "工作流业务结果准备",
+                "answer/result",
+                status,
+                data,
+                null,
+                outcome == null
+                        ? 0L
+                        : outcome.durationMs()
+        );
+    }
     public void recordChunkSuccess(
             String runId,
             WorkflowAnswerChunkPlan plan,

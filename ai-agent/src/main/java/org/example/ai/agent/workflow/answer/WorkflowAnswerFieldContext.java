@@ -1,14 +1,13 @@
 package org.example.ai.agent.workflow.answer;
 
 /**
- * 发送给工作流回答模型的字段语义。
+ * 发送给工作流回答和统计模块的字段语义。
  *
- * @param capabilityCode 字段所属能力，仅供模型区分数据来源
- * @param fieldName      英文机器字段名称
- * @param label          中文展示名称
- * @param meaning        业务含义
- * @param format         展示格式，例如 amount、date、percent
- * @param group          字段所属展示分组
+ * 重要原则：
+ * 1. fieldName、fieldPath用于程序定位字段；
+ * 2. label、meaning用于大模型理解中文业务含义；
+ * 3. aggregatable控制该字段是否允许参与金额、数量等统计；
+ * 4. 这里只保存允许发送给模型的字段，不包含隐藏字段。
  */
 public record WorkflowAnswerFieldContext(
         String capabilityCode,
@@ -16,5 +15,24 @@ public record WorkflowAnswerFieldContext(
         String label,
         String meaning,
         String format,
-        String group) {
+        String group,
+
+        /**
+         * 字段在能力返回结果中的完整路径。
+         *
+         * 示例：
+         * $.data.settlementInfos[].settlements[].thisAmount
+         */
+        String fieldPath,
+
+        /**
+         * 字段类型，例如：
+         * string、number、integer。
+         */
+        String fieldType,
+
+        /**
+         * 是否允许参与聚合统计。
+         */
+        boolean aggregatable) {
 }

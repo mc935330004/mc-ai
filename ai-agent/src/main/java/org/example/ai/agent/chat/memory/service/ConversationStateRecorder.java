@@ -122,8 +122,7 @@ public class ConversationStateRecorder {
             AgentRequest request,
             WorkflowPlan plan,
             WorkflowExecutionOutcome outcome,
-            String runId
-    ) {
+            String runId,String artifactId) {
         if (outcome == null
                 || (!outcome.success() && !outcome.partialSuccess())) {
             return;
@@ -150,7 +149,11 @@ public class ConversationStateRecorder {
                         ? outcome.runId()
                         : runId
         );
-
+        /*
+         * 中文注释：
+         * 只保存结果快照ID，不把完整业务数据写入会话状态JSON。
+         */
+        state.setResultArtifactId(artifactId);
         saveSafely(request, state);
     }
 

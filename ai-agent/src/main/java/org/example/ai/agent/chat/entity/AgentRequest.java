@@ -111,7 +111,20 @@ public class AgentRequest {
      */
     @JsonIgnore
     private boolean contextReset;
+    /**
+     * 中文注释：上一轮工作流安全结果快照ID。
+     *
+     * 只能由后端会话状态注入，
+     * 禁止客户端通过请求JSON指定。
+     */
+    @JsonIgnore
+    private String resultArtifactId;
 
+    /**
+     * 中文注释：当前问题是否属于上一轮结果分析追问。
+     */
+    @JsonIgnore
+    private boolean resultAnalysisRequest;
     /**
      * 中文注释：路由和检索优先使用补全问题，用户展示仍使用原始问题。
      */

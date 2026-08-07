@@ -28,7 +28,7 @@ spring:
 #        base-url: https://api.deepseek.com
         base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
 #        api-key: ${DEEPSEEK_API_KEY}
-        api-key: ${GLM_API_KEY}
+        api-key: ${AL_API_KEY}
         model: deepseek-v4-flash
 #        model: glm-5.2
         temperature: 0.2 # 企业数据回答强调稳定性，降低随机性和无关扩写
@@ -175,6 +175,30 @@ agent:
     min-recall-score: 0.06
     min-confidence: 0.75
     min-score-margin: 0.12
+  sso:
+    enabled: true
+#    pm-base-url: http://192.168.8.251:9999
+    pm-base-url: http://pm.s-ic.cn
+    exchange-path: /pm/ai-agent/sso/exchange
+    client-id: mc-ai-agent
+    client-secret: Dz6idVg6MjSsS7RqBiWTe7q90Lvrz6nw3mwDa17uCwM=
+    session-ttl-seconds: 1800
+    session-cookie-name: AGENT_SESSION
+    # 本地HTTP使用false，正式HTTPS使用true
+    cookie-secure: false
+    cookie-same-site: Lax
+    # Base64编码的32字节AES密钥
+    token-encryption-key: gElVCTM7xBc5rsoVGgzjvkp4cbL6UnRXYuHrWzYSfLY=
+
+    # 只填写Origin，不要填写路径或末尾斜杠
+    allowed-browser-origins:
+      - http://ai-agent.s-ic.cn
+      - http://pm.s-ic.cn
+    pm-login-url: http://pm.s-ic.cn/pm-web/#/login
+    pm-ai-assistant-url: http://ai-agent.s-ic.cn/pm-web/
+#    pm-login-url: http://192.168.8.251:8081/pm-web/#/login
+#    pm-ai-assistant-url: http://192.168.8.251:8081/pm-web/
+
 ai:
   graph:
     runtime:
@@ -209,3 +233,7 @@ ai:
         max-group-chars: 12000
         # 防止异常模型输出导致无限递归汇总。
         max-levels: 10
+      artifact:
+        # 安全结果快照保留时间，单位小时。
+        # 开发环境建议24小时，正式环境可按审计要求调整。
+        retention-hours: 24

@@ -159,8 +159,22 @@ public class WorkflowAnswerFieldContextResolver {
                             dictionary.getCapabilityCode()
                     );
 
+            String fieldPath =
+                    trimToNull(
+                            dictionary.getFieldPath()
+                    );
+
+            /*
+             * 同一个能力中可能存在名称相同、路径不同的字段。
+             * 因此不能再使用 capabilityCode + fieldName 去重，
+             * 必须优先使用完整字段路径。
+             */
             String uniqueKey =
-                    capabilityCode + ":" + fieldName;
+                    capabilityCode
+                            + ":"
+                            + (StringUtils.hasText(fieldPath)
+                            ? fieldPath
+                            : fieldName);
 
             visibleFields.putIfAbsent(
                     uniqueKey,
@@ -169,21 +183,21 @@ public class WorkflowAnswerFieldContextResolver {
                             fieldName,
                             StringUtils.hasText(
                                     dictionary.getFieldCnName())
-                                    ? dictionary
-                                    .getFieldCnName()
-                                    .trim()
+                                    ? dictionary.getFieldCnName().trim()
                                     : fieldName,
-                            trimToNull(
-                                    dictionary
-                                            .getBusinessMeaning()
-                            ),
-                            trimToNull(
-                                    dictionary
-                                            .getDisplayFormat()
-                            ),
-                            trimToNull(
-                                    dictionary
-                                            .getDisplayGroup()
+                            trimToNull( dictionary.getBusinessMeaning()),
+                            trimToNull(dictionary.getDisplayFormat()),
+                            trimToNull(dictionary.getDisplayGroup()),
+                            fieldPath,
+                            trimToNull(dictionary.getFieldType()),
+
+                            /*
+                             * 当前项目字段字典约定：
+                             * aggregatable = 0 表示允许聚合；
+                             * aggregatable = 1 表示不允许聚合。
+                             */
+                            Integer.valueOf(0).equals(
+                                    dictionary.getAggregatable()
                             )
                     )
             );

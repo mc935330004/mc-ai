@@ -265,6 +265,12 @@ public class WorkflowAnswerSummaryReducer {
         return List.copyOf(groups);
     }
 
+    /**
+     * 执行分层汇总模型调用。
+     *
+     * 每个汇总节点最多尝试两次。
+     * 重试只使用同一批摘要，不读取PM业务系统。
+     */
     private String callModel(
             AgentRequest request,
             String runId,
@@ -275,12 +281,12 @@ public class WorkflowAnswerSummaryReducer {
             boolean finalCall,
             ReductionState state) {
 
-        int callSequence =
-                state.allocateCallSequence();
+        int callSequence =state.allocateCallSequence();
 
-        List<Integer> sourceIndexes = collectIndexes(items);
+        List<Integer> sourceIndexes =collectIndexes(items);
 
-        String userPrompt = buildPrompt(
+        String userPrompt =
+                buildPrompt(
                         request,
                         fieldSemanticsJson,
                         coverage,
@@ -289,51 +295,88 @@ public class WorkflowAnswerSummaryReducer {
                         finalCall
                 );
 
-        ModelCallContext context =
-                ModelCallContext.builder()
-                        .runId(runId)
-                        .conversationId(
-                                request.getConversationId()
-                        )
-                        .userId(
-                                request.getUserId()
-                        )
-                        .callType(
-                                ModelCallType.ANSWER
-                        )
-                        .callSequence(callSequence)
-                        // 中文注释：工作流回答使用当前会话选择的聊天模型。
-                        .modelCode(request.getModelCode())
-                        .build();
+        Exception lastException = null;
 
-        try {
-            ChatResponse response =chatClientService.call(
-                            context,
-                            SYSTEM_PROMPT,
-                            userPrompt);
+        for (int attempt = 1; attempt <= 2;attempt++) {
+            if (attempt == 2) {
+                state.recordRetry();
+            }
 
-            return extractText(response);
-        } catch (Exception exception) {
-            log.error(
-                    "工作流回答分层汇总失败，runId={}，level={}，callSequence={}，errorType={}",
-                    runId,
-                    level,
-                    callSequence,
-                    exception.getClass()
-                            .getSimpleName()
-            );
+            ModelCallType callType =
+                    attempt == 1
+                            ? ModelCallType.ANSWER
+                            : ModelCallType.ANSWER_RETRY;
 
-            throw new WorkflowAnswerReduceException(
-                    "WORKFLOW_ANSWER_REDUCE_FAILED",
-                    "工作流回答在第"
-                            + level
-                            + "层汇总失败，本次未生成最终回答",
-                    level,
-                    callSequence,
-                    sourceIndexes,
-                    exception
-            );
+            ModelCallContext context =
+                    ModelCallContext.builder()
+                            .runId(runId)
+                            .conversationId(
+                                    request.getConversationId()
+                            )
+                            .userId(
+                                    request.getUserId()
+                            )
+                            .callType(callType)
+                            .callSequence(callSequence)
+                            .modelCode(
+                                    request.getModelCode()
+                            )
+                            .build();
+
+            try {
+                ChatResponse response =
+                        chatClientService.call(
+                                context,
+                                SYSTEM_PROMPT,
+                                userPrompt
+                        );
+
+                /*
+                 * 空文本同样进入重试，
+                 * 不能把空报告当成生成成功。
+                 */
+                return extractText(response);
+
+            } catch (Exception exception) {
+                lastException = exception;
+
+                if (attempt == 1) {
+                    log.warn(
+                            "工作流回答汇总首次调用失败，准备重试，"
+                                    + "runId={}，level={}，callSequence={}，errorType={}",
+                            runId,
+                            level,
+                            callSequence,
+                            exception.getClass()
+                                    .getSimpleName()
+                    );
+                }
+            }
         }
+
+        log.error(
+                "工作流回答汇总连续两次失败，"
+                        + "runId={}，level={}，callSequence={}，errorType={}",
+                runId,
+                level,
+                callSequence,
+                lastException == null
+                        ? "UNKNOWN"
+                        : lastException
+                        .getClass()
+                        .getSimpleName()
+        );
+
+        throw new WorkflowAnswerReduceException(
+                "WORKFLOW_ANSWER_REDUCE_FAILED",
+                "工作流回答在第"
+                        + level
+                        + "层汇总连续两次失败",
+                level,
+                callSequence,
+                sourceIndexes,
+                lastException
+        );
     }
 
     private String buildPrompt(
@@ -396,7 +439,7 @@ public class WorkflowAnswerSummaryReducer {
                 %s
                 """.formatted(
                 safeText(
-                        request.getUserQuestion(),
+                        request.getEffectiveQuestion(),
                         "用户未提供具体问题"
                 ),
                 level,
@@ -600,7 +643,15 @@ public class WorkflowAnswerSummaryReducer {
 
             return allocated;
         }
-
+        /**
+         * 记录一次实际模型重试。
+         *
+         * callSequence保持不变，
+         * 通过ModelCallType.ANSWER_RETRY区分重试记录。
+         */
+        private void recordRetry() {
+            modelCalls++;
+        }
         private int nextCallSequence() {
             return nextCallSequence;
         }

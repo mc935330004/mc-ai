@@ -62,4 +62,10 @@ public enum RouteType {
      * WORKFLOW_QUERY只允许READ能力，可以自动执行。
      */
     WORKFLOW_QUERY,
+    /**
+     * 基于上一轮安全结果快照进行追问分析。
+     *
+     * 不重新调用业务系统接口。
+     */
+    RESULT_ANALYSIS,
 }

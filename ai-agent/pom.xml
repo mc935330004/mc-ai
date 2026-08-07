@@ -79,6 +79,13 @@
             <version>${swagger-parser.version}</version>
             <scope>compile</scope>
         </dependency>
+        <!--
+    Agent安全会话存储。
+    浏览器只保存随机会话ID，PM Token保存在服务端Redis。-->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-data-redis</artifactId>
+        </dependency>
     </dependencies>
 
     <build>
