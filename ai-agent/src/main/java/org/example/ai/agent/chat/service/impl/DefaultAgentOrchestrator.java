@@ -45,6 +45,8 @@ import org.example.ai.agent.chat.memory.service.ConversationStateRecorder;
 import org.example.ai.agent.chat.memory.service.ConversationContextResolver;
 import org.example.ai.agent.workflow.answer.artifact.ResultArtifactAnalysisResult;
 import org.example.ai.agent.workflow.answer.artifact.ResultArtifactAnalysisService;
+import org.example.ai.agent.chat.vo.ReportSchemaVO;
+import org.example.ai.agent.workflow.answer.report.ReportSchemaBuilder;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -112,6 +114,10 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
      */
     private final ConversationContextResolver conversationContextResolver;
     /**
+     * 中文注释：将工作流结果转换为固定报告结构。
+     */
+    private final ReportSchemaBuilder reportSchemaBuilder;
+    /**
      * 使用显式构造器注入命名线程池。
      *
      * Executor 类型可能存在多个 Bean，必须使用 Qualifier 指定
@@ -134,7 +140,8 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
             ConversationContextResolver conversationContextResolver,
             // 中文注释：注入会话服务，统一保存助手回答。
             AiChatSessionService aiChatSessionService,
-            ResultArtifactAnalysisService resultArtifactAnalysisService
+            ResultArtifactAnalysisService resultArtifactAnalysisService,
+            ReportSchemaBuilder reportSchemaBuilder
     ) {
         this.streamSessionFactory = streamSessionFactory;
         this.knowledgeDocumentQueryService = knowledgeDocumentQueryService;
@@ -152,6 +159,7 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
         this.conversationContextResolver = conversationContextResolver;
         this.aiChatSessionService = aiChatSessionService;
         this.resultArtifactAnalysisService = resultArtifactAnalysisService;
+        this.reportSchemaBuilder = reportSchemaBuilder;
 
     }
     @Override
@@ -899,9 +907,27 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                 )
         );
 
+        /*
+         * AI汇总尚未完成时，先把固定结构报告发送给前端。
+         *
+         * report_base 不等待 WorkflowAnswerComposer，
+         * 前端可以先渲染指标、表格和数据状态。
+         */
+        ReportSchemaVO baseReportSchema =reportSchemaBuilder.build(outcome,null);
+
+        stream.send(
+                "report_base",
+                AgentStreamEvent.builder()
+                        .runId(runId)
+                        .type("REPORT_BASE")
+                        .content("")
+                        .data(baseReportSchema)
+                        .presentationType("REPORT")
+                        .presentationTitle(baseReportSchema.title())
+                        .build()
+        );
         WorkflowAnswerComposeResult composeResult =workflowAnswerComposer.compose(request, outcome);
         String answer = composeResult.answer();
-
         /*
          * 中文注释：
          * 工作流业务查询明确使用REPORT展示。
@@ -925,14 +951,17 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                         ? reportTitle
                         : "查询结果已保存";
 
-        ChatTextPayloadVO workflowPayload = ChatTextPayloadVO.builder()
+        /*
+         * AI阶段完成后重新构建一次报告，
+         * 这次补充 Artifact ID，供历史恢复和后续追问使用。
+         */
+        ReportSchemaVO finalReportSchema =reportSchemaBuilder.build(outcome,composeResult.artifactId());
+
+        ChatTextPayloadVO workflowPayload =ChatTextPayloadVO.builder()
                         .workflow(outcome)
-                        .presentationType(
-                                presentationType
-                        )
-                        .presentationTitle(
-                                presentationTitle
-                        )
+                        .reportSchema(finalReportSchema)
+                        .presentationType(presentationType)
+                        .presentationTitle(presentationTitle)
                         .build();
 
         /*

@@ -636,3 +636,72 @@ OneDrive、网盘或共享文件夹可以同步文件，但存在：
 
 只有当 Phase 0 证明数据在后端仍然完整时，才进入报告渲染改造；如果业务查询层已经丢数据，应先修复工作流或能力接口，不能用 ReportSchema 掩盖数据问题。
 
+---
+
+## 12. 实施进度
+
+### Phase 0：基线验证和数据完整性定位
+
+- 状态：进行中
+- 已完成：确认当前后端调用链、SSE v1/v2 机制、Artifact 完整性校验和多项目循环行为
+- 已完成：确认当前仓库没有前端 `ReportRenderer` 源码
+- 已完成：确认当前工作区存在未提交修改，后续操作必须避开无关文件
+- 待用户执行：固定一个多项目结算查询样例并记录实际结果
+- 待用户执行：对比 `WorkflowExecutionOutcome`、Artifact、最终回答和前端显示数量
+- 待用户确认：前端是否发送 `X-Agent-Stream-Version: 2`
+- 待用户提供：前端 `ReportRenderer` 或报告消息渲染所在项目路径
+- 本阶段代码状态：未修改后台业务代码，未修改前端代码
+
+### 下一阶段
+
+Phase 1 已启动：新增固定 `ReportSchema`，先让业务数据在 AI 分析前展示。
+
+> 说明：Phase 0 的代码链路检查已完成，运行时数量对比仍待实际 `runId` 证据确认。Phase 1 先采用兼容式接入，不删除旧 Markdown 和 `workflow` 字段；如果后续证据证明业务查询层存在丢数，立即暂停渲染改造并回到工作流链路修复。
+
+### Phase 1：固定 ReportSchema，先展示基础数据
+
+- 状态：进行中
+- 本阶段目标：让前端获得稳定的结构化报告数据，不再从 Markdown 猜测表格和布局
+- 本阶段范围：`ReportSchema` DTO、`ReportSchemaBuilder`、`ChatTextPayloadVO.reportSchema`、工作流消息组装位置
+- 本阶段不做：不删除 `WorkflowAnswerComposer`，不修改 Graph 执行引擎，不新增数据库表，不新增依赖
+- 本阶段暂不修改：`IntentResult`、`RuleBasedIntentRouter`、`AgentStreamEventType`、`AgentStreamSession`；当前固定报告接入不需要先扩展这些类
+- 后台代码状态：仅输出带中文注释的修改示例，由用户手工应用
+- 前端代码状态：等待用户提供前端项目路径或报告消息渲染文件
+- 编码约束：优先短方法、单一职责、平铺主流程，禁止无必要的方法层层嵌套
+- 编码约束：发现无用类、无用字段、无用方法或重复逻辑时，先指出删除建议，不保留“以后可能用到”的代码
+- 编码约束：不为了抽象而新增接口、工厂或配置项；一个实现只保留最直接的调用路径
+
+### Phase 1 完成标准
+
+- 同一工作流返回稳定的 `reportType`、section 顺序和字段顺序
+- `dataComplete`、成功数、失败数、跳过数和 Artifact 引用可被前端直接读取
+- 旧客户端仍能读取 `workflow` 和 Markdown，不影响现有兼容链路
+- 用户应用后台示例后，提供修改后的文件片段供我做位置检查
+
+### Phase 1 当前检查结论
+
+- 已发现问题：当前 `ReportSchemaBuilder` 的表格行直接读取 `WorkflowExecutionOutcome` 的 `item/data`，绕过 `WorkflowAnswerFieldContextResolver` 的字段安全投影
+- 已发现问题：当前构建器遍历所有 FOREACH 批次，嵌套批次可能被重复展示，不能直接作为项目总表
+- 处理决定：暂不进入前端渲染；先改为使用已有安全结果投影，或在无法确认字段安全时只发送指标和状态，不发送原始明细
+- 维护决定：删除 `ChatTextPayloadVO` 中同包重复 import；不新增 `AgentStreamEventType`、`IntentResult` 或额外工厂层
+- 当前检查：安全投影已接入，当前代码未发现原始 `item/data` 直接发送路径
+- 当前阻塞：仓库内没有前端源码，无法编写 `REPORT_BASE` 固定渲染组件
+- 当前建议：为 `ReportSchemaBuilder` 的异常降级增加一条中文上下文日志，避免静默吞掉字段策略错误
+
+### 前端 Phase 1 设计状态
+
+- 前端项目：`D:\TraeProject\enterprise-vue-admin`
+- 已确认技术栈：Vue 3、Element Plus、Vite
+- 已确认布局：A 方案，汇总优先
+- 已确认策略：不保留旧 AI Report Markdown 兼容分支；普通 RAG Markdown 继续保留
+- 已确认实现边界：统一使用 `streamQueryKnowledge` 和 `createSseParser`，删除前端重复 SSE 解析
+- 设计文档：`D:\TraeProject\enterprise-vue-admin\docs\superpowers\specs\2026-08-07-ai-report-frontend-design.md`
+- 当前状态：设计已完成，等待用户审阅后开始前端代码实现
+
+### Phase 1 当前下一步
+
+1. 用户手工应用 `ReportSchemaVO`、`ReportSchemaBuilder` 和消息组装修改示例
+2. 提供实际修改后的文件片段或提交后的文件路径
+3. 我只检查：调用位置、字段命名、中文注释、是否存在无用代码和重复逻辑
+4. 提供前端项目路径后，再编写 `report_base` 的固定渲染组件
+5. Phase 1 检查通过后，才进入 Phase 2 的异步 AI 分析

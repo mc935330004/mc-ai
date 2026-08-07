@@ -4,7 +4,6 @@ import lombok.Builder;
 import lombok.Data;
 import org.example.ai.agent.modules.knowledgebase.dto.KnowledgeDocumentQueryResponse;
 import org.example.ai.agent.workflow.runtime.WorkflowExecutionOutcome;
-
 import java.util.List;
 
 /**
@@ -23,7 +22,13 @@ public class ChatTextPayloadVO {
 
     /** 中文注释：用于历史会话恢复工作流执行结果。 */
     private WorkflowExecutionOutcome workflow;
-
+    /**
+     * 中文注释：固定报告组件使用的结构化数据。
+     *
+     * 保留旧 workflow 字段，
+     * 让旧客户端继续兼容。
+     */
+    private ReportSchemaVO reportSchema;
     /**
      * 消息展示类型。
      *
@@ -36,4 +41,5 @@ public class ChatTextPayloadVO {
      * 报告标题。
      */
     private String presentationTitle;
+
 }
