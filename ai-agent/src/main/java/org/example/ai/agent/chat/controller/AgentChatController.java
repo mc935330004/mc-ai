@@ -51,9 +51,7 @@ public class AgentChatController {
         request.setModelCode(modelCode);
 
         // 中文注释：只取最近少量历史，避免提示词无限增长。
-        request.setConversationMemory(
-                aiChatSessionService.buildMemory(userId, request.getConversationId())
-        );
+        request.setConversationMemory(aiChatSessionService.buildMemory(userId, request.getConversationId()));
 
         // 中文注释：先保存用户问题，AI回答完成后再保存助手回答。
         aiChatSessionService.saveUserMessage(

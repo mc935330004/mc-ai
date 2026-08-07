@@ -562,15 +562,11 @@ public class RuleBasedIntentRouter implements IntentRouter {
     /**
      * 从AgentRequest.extra中读取结构化WRITE表单。
      */
-    private Map<String, Object> readActionForm(
-            AgentRequest request) {
-
+    private Map<String, Object> readActionForm(AgentRequest request) {
         if (request == null|| request.getExtra() == null|| !request.getExtra().containsKey("actionForm")) {
             return null;
         }
-
         Object value =request.getExtra().get("actionForm");
-
         if (!(value instanceof Map<?, ?> source)) {
             throw new BusinessException(
                     400,
@@ -578,7 +574,6 @@ public class RuleBasedIntentRouter implements IntentRouter {
             );
         }
         Map<String, Object> result =new LinkedHashMap<>();
-
         source.forEach((key, child) ->
                 result.put(String.valueOf(key),
                         child) );

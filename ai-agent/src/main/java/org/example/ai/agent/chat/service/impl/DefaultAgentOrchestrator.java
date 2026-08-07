@@ -691,12 +691,8 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
     /**
      * 向前端发送 WRITE 参数收集表单，同时保存助手提示语。
      */
-    private void sendActionForm(
-            AgentRequest request,
-            AgentStreamSession stream,
-            String runId,
-            WorkflowPlan workflowPlan) throws Exception {
-
+    private void sendActionForm(AgentRequest request, AgentStreamSession stream,String runId,
+                                WorkflowPlan workflowPlan) throws Exception {
         ActionFormVO form = ActionFormVO.builder()
                 .workflowCode(workflowPlan.getWorkflowCode())
                 .workflowVersionId(workflowPlan.getVersionId())

@@ -198,16 +198,7 @@ public class AiChatSessionServiceImpl implements AiChatSessionService {
             String content,
             String runId,
             String modelCode, String messageType,String payloadJson) {
-        saveMessage(
-                userId,
-                sessionId,
-                "ASSISTANT",
-                content,
-                runId,
-                modelCode,
-                messageType,
-                payloadJson
-        );
+        saveMessage(userId,sessionId,"ASSISTANT",content,runId, modelCode,messageType,payloadJson);
     }
 
     private void saveMessage( String userId,
@@ -295,14 +286,12 @@ public class AiChatSessionServiceImpl implements AiChatSessionService {
         if (!StringUtils.hasText(sessionId)) {
             throw new BusinessException(ErrorCode.BAD_REQUEST, "会话ID不能为空");
         }
-
         AiChatSession session = sessionMapper.selectOne(
                 new LambdaQueryWrapper<AiChatSession>()
                         .eq(AiChatSession::getId, sessionId)
                         .eq(AiChatSession::getUserId, userId)
                         .eq(AiChatSession::getDeleted, 0)
-                        .last("LIMIT 1")
-        );
+                        .last("LIMIT 1") );
 
         if (session == null) {
             throw new BusinessException( ErrorCode.BAD_REQUEST,"会话不存在或无权访问");
