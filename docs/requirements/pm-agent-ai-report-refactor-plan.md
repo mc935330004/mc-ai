@@ -696,7 +696,10 @@ Phase 1 已启动：新增固定 `ReportSchema`，先让业务数据在 AI 分�
 - 已确认策略：不保留旧 AI Report Markdown 兼容分支；普通 RAG Markdown 继续保留
 - 已确认实现边界：统一使用 `streamQueryKnowledge` 和 `createSseParser`，删除前端重复 SSE 解析
 - 设计文档：`D:\TraeProject\enterprise-vue-admin\docs\superpowers\specs\2026-08-07-ai-report-frontend-design.md`
-- 当前状态：设计已完成，等待用户审阅后开始前端代码实现
+- 前端实现：已完成 `AiChatWindow.vue`、`AiMessage.vue`、`AiReport.vue` 和 `ReportDataBlock.vue`
+- 前端清理：已删除旧报告 Markdown 渲染、报告 facts 聚合、报告 references 展示和重复 SSE 解析
+- 前端检查：已确认统一使用 `/api/agent/chat/stream` 和 `createSseParser`
+- 当前状态：前端 Phase 1 已完成代码实现和位置检查；后台 `REPORT_ANALYSIS_*` 事件仍待 Phase 2
 
 ### Phase 1 当前下一步
 
