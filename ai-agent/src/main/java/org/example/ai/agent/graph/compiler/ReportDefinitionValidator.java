@@ -579,17 +579,22 @@ public class ReportDefinitionValidator {
         }
     }
 
-    private void validateFields(ReportSectionSpec section,
-            String graphPath, List<GraphValidationError> errors) {
+    /**
+     * 校验普通字段和文件列表字段。
+     */
+    private void validateFields(
+            ReportSectionSpec section,
+            String graphPath,
+            List<GraphValidationError> errors) {
 
         Set<String> keys = new HashSet<>();
         Set<Long> fieldIds = new HashSet<>();
 
-        for (int index = 0;index < section.fields().size();index++) {
+        for (int index = 0; index < section.fields().size(); index++) {
 
-            ReportFieldBindingSpec field =section.fields().get(index);
+            ReportFieldBindingSpec field = section.fields().get(index);
+            String fieldPath = graphPath + ".fields[" + index + "]";
 
-            String fieldPath =graphPath + ".fields[" + index + "]";
             if (field == null) {
                 errors.add(error(
                         "REPORT_FIELD_INVALID",
@@ -599,7 +604,8 @@ public class ReportDefinitionValidator {
                 continue;
             }
 
-            if (!StringUtils.hasText(field.key())|| !keys.add(field.key().trim())) {
+            if (!StringUtils.hasText(field.key())
+                    || !keys.add(field.key().trim())) {
 
                 errors.add(error(
                         "REPORT_FIELD_KEY_INVALID",
@@ -608,7 +614,9 @@ public class ReportDefinitionValidator {
                 ));
             }
 
-            if (section.type() == ReportSectionType.TREE_TABLE && RESERVED_TREE_KEYS.contains(field.key())) {
+            if (section.type() == ReportSectionType.TREE_TABLE
+                    && RESERVED_TREE_KEYS.contains(field.key())) {
+
                 errors.add(error(
                         "REPORT_FIELD_KEY_RESERVED",
                         fieldPath,
@@ -616,7 +624,8 @@ public class ReportDefinitionValidator {
                 ));
             }
 
-            if (field.fieldId() == null|| field.fieldId() <= 0
+            if (field.fieldId() == null
+                    || field.fieldId() <= 0
                     || !fieldIds.add(field.fieldId())) {
 
                 errors.add(error(
@@ -626,17 +635,70 @@ public class ReportDefinitionValidator {
                 ));
             }
 
-            boolean validPath =isItemSection(section.type())
-                            ? isAbsoluteScalarPath(
-                            field.sourcePath())
-                            : isRelativeScalarPath(
-                            field.sourcePath());
+            boolean fileBinding = field.fileList();
+
+            if (field.hasAnyFileConfig() && !fileBinding) {
+                errors.add(error(
+                        "REPORT_FILE_BINDING_INCOMPLETE",
+                        fieldPath,
+                        "文件字段必须同时配置文件地址字段、文件名路径和文件地址路径"
+                ));
+            }
+
+            if (fileBinding
+                    && (field.fileUrlFieldId() <= 0
+                    || !fieldIds.add(field.fileUrlFieldId()))) {
+
+                errors.add(error(
+                        "REPORT_FILE_URL_FIELD_INVALID",
+                        fieldPath,
+                        "文件地址字段字典 ID 必须有效且不能重复"
+                ));
+            }
+
+            boolean validPath = isItemSection(section.type())
+                    ? fileBinding
+                      ? isAbsoluteArrayPath(field.sourcePath())
+                      : isAbsoluteScalarPath(field.sourcePath())
+                    : fileBinding
+                      ? isRelativeArrayPath(field.sourcePath())
+                      : isRelativeScalarPath(field.sourcePath());
 
             if (!validPath) {
                 errors.add(error(
                         "REPORT_FIELD_PATH_INVALID",
                         fieldPath,
-                        "报告字段路径格式不正确"
+                        fileBinding
+                                ? "文件数组路径格式不正确"
+                                : "报告字段路径格式不正确"
+                ));
+            }
+
+            if (!fileBinding) {
+                continue;
+            }
+
+            if (!isRelativeScalarPath(field.fileNamePath())) {
+                errors.add(error(
+                        "REPORT_FILE_NAME_PATH_INVALID",
+                        fieldPath,
+                        "文件名路径必须是相对标量路径"
+                ));
+            }
+
+            if (!isRelativeScalarPath(field.fileUrlPath())) {
+                errors.add(error(
+                        "REPORT_FILE_URL_PATH_INVALID",
+                        fieldPath,
+                        "文件地址路径必须是相对标量路径"
+                ));
+            }
+
+            if (field.fileNamePath().equals(field.fileUrlPath())) {
+                errors.add(error(
+                        "REPORT_FILE_PATH_DUPLICATED",
+                        fieldPath,
+                        "文件名路径和文件地址路径不能相同"
                 ));
             }
         }

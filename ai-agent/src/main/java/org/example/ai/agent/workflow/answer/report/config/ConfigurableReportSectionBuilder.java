@@ -30,7 +30,10 @@ public class ConfigurableReportSectionBuilder {
 
     private static final int MAX_TREE_DEPTH = 10;
     private static final int MAX_ROW_COUNT = 5000;
-
+    /**
+     * 单个报告字段最多展示的文件数量。
+     */
+    private static final int MAX_FILE_COUNT_PER_FIELD = 20;
     private final ReportValueReader valueReader;
     private final FactValueFormatter valueFormatter;
 
@@ -80,24 +83,18 @@ public class ConfigurableReportSectionBuilder {
                             binding.fieldId()
                     );
 
-            JsonNode value =
-                    valueReader.readScalar(
-                            safeResult,
-                            binding.sourcePath()
-                    );
+            Object value = buildFieldValue(
+                    safeResult,
+                    binding,
+                    dictionary
+            );
 
             items.add(
                     new ReportSchemaVO.Item(
                             binding.key(),
-                            resolveLabel(
-                                    dictionary,
-                                    binding.key()
-                            ),
-                            formatValue(
-                                    value,
-                                    dictionary
-                            ),
-                            resolveDataType(dictionary)
+                            resolveLabel(dictionary, binding.key()),
+                            value,
+                            resolveDataType(binding, dictionary)
                     )
             );
         }
@@ -349,11 +346,9 @@ public class ConfigurableReportSectionBuilder {
             ReportSectionSpec section,
             ResolvedReportDefinition resolved) {
 
-        List<ReportSchemaVO.Column> columns =
-                new ArrayList<>();
+        List<ReportSchemaVO.Column> columns =new ArrayList<>();
 
-        for (ReportFieldBindingSpec binding :
-                section.fields()) {
+        for (ReportFieldBindingSpec binding : section.fields()) {
 
             FieldDictionary dictionary =
                     resolved.requireField(
@@ -367,7 +362,7 @@ public class ConfigurableReportSectionBuilder {
                                     dictionary,
                                     binding.key()
                             ),
-                            resolveDataType(dictionary)
+                            resolveDataType(binding, dictionary)
                     )
             );
         }
@@ -502,20 +497,151 @@ public class ConfigurableReportSectionBuilder {
         return StringUtils.hasText(text) ? text: null;
     }
 
-    private Map<String, Object> buildFieldValues(JsonNode sourceRow, ReportSectionSpec section,
+    /**
+     * 构建表格行中的普通值或文件列表值。
+     */
+    private Map<String, Object> buildFieldValues(
+            JsonNode sourceRow,
+            ReportSectionSpec section,
             ResolvedReportDefinition resolved) {
-
         Map<String, Object> row = new LinkedHashMap<>();
-
         for (ReportFieldBindingSpec binding : section.fields()) {
+            FieldDictionary dictionary = resolved.requireField(binding.fieldId());
+            row.put(
+                    binding.key(),
+                    buildFieldValue(
+                            sourceRow,
+                            binding,
+                            dictionary
+                    )
+            );
+        }
+        return row;
+    }
 
-            FieldDictionary dictionary =resolved.requireField(binding.fieldId());
-            JsonNode value =valueReader.readScalar(sourceRow,binding.sourcePath());
+    /**
+     * 根据绑定类型构建普通值或文件列表。
+     */
+    private Object buildFieldValue(
+            JsonNode source,
+            ReportFieldBindingSpec binding,
+            FieldDictionary dictionary) {
 
-            row.put(binding.key(),formatValue(value, dictionary));
+        if (binding.fileList()) {
+            return buildFileValues(source, binding);
         }
 
-        return row;
+        JsonNode value = valueReader.readScalar(
+                source,
+                binding.sourcePath()
+        );
+
+        return formatValue(value, dictionary);
+    }
+
+    /**
+     * 将业务文件对象转换为受限的 name/url 数组。
+     */
+    private List<ReportSchemaVO.FileValue> buildFileValues(
+            JsonNode source,
+            ReportFieldBindingSpec binding) {
+
+        List<JsonNode> fileNodes =
+                valueReader.readMany(
+                        source,
+                        binding.sourcePath()
+                );
+
+        if (fileNodes.size() > MAX_FILE_COUNT_PER_FIELD) {
+            throw new IllegalStateException(
+                    "单个报告字段的文件数量超过限制："
+                            + MAX_FILE_COUNT_PER_FIELD
+            );
+        }
+
+        List<ReportSchemaVO.FileValue> files =
+                new ArrayList<>();
+
+        for (JsonNode fileNode : fileNodes) {
+
+            if (fileNode == null || !fileNode.isObject()) {
+                throw new IllegalStateException(
+                        "报告文件数组中的元素必须是对象"
+                );
+            }
+
+            String fileName = readFileText(
+                    fileNode,
+                    binding.fileNamePath()
+            );
+
+            String fileUrl = normalizeFileUrl(
+                    readFileText(
+                            fileNode,
+                            binding.fileUrlPath()
+                    )
+            );
+
+            if (!StringUtils.hasText(fileName)
+                    && !StringUtils.hasText(fileUrl)) {
+                continue;
+            }
+
+            files.add(
+                    new ReportSchemaVO.FileValue(
+                            StringUtils.hasText(fileName)
+                                    ? fileName.trim()
+                                    : "查看文件",
+                            fileUrl
+                    )
+            );
+        }
+
+        return List.copyOf(files);
+    }
+
+    /**
+     * 读取文件对象中的标量文本。
+     */
+    private String readFileText(
+            JsonNode fileNode,
+            String path) {
+
+        JsonNode value =
+                valueReader.readScalar(
+                        fileNode,
+                        path
+                );
+
+        if (value == null || !value.isValueNode()) {
+            return null;
+        }
+
+        String text = value.asText(null);
+        return StringUtils.hasText(text)
+                ? text.trim()
+                : null;
+    }
+
+    /**
+     * 只允许 HTTP、HTTPS 和站内绝对路径。
+     */
+    private String normalizeFileUrl(String value) {
+        if (!StringUtils.hasText(value)) {
+            return null;
+        }
+        String url = value.trim();
+        if (url.length() > 2048) {
+            return null;
+        }
+        String lowerUrl =url.toLowerCase(Locale.ROOT);
+        if (lowerUrl.startsWith("http://")  || lowerUrl.startsWith("https://")) {
+            return url;
+        }
+        if (url.startsWith("/") && !url.startsWith("//")) {
+            return url;
+        }
+        return null;
     }
 
     private String formatValue(JsonNode value,FieldDictionary dictionary) {
@@ -558,14 +684,17 @@ public class ConfigurableReportSectionBuilder {
         return fallback;
     }
 
-    private String resolveDataType(
-            FieldDictionary dictionary) {
-
+    /**
+     * 文件绑定固定返回 FILE_LIST，普通字段继续使用字典类型。
+     */
+    private String resolveDataType(ReportFieldBindingSpec binding,FieldDictionary dictionary) {
+        if (binding.fileList()) {
+            return "FILE_LIST";
+        }
         if (!StringUtils.hasText(
                 dictionary.getFieldType())) {
             return "TEXT";
         }
-
         return dictionary
                 .getFieldType()
                 .trim()

@@ -101,18 +101,26 @@ public class ReportDefinitionResolver {
         );
     }
 
-    private Set<Long> collectFieldIds(
-            ReportDefinitionSpec definition) {
+    /**
+     * 收集报告引用的全部字段字典 ID。
+     */
+    private Set<Long> collectFieldIds(ReportDefinitionSpec definition) {
 
         Set<Long> fieldIds = new LinkedHashSet<>();
 
-        for (ReportSectionSpec section :
-                definition.sections()) {
-
+        for (ReportSectionSpec section : definition.sections()) {
             for (ReportFieldBindingSpec field : section.fields()) {
 
-                if (field != null && field.fieldId() != null) {
+                if (field == null) {
+                    continue;
+                }
+
+                if (field.fieldId() != null) {
                     fieldIds.add(field.fieldId());
+                }
+
+                if (field.fileUrlFieldId() != null) {
+                    fieldIds.add(field.fileUrlFieldId());
                 }
             }
         }
@@ -191,20 +199,14 @@ public class ReportDefinitionResolver {
         }
     }
     /**
-     * 验证展示路径末级字段和字段字典机器字段一致。
-     *
-     * 工作流如果确实重命名了业务字段，
-     * 应先为新机器字段发布对应字典，不能借用其他字段语义。
+     * 验证普通字段和文件字段的字典绑定。
      */
     private void validateBindings(
             ReportDefinitionSpec definition,
             Map<Long, FieldDictionary> fieldsById) {
 
-        for (ReportSectionSpec section :
-                definition.sections()) {
-
-            for (ReportFieldBindingSpec binding :
-                    section.fields()) {
+        for (ReportSectionSpec section : definition.sections()) {
+            for (ReportFieldBindingSpec binding : section.fields()) {
 
                 FieldDictionary dictionary =
                         fieldsById.get(binding.fieldId());
@@ -213,22 +215,135 @@ public class ReportDefinitionResolver {
                     continue;
                 }
 
-                String dictionaryFieldName =
-                        resolveDictionaryFieldName(dictionary);
-
-                String sourceFieldName =
-                        resolveSourceFieldName(
-                                binding.sourcePath()
-                        );
-
-                if (!StringUtils.hasText(dictionaryFieldName)|| !Objects.equals(dictionaryFieldName,sourceFieldName)) {
-                    throw new IllegalStateException(
-                            "报告字段路径与字段字典不一致，fieldId="
-                                    + binding.fieldId()
+                if (binding.fileList()) {
+                    validateFileBinding(
+                            binding,
+                            dictionary,
+                            fieldsById
                     );
+                    continue;
                 }
+
+                validateBindingFieldName(
+                        dictionary,
+                        binding.sourcePath(),
+                        binding.fieldId()
+                );
             }
         }
+    }
+
+    /**
+     * 验证文件名和文件地址都来自同一个文件数组。
+     */
+    private void validateFileBinding(
+            ReportFieldBindingSpec binding,
+            FieldDictionary nameDictionary,
+            Map<Long, FieldDictionary> fieldsById) {
+
+        FieldDictionary urlDictionary =fieldsById.get(binding.fileUrlFieldId());
+
+        if (urlDictionary == null) {
+            throw new IllegalStateException(
+                    "文件地址字段字典不存在："
+                            + binding.fileUrlFieldId()
+            );
+        }
+
+        if (!"file_list".equalsIgnoreCase(
+                nameDictionary.getDisplayFormat())) {
+
+            throw new IllegalStateException(
+                    "文件名字典必须配置 displayFormat=file_list，fieldId="
+                            + binding.fieldId()
+            );
+        }
+
+        validateBindingFieldName(
+                nameDictionary,
+                binding.fileNamePath(),
+                binding.fieldId()
+        );
+
+        validateBindingFieldName(
+                urlDictionary,
+                binding.fileUrlPath(),
+                binding.fileUrlFieldId()
+        );
+
+        String nameParentPath =
+                resolveParentPath(nameDictionary.getFieldPath());
+
+        String urlParentPath =
+                resolveParentPath(urlDictionary.getFieldPath());
+
+        if (!Objects.equals(nameParentPath, urlParentPath)) {
+            throw new IllegalStateException(
+                    "文件名和文件地址字段不属于同一个文件数组"
+            );
+        }
+        // 校验字段字典父级确实是文件对象数组。
+        if (!StringUtils.hasText(nameParentPath)
+                || !nameParentPath.endsWith("[]")) {
+
+            throw new IllegalStateException(
+                    "文件字段字典父级必须是对象数组，fieldId="
+                            + binding.fieldId()
+            );
+        }
+
+        // 校验报告读取的数组与字段字典声明的数组一致。
+        String dictionaryArrayName = resolveSourceFieldName(nameParentPath);
+        String sourceArrayName =resolveSourceFieldName(binding.sourcePath());
+
+        if (!Objects.equals(dictionaryArrayName,sourceArrayName)) {
+            throw new IllegalStateException(
+                    "文件数组路径与字段字典不一致，fieldId="
+                            + binding.fieldId()
+            );
+        }
+    }
+
+    /**
+     * 校验路径末级字段与字典机器字段一致。
+     */
+    private void validateBindingFieldName(
+            FieldDictionary dictionary,
+            String sourcePath,
+            Long fieldId) {
+
+        String dictionaryFieldName =
+                resolveDictionaryFieldName(dictionary);
+
+        String sourceFieldName =
+                resolveSourceFieldName(sourcePath);
+
+        if (!StringUtils.hasText(dictionaryFieldName)
+                || !Objects.equals(
+                dictionaryFieldName,
+                sourceFieldName
+        )) {
+            throw new IllegalStateException(
+                    "报告字段路径与字段字典不一致，fieldId="
+                            + fieldId
+            );
+        }
+    }
+
+    /**
+     * 获取字段字典路径的共同父级。
+     */
+    private String resolveParentPath(String fieldPath) {
+        if (!StringUtils.hasText(fieldPath)) {
+            return null;
+        }
+
+        String value = fieldPath.trim();
+        int separatorIndex = value.lastIndexOf('.');
+
+        return separatorIndex > 0
+                ? value.substring(0, separatorIndex)
+                : null;
     }
 
     /**

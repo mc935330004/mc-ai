@@ -2,7 +2,7 @@
 
 > 项目：`mc-ai`
 >
-> 当前阶段：扩展 Phase 4D 独立追问消息与最终闭环
+> 当前阶段：扩展 Phase 6C 结算文件双列展示，待页面运行验收
 >
 > 目标：解决 AI Report 响应慢、样式不稳定、数据较多时拥挤或疑似丢失，并为项目结算、概算、现金流、产值、合同、回款、成本、进度、风险等报告提供可扩展基础。
 
@@ -1626,13 +1626,157 @@ Phase 1 静态检查通过后进入扩展 Phase 2：前端通用 `KEY_VALUE` 和
 - 活动发布快照中的 `followUp` 已启用，目标为只读能力 `pm_test.getUsedList`，候选路径和四个输入映射均已核对
 - 当前进入 Phase 4D 最终运行验收；通过独立追问、刷新恢复、科目查询、否定结束和异常澄清后才能标记最终闭环
 - 按用户要求未运行测试或编译
+- 用户已完成独立追问、刷新恢复、科目明细查询、否定结束和异常澄清验收
+- Phase 4 通用报告二次问答最终闭环完成
+
+### 扩展 Phase 5：工作流报告可视化配置
+
+#### 现状判断
+
+- 配置驱动报告和通用追问已经形成运行闭环，但 `reportDefinition` 仍主要依赖 GraphSpec 源码维护
+- 工作流工作台只负责原样透传报告定义，普通管理员不能通过表单完成报告配置
+- 当前 `ReportType` 尚未提供开票、预算和利润的独立类型；这些模块在协议扩展前只能使用 `GENERIC_WORKFLOW_REPORT`，不能当作已有专用类型
+- 真正的傻瓜式配置仍需要分步解决基础设置、区块字段映射和追问规则，不能把所有高级路径一次堆进一个表单
+
+#### Phase 5 分步范围
+
+1. Phase 5A：报告基础设置和现有区块总览
+2. Phase 5B：区块创建、字段字典选择和安全路径映射
+3. Phase 5C：报告后追问规则可视化配置
+4. Phase 5D：使用第二个业务模块验证无需新增后台 Java 模板
+
+#### Phase 5A：报告基础设置和区块总览
+
+- 工作流工作台新增“报告配置”入口，不再要求修改标题和 AI 策略时打开 GraphSpec 源码
+- 支持修改报告标题、现有报告类型和 `ON_DEMAND / ALWAYS / DISABLED` 分析策略
+- 支持修改现有区块标题和上下排序，字段 ID、字段路径、树结构路径及追问配置保持不变
+- 显示现有追问是否启用、目标类型、目标编码和助手提示，但本小步不允许修改高级追问映射
+- 当前没有 `reportDefinition` 的工作流只显示空状态，不生成无法通过后端校验的空区块
+- 新增前端组件 `WorkflowReportConfigDialog.vue`，并接入工作流现有草稿保存、校验和发布链路
+- 后台 Java、数据库、Flyway、配置和依赖均未修改
+- 已完成前端源码位置、状态传递和补丁空白静态检查；按用户要求未运行构建或测试
+- Phase 5A 源码实现和静态检查已完成；用户已指示继续 Phase 5B，未单独声明浏览器验收结果
+
+#### Phase 5B：区块创建、字段字典选择和安全路径映射
+
+- 没有 `reportDefinition` 的工作流可以从可视化入口创建通用报告，并在至少一个合法区块完成后才允许应用
+- 支持新增、编辑、删除和排序 `KEY_VALUE / METRICS / TABLE / TREE_TABLE` 四类区块
+- 字段候选只读取当前工作流实际引用能力的字段字典，不允许选择其他工作流无关能力字段
+- 字段字典必须已经发布且允许展示；选择后使用稳定机器字段名作为 `key`
+- `KEY_VALUE / METRICS` 使用绝对标量路径，提供公共对象路径以批量生成完整字段路径
+- `TABLE / TREE_TABLE` 使用绝对数组行路径，表格字段自动使用相对机器字段路径
+- `TREE_TABLE` 支持后台嵌套 `childrenPath` 和 `parentKeyPath` 平铺转树两种模式，二者不能同时配置
+- 前端安全路径格式、区块上限、字段上限、树表保留字段和字段路径末级名称规则与后端校验保持一致
+- 字段标签、类型、格式和业务含义继续来自字段字典；没有增加概算、合同或金额字段的专用分支
+- 继续复用现有 GraphSpec 草稿保存、服务端校验和发布链路，不新增报告配置接口或数据库表
+- 已完成前端源码位置、字段加载范围和补丁空白静态检查；按用户要求未运行构建或测试
+- Phase 5B 已实现；用户已指示进入下一阶段
+
+#### Phase 5C：报告后追问规则可视化配置
+
+- 报告配置弹窗支持启用或关闭报告后追问，并可维护助手提问内容
+- 目标执行范围只展示后台认定可执行、已启用的只读 `CAPABILITY`，并兼容历史空发布状态；当前运行链尚未支持 `WORKFLOW` 目标，因此不提供保存后无法执行的选项
+- 候选数据行路径优先从现有 `TABLE / TREE_TABLE` 区块读取，同时允许录入符合后端安全路径规则的数组路径
+- 候选唯一编码和显示名称使用相对标量路径，不增加概算科目、合同编号等模块专用字段
+- 目标能力输入根据其 `requestBindingJson` 自动生成，支持来源报告、用户选中行、固定字符串、固定数字和固定布尔值
+- 保存前校验必填参数、重复参数、参数数量、至少一个 `$selected` 映射以及后端暂不支持的嵌套参数结构
+- 已有追问配置重新打开时保持原映射值，并从目标能力恢复必填参数标识
+- 继续写回现有 GraphSpec `reportDefinition.followUp`，未新增后台 Java、数据库、Flyway、配置或依赖
+- 已完成前端源码位置、结构保存和补丁空白静态检查；按用户要求未运行构建或测试
+- Phase 5C 已实现；用户决定后续自行添加并验证新的业务模块
+
+#### Phase 5D：第二业务模块验证状态
+
+- 用户决定后续自行选择和添加第二个真实业务模块，本阶段暂不实施
+- 当前没有第二模块的真实能力、字段字典和返回结构，不能把“设计上可复用”写成“已经跨模块验证通过”
+- Phase 5A～5C 的功能开发范围已经完成，Phase 5D 仅保留为上线前跨模块验收项
+- 未新增后台 Java、前端模块专用组件、数据库、Flyway、配置或依赖
+
+#### 后续模块自助接入清单
+
+1. 发布业务查询能力，并确认能力为只读、已启用且请求绑定可解析
+2. 发布业务字段字典，确认 `fieldName / fieldPath / format / meaning / visible` 与真实安全结果一致
+3. 创建或复用工作流；单能力查询不为了包装而额外创建工作流
+4. 在“报告配置”中选择现有专用 `ReportType`；没有对应枚举时使用 `GENERIC_WORKFLOW_REPORT`
+5. 按真实返回结构配置 `KEY_VALUE / METRICS / TABLE / TREE_TABLE`，不在前端推断业务公式
+6. 需要报告后追问时，配置助手提示、候选行路径、目标只读能力和输入映射；至少一个输入来自用户选中行
+7. 依次完成 GraphSpec 校验、保存草稿、发布和正式聊天验收
+8. 验收基础报告即时展示、AI 异步追加、刷新恢复、否定结束和唯一候选执行
+
+#### 扩展计划收口结论
+
+- 后台可配置 `ReportSchema`、通用前端区块渲染、报告后追问和可视化报告配置的开发链路已经完成
+- Phase 5D 跨模块实证由用户延期执行，因此当前属于“功能开发闭环”，不是“全部业务模块最终验收闭环”
+- Phase 5 收口时没有继续虚构阶段；当前收到真实文件展示需求后，新增扩展 Phase 6
+
+### 扩展 Phase 6：通用文件字段
+
+#### Phase 6A：文件协议与通用前端渲染
+
+- 新需求已经提供真实目标：业务报告需要展示一个或多个文件，并允许用户点击文件名称访问文件地址
+- 不新增 `FILES` 业务区块，不复制结算附件模板；复用现有 `KEY_VALUE / METRICS / TABLE / TREE_TABLE`
+- `ReportSchemaVO.Item.valueType` 和 `ReportSchemaVO.Column.dataType` 使用统一值 `FILE_LIST`
+- 文件值固定为数组，每项只包含 `name` 和 `url`；单文件也转换为长度为 1 的数组
+- `ReportFieldBindingSpec` 计划增加可选 `fileUrlFieldId / fileNamePath / fileUrlPath`，`sourcePath` 指向两个叶子字段的共同文件数组
+- 文件名和文件地址必须分别引用已发布、允许展示的叶子字段字典；文件名字典通过 `displayFormat=file_list` 声明展示语义
+- 不发布整个文件对象数组：现有安全投影器会拒绝复制对象数组，放宽该限制则可能泄露未授权子字段
+- 字段类型继续记录叶子字段的真实类型，不新增数据库字段或迁移
+- 前端新增通用 `ReportFileList.vue`，统一支持键值、指标、普通表格和树表文件展示
+- 前端只允许 `http://`、`https://` 和非协议相对的站内 `/` 地址，拒绝脚本协议及 `//example.com` 地址
+- 报告可视化配置在文件字段下展示文件数组路径、文件名相对路径和文件地址相对路径
+- 文件字段不能参与报告后追问的 `$source` 标量路径候选，也不能参与数值聚合
+- 后台 Java 已由用户手工应用，涉及 `ReportSchemaVO`、`ReportFieldBindingSpec`、`ReportDefinitionValidator`、`ReportDefinitionResolver` 和 `ConfigurableReportSectionBuilder`
+- 前端源码实现和补丁空白静态检查完成；按用户要求未运行构建或测试
+
+#### Phase 6B：后台静态检查
+
+- 已确认文件值协议、文件字段绑定、字段字典收集、文件列表构建、20 个文件数量限制和 URL 白名单逻辑均位于通用报告链路
+- 已确认 `KEY_VALUE / METRICS / TABLE / TREE_TABLE` 统一返回 `FILE_LIST`，未新增结算、概算等业务模块专用判断
+- 已确认文件名字段与文件地址字段必须属于同一个字典父路径
+- 用户已经补充 `ReportDefinitionResolver.validateFileBinding` 的文件数组路径一致性校验
+- 静态检查确认校验位于文件名和文件地址父路径校验之后，并复用现有受限路径解析方法
+- Phase 6B 已完成；按用户要求未运行测试或编译
+
+#### Phase 6C：结算文件双列展示
+
+- 目标效果：每条结算记录分别展示“已盖章”和“未盖章”两列，每列允许显示多个可点击文件名
+- 事实边界：`project_settlements_list` 当前由 `ProjectSettlementReportTemplate` 专用模板优先处理，工作流 `reportDefinition` 不参与该报告区块构建
+- 现有专用模板已经返回 `rowKey / fileStatus / fileName / fileUrl`，因此不需要修改后台数据结构或复制附件数据
+- 前端 `ProjectSettlementReport.vue` 按 `rowKey + fileStatus` 对附件分组，并复用通用 `ReportFileList.vue` 渲染安全链接
+- 原“文件”单列已拆分为“已盖章”和“未盖章”，无文件时显示 `-`，空明细行列数同步调整为 7
+- 表格最小宽度调整为 `980px`，窄屏继续使用横向滚动，避免新增文件列挤压金额和日期
+- 前端补丁空白静态检查通过；按用户要求未运行测试、构建或浏览器验收
+- 当前待用户使用包含 `fileList[]` 和 `notFileList[]` 的真实结算记录进行页面验收
+
+##### 通用报告配置参考：结算附件
+
+- 当前结算工作流存在专用 `ProjectSettlementReportTemplate`，因此以下 `reportDefinition` 只用于说明普通配置报告如何声明文件列，不改变当前结算页面
+- 结算记录行路径参考：`$.workflowData.items[].data.items[].data.settlementInfos[].settlements[]`
+- 已盖章文件名字段字典路径：`$.data.settlementInfos[].settlements[].fileList[].original`，`displayFormat=file_list`
+- 已盖章文件地址字段字典路径：`$.data.settlementInfos[].settlements[].fileList[].url`
+- 未盖章文件名字段字典路径：`$.data.settlementInfos[].settlements[].notFileList[].original`，`displayFormat=file_list`
+- 未盖章文件地址字段字典路径：`$.data.settlementInfos[].settlements[].notFileList[].url`
+- 四个字段字典必须属于结算详情能力、状态为 `PUBLISHED`、`visible=1`；文件字段不可聚合
+- 已盖章报告字段绑定：`key=fileList`、`sourcePath=fileList[]`、`fileNamePath=original`、`fileUrlPath=url`
+- 未盖章报告字段绑定：`key=notFileList`、`sourcePath=notFileList[]`、`fileNamePath=original`、`fileUrlPath=url`
+- `fieldId` 和 `fileUrlFieldId` 必须选择当前环境的真实字段字典 ID，不能复制示例数字或自行猜测
+- 配置排查：如果选择文件名字典后“字段标识”仍为 `original` 且没有出现文件地址配置项，说明前端收到的 `displayFormat` 不是 `file_list`，或者报告弹窗仍缓存修改前的字段字典
+- 修正顺序：确认文件名字典展示格式为“文件列表”并保存，关闭后重新打开报告配置，删除原普通字段行后重新添加并选择该文件名字典
+- 正确结果：已盖章字段自动生成 `key=fileList / sourcePath=fileList[]`，未盖章字段自动生成 `key=notFileList / sourcePath=notFileList[]`
+
+#### Phase 6 后续步骤
+
+1. Phase 6A：文件协议、后台构建和通用前端渲染已完成
+2. Phase 6B：后台文件数组路径一致性校验和静态检查已完成
+3. Phase 6C：结算文件双列展示已实现，待验收单文件、多文件、空文件和非法地址
 
 #### 附加排查：页面空闲后身份服务偶发 503
 
-- 该 503 由 `HeaderCurrentUserProvider` 调用 PM `/user/info` 时发生 `RestClientException` 触发
-- Redis Session 缺失或过期会返回 401，不会返回“业务系统用户身份服务暂时不可用”
-- 公共 `RestClient` 当前没有应用已经配置的连接超时和读取超时，配置实际未生效
-- 刷新后恢复符合空闲连接被网关关闭、连接重置或短暂网络抖动的特征，但当前代码没有记录异常类型，仍需日志确认最终原因
-- 推荐只对 `/user/info` 的网络传输异常立即重试一次；401、403 和其他 HTTP 状态不重试
+- 该 503 由 `HeaderCurrentUserProvider` 调用 PM `/user/info` 时发生 `RestClientException` 触发；Redis Session 缺失或过期会返回 401，不是该错误的直接原因
+- 当前 `ToolExecutorConfig` 已使用 `JdkClientHttpRequestFactory` 应用连接超时和读取超时，之前“超时未生效”的判断已经失效
+- 当前 `HeaderCurrentUserProvider` 已只对 `/user/info` 网络传输异常立即重试一次，401、403 和其他明确 HTTP 状态不重试
+- 重试日志只记录次数、异常类型和消息，不记录 Authorization、Cookie 或 Token
+- `BusinessApiProperties` 不再重复注册为两个 Bean，之前的 `ToolExecutorConfig` 启动冲突已经按单 Bean 方式修正
+- 开发配置中的超时单位为毫秒；`86400` 实际为 86.4 秒，不代表 24 小时，后续调整时必须按毫秒换算
+- 当前只完成源码位置和调用规则静态核对，尚未取得页面长时间空闲后的新运行日志，因此不能声明 503 运行验收已经通过
 - 不使用 Redis 中的旧权限快照兜底，避免权限撤销延迟和管理接口越权风险
-- 后台修改仍由用户手工应用，Codex 只提供文件位置和完整代码示例

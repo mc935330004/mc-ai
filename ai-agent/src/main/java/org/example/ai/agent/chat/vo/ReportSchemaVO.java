@@ -87,7 +87,16 @@ public record ReportSchemaVO(
             String label,
             String dataType) {
     }
-
+    /**
+     * 报告中的安全文件值。
+     *
+     * 只向前端返回文件名称和文件地址，
+     * 不透传业务接口中的完整文件对象。
+     */
+    public record FileValue(
+            String name,
+            String url) {
+    }
     /**
      * AI 分析区域。
      */
