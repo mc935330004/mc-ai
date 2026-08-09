@@ -356,7 +356,7 @@ public class CapabilityDefinitionController {
         }
 
         /*
-         * 中文注释：
+         *  
          * form只用于补充上传能力的PATH、QUERY和普通BODY参数，
          * 不允许携带无限大的JSON字符串。
          */

@@ -111,16 +111,10 @@ public class HeaderCurrentUserProvider implements CurrentUserProvider {
                 agentSessionService.deleteCurrentSession();
                 throw new BusinessException(401,"业务系统登录状态已失效或没有访问权限");
             }
-            throw new BusinessException(
-                    502,
-                    "业务系统用户身份校验失败"
-            );
+            throw new BusinessException(502,"业务系统用户身份校验失败");
 
         } catch (RestClientException exception) {
-            throw new BusinessException(
-                    503,
-                    "业务系统用户身份服务暂时不可用"
-            );
+            throw new BusinessException(503,"业务系统用户身份服务暂时不可用");
         }
 
         JsonNode data =response == null

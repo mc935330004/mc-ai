@@ -7,7 +7,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 中文注释：保存上一轮成功业务请求的结构化状态，不保存认证信息。
+ *  保存上一轮成功业务请求的结构化状态，不保存认证信息。
  */
 @Data
 public class BusinessConversationState {
@@ -22,7 +22,13 @@ public class BusinessConversationState {
     private Map<String, Object> lastInput = new LinkedHashMap<>();
     private String lastRunId;
     /**
-     * 中文注释：
+     * 当前会话是否正在等待用户补充查询参数。
+     *
+     * 字段保存在 state_json 中，不需要修改数据库表结构。
+     */
+    private boolean awaitingClarification;
+    /**
+     *  
      * 上一轮工作流安全结果快照ID。
      * 后续追问统计时直接读取该快照，不再重新路由工作流。
      */

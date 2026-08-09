@@ -34,7 +34,7 @@ import java.util.regex.Pattern;
 public class WorkflowDefinitionServiceImpl extends ServiceImpl< WorkflowDefinitionMapper, WorkflowDefinition>
         implements WorkflowDefinitionService {
     /**
-     * 中文注释：保证工作流澄清时不会退化成内部字段路径。
+     *  保证工作流澄清时不会退化成内部字段路径。
      */
     private final UserFacingSchemaValidator userFacingSchemaValidator;
     private static final int MAX_GRAPH_JSON_LENGTH =
@@ -328,7 +328,7 @@ public class WorkflowDefinitionServiceImpl extends ServiceImpl< WorkflowDefiniti
                     )
                     .build();
         }
-        // 中文注释：工作流发布前校验所有必填输入的用户名称。
+        //  工作流发布前校验所有必填输入的用户名称。
         userFacingSchemaValidator.validateWorkflowGraph(
                 definition.getWorkflowCode(),
                 material.normalizedGraphSpecJson()

@@ -17,7 +17,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 中文注释：在业务查询成功后生成并保存可复用的会话上下文。
+ *  在业务查询成功后生成并保存可复用的会话上下文。
  */
 @Slf4j
 @Service
@@ -27,7 +27,7 @@ public class ConversationStateRecorder {
     private final ConversationStateService conversationStateService;
 
     /**
-     * 中文注释：记录普通能力查询成功后的实际能力和实际调用参数。
+     *  记录普通能力查询成功后的实际能力和实际调用参数。
      */
     public void recordToolResult(
             AgentRequest request,
@@ -56,24 +56,18 @@ public class ConversationStateRecorder {
     }
 
     /**
-     * 中文注释：记录工作流或普通能力等待用户补参时的业务上下文。
+     *  记录工作流或普通能力等待用户补参时的业务上下文。
      */
-    public void recordClarification(
-            AgentRequest request,
-            IntentResult intentResult,
-            String runId) {
+    public void recordClarification(AgentRequest request,IntentResult intentResult,String runId) {
 
         WorkflowPlan workflowPlan = intentResult.getWorkflowPlan();
-        DynamicCapabilityPlan capabilityPlan =
-                intentResult.getDynamicCapabilityPlan();
+        DynamicCapabilityPlan capabilityPlan =intentResult.getDynamicCapabilityPlan();
 
-        BusinessConversationState state =
-                new BusinessConversationState();
+        BusinessConversationState state =new BusinessConversationState();
 
-        if (workflowPlan != null
-                && StringUtils.hasText(workflowPlan.getWorkflowCode())) {
+        if (workflowPlan != null && StringUtils.hasText(workflowPlan.getWorkflowCode())) {
 
-            // 中文注释：工作流补参状态保存工作流身份和部分输入。
+            //  工作流补参状态保存工作流身份和部分输入。
             state.setRouteType("WORKFLOW_QUERY");
             state.setBusinessTopic(resolveTopic(
                     workflowPlan.getWorkflowName(),
@@ -81,42 +75,34 @@ public class ConversationStateRecorder {
             ));
             state.setWorkflowCode(workflowPlan.getWorkflowCode());
             state.setWorkflowVersionId(workflowPlan.getVersionId());
-            // 中文注释：WRITE 的 input 是能力表单参数，不能作为下一轮工作流输入继承。
+            //  WRITE 的 input 是能力表单参数，不能作为下一轮工作流输入继承。
             state.setLastInput(
                     workflowPlan.isWriteAction()
                             ? new LinkedHashMap<>()
                             : copyInput(workflowPlan.getInput())
             );
-
         } else if (capabilityPlan != null && StringUtils.hasText(capabilityPlan.getCapabilityCode())) {
-
-            // 中文注释：能力补参状态保存能力身份和已经通过校验的部分输入。
+            //  能力补参状态保存能力身份和已经通过校验的部分输入。
             state.setRouteType("CAPABILITY_QUERY");
             state.setBusinessTopic(resolveTopic(
                     capabilityPlan.getCapabilityName(),
                     request.getUserQuestion()
             ));
-            state.setCapabilityCode(
-                    capabilityPlan.getCapabilityCode()
-            );
-            state.setLastInput(
-                    copyInput(capabilityPlan.getInput())
-            );
-
+            state.setCapabilityCode(capabilityPlan.getCapabilityCode());
+            state.setLastInput(copyInput(capabilityPlan.getInput()));
         } else {
-            // 中文注释：没有明确业务身份的普通追问不能覆盖已有上下文。
+            //  没有明确业务身份的普通追问不能覆盖已有上下文。
             return;
         }
-
-        state.setActiveObjectIds(
-                extractObjectIdentifiers(state.getLastInput())
-        );
+        state.setActiveObjectIds(extractObjectIdentifiers(state.getLastInput()));
+        // 当前状态由助手补参问题产生，下一轮允许继承已选业务工作流。
+        state.setAwaitingClarification(true);
         state.setLastRunId(runId);
         saveSafely(request, state);
     }
 
     /**
-     * 中文注释：记录查询工作流成功或部分成功后的工作流及输入参数。
+     *  记录查询工作流成功或部分成功后的工作流及输入参数。
      */
     public void recordWorkflowResult(
             AgentRequest request,
@@ -150,7 +136,7 @@ public class ConversationStateRecorder {
                         : runId
         );
         /*
-         * 中文注释：
+         *  
          * 只保存结果快照ID，不把完整业务数据写入会话状态JSON。
          */
         state.setResultArtifactId(artifactId);
@@ -158,7 +144,7 @@ public class ConversationStateRecorder {
     }
 
     /**
-     * 中文注释：选择第一个成功能力，失败结果不能覆盖有效上下文。
+     *  选择第一个成功能力，失败结果不能覆盖有效上下文。
      */
     private ToolResult firstSuccessfulResult(
             List<ToolResult> toolResults
@@ -176,7 +162,7 @@ public class ConversationStateRecorder {
     }
 
     /**
-     * 中文注释：实际执行参数已在工具层脱敏，可以保存用于后续追问。
+     *  实际执行参数已在工具层脱敏，可以保存用于后续追问。
      */
     private Map<String, Object> copyInput(Object input) {
         if (!(input instanceof Map<?, ?> source)) {
@@ -193,7 +179,7 @@ public class ConversationStateRecorder {
     }
 
     /**
-     * 中文注释：提取项目编码、合同编号等可用于指代消解的业务标识。
+     *  提取项目编码、合同编号等可用于指代消解的业务标识。
      */
     private List<String> extractObjectIdentifiers(
             Map<String, Object> input
@@ -211,7 +197,7 @@ public class ConversationStateRecorder {
     }
 
     /**
-     * 中文注释：只识别常见业务标识字段，不保存分页参数等无关数据。
+     *  只识别常见业务标识字段，不保存分页参数等无关数据。
      */
     private boolean isIdentifierField(String fieldName) {
         String name = fieldName.toLowerCase();
@@ -222,7 +208,7 @@ public class ConversationStateRecorder {
     }
 
     /**
-     * 中文注释：优先使用计划目标或工作流名称作为当前业务主题。
+     *  优先使用计划目标或工作流名称作为当前业务主题。
      */
     private String resolveTopic(
             String preferredTopic,
@@ -234,7 +220,7 @@ public class ConversationStateRecorder {
     }
 
     /**
-     * 中文注释：状态保存失败不能破坏已经成功的业务查询响应。
+     *  状态保存失败不能破坏已经成功的业务查询响应。
      */
     private void saveSafely(
             AgentRequest request,
@@ -256,7 +242,7 @@ public class ConversationStateRecorder {
         }
     }
     /**
-     * 中文注释：记录成功的知识库问答，避免继续使用更早的业务状态。
+     *  记录成功的知识库问答，避免继续使用更早的业务状态。
      */
     public void recordRagResult(AgentRequest request,String runId) {
         BusinessConversationState state =

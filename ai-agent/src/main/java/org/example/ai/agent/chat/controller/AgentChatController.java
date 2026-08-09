@@ -42,7 +42,7 @@ public class AgentChatController {
         request.setUserId(userId);
         // 用户身份与认证信息只能由服务端从请求头读取
         request.setAuthorization(currentUserProvider.getRequiredAuthorization());
-       // 中文注释：模型编码由后端严格校验，未配置或已停用时拒绝请求。
+       //  模型编码由后端严格校验，未配置或已停用时拒绝请求。
         String modelCode = aiChatSessionService.resolveModelCode(
                 userId,
                 request.getConversationId(),
@@ -50,10 +50,10 @@ public class AgentChatController {
         );
         request.setModelCode(modelCode);
 
-        // 中文注释：只取最近少量历史，避免提示词无限增长。
+        //  只取最近少量历史，避免提示词无限增长。
         request.setConversationMemory(aiChatSessionService.buildMemory(userId, request.getConversationId()));
 
-        // 中文注释：先保存用户问题，AI回答完成后再保存助手回答。
+        //  先保存用户问题，AI回答完成后再保存助手回答。
         aiChatSessionService.saveUserMessage(
                 userId,
                 request.getConversationId(),

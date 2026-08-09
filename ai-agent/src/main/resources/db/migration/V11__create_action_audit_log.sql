@@ -244,7 +244,7 @@ ALTER TABLE ai_chat_message
         COMMENT '结构化消息载荷JSON快照'
         AFTER message_type;
 
--- 中文注释：每个聊天会话只保存一份最新业务状态。
+--  每个聊天会话只保存一份最新业务状态。
 CREATE TABLE ai_conversation_state (
    session_id VARCHAR(64) PRIMARY KEY COMMENT '会话ID',
    user_id VARCHAR(64) NOT NULL COMMENT '用户ID',

@@ -29,7 +29,7 @@ import java.util.UUID;
 public class AiChatSessionServiceImpl implements AiChatSessionService {
 
     /**
-     * 中文注释：最多取最近10条历史，避免提示词过长。
+     *  最多取最近10条历史，避免提示词过长。
      */
     private static final int MEMORY_MESSAGE_LIMIT = 10;
 
@@ -37,7 +37,7 @@ public class AiChatSessionServiceImpl implements AiChatSessionService {
     private final AiChatMessageMapper messageMapper;
     private final AgentModelProperties modelProperties;
     /**
-     * 中文注释：管理聊天会话对应的结构化业务状态。
+     *  管理聊天会话对应的结构化业务状态。
      */
     private final ConversationStateService conversationStateService;
     private static final String MESSAGE_TYPE_TEXT = "TEXT";
@@ -86,7 +86,7 @@ public class AiChatSessionServiceImpl implements AiChatSessionService {
 
     @Override
     public void updateSessionModel(String userId, String sessionId, String modelCode) {
-        // 中文注释：所有会话操作必须先验证当前用户的会话归属。
+        //  所有会话操作必须先验证当前用户的会话归属。
         requireSession(userId, sessionId);
         String resolvedModelCode = modelProperties.resolve(modelCode).getCode();
 
@@ -98,15 +98,15 @@ public class AiChatSessionServiceImpl implements AiChatSessionService {
     }
 
     /**
-     * 中文注释：删除会话和清理上下文必须位于同一个事务中。
+     *  删除会话和清理上下文必须位于同一个事务中。
      */
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void deleteSession( String userId,String sessionId) {
-        // 中文注释：清理前必须验证会话存在且属于当前用户。
+        //  清理前必须验证会话存在且属于当前用户。
         requireSession(userId, sessionId);
         /*
-         * 中文注释：必须在会话逻辑删除前清理状态。
+         *  必须在会话逻辑删除前清理状态。
          * 状态服务读取会话时要求会话仍处于未删除状态。
          */
         conversationStateService.clearState(
@@ -129,7 +129,7 @@ public class AiChatSessionServiceImpl implements AiChatSessionService {
 
     @Override
     public List<ChatMessageVO> listMessages(String userId, String sessionId) {
-        // 中文注释：所有会话操作必须先验证当前用户的会话归属。
+        //  所有会话操作必须先验证当前用户的会话归属。
         requireSession(userId, sessionId);
         return messageMapper.selectList(new LambdaQueryWrapper<AiChatMessage>()
                         .eq(AiChatMessage::getUserId, userId)
@@ -142,7 +142,7 @@ public class AiChatSessionServiceImpl implements AiChatSessionService {
 
     @Override
     public String resolveModelCode(String userId, String sessionId, String modelCode) {
-        // 中文注释：必须先验证会话归属，不能因为前端传了模型就跳过。
+        //  必须先验证会话归属，不能因为前端传了模型就跳过。
         AiChatSession session = requireSession(userId, sessionId);
 
         return modelProperties.resolve(
@@ -153,7 +153,7 @@ public class AiChatSessionServiceImpl implements AiChatSessionService {
 
     @Override
     public String buildMemory(String userId, String sessionId) {
-        // 中文注释：所有会话操作必须先验证当前用户的会话归属。
+        //  所有会话操作必须先验证当前用户的会话归属。
         requireSession(userId, sessionId);
         List<AiChatMessage> messages = messageMapper.selectList(new LambdaQueryWrapper<AiChatMessage>()
                 .eq(AiChatMessage::getUserId, userId)
@@ -201,6 +201,55 @@ public class AiChatSessionServiceImpl implements AiChatSessionService {
         saveMessage(userId,sessionId,"ASSISTANT",content,runId, modelCode,messageType,payloadJson);
     }
 
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void updateAssistantReportMessage(String userId,String sessionId,String runId,
+            String content,String payloadJson) {
+
+        if (!StringUtils.hasText(sessionId) || !StringUtils.hasText(runId)) {
+            return;
+        }
+
+        requireSession(userId, sessionId);
+        String visibleContent = content == null ? "" : content;
+        int messageUpdated = messageMapper.update(
+                null,
+                new LambdaUpdateWrapper<AiChatMessage>()
+                        .eq(AiChatMessage::getUserId, userId)
+                        .eq(AiChatMessage::getSessionId, sessionId)
+                        .eq(AiChatMessage::getRole, "ASSISTANT")
+                        .eq(AiChatMessage::getMessageType, MESSAGE_TYPE_TEXT)
+                        .eq(AiChatMessage::getRunId, runId)
+                        .set(AiChatMessage::getContent, visibleContent)
+                        .set(AiChatMessage::getPayloadJson, payloadJson)
+        );
+        if (messageUpdated != 1) {
+            throw new BusinessException(
+                    ErrorCode.BAD_REQUEST,
+                    "报告助手消息不存在或已被重复更新"
+            );
+        }
+
+        int sessionUpdated = sessionMapper.update(
+                null,
+                new LambdaUpdateWrapper<AiChatSession>()
+                        .eq(AiChatSession::getId, sessionId)
+                        .eq(AiChatSession::getUserId, userId)
+                        .eq(AiChatSession::getDeleted, 0)
+                        .set(AiChatSession::getLastMessage,
+                                visibleContent.length() > 200
+                                        ? visibleContent.substring(0, 200)
+                                        : visibleContent)
+        );
+
+        if (sessionUpdated != 1) {
+            throw new BusinessException(
+                    ErrorCode.BAD_REQUEST,
+                    "会话已删除或无权访问"
+            );
+        }
+    }
+
     private void saveMessage( String userId,
             String sessionId,
             String role,
@@ -214,7 +263,7 @@ public class AiChatSessionServiceImpl implements AiChatSessionService {
             return;
         }
 
-        // 中文注释：保存前验证会话属于当前登录用户。
+        //  保存前验证会话属于当前登录用户。
         requireSession(userId, sessionId);
 
         AiChatMessage message = new AiChatMessage();
@@ -247,7 +296,7 @@ public class AiChatSessionServiceImpl implements AiChatSessionService {
         );
 
         if (updated != 1) {
-            // 中文注释：事务会同时回滚已经插入的聊天消息。
+            //  事务会同时回滚已经插入的聊天消息。
             throw new BusinessException(
                     ErrorCode.BAD_REQUEST,
                     "会话已删除或无权访问"
@@ -280,7 +329,7 @@ public class AiChatSessionServiceImpl implements AiChatSessionService {
     }
 
     /**
-     * 中文注释：校验会话存在、未删除且属于当前登录用户。
+     *  校验会话存在、未删除且属于当前登录用户。
      */
     private AiChatSession requireSession(String userId, String sessionId) throws BusinessException {
         if (!StringUtils.hasText(sessionId)) {

@@ -120,7 +120,7 @@ public class DefaultAnswerComposer implements AnswerComposer {
                 """;
 
         /*
-         * 中文注释：历史会话只用于理解追问和代词，
+         *  历史会话只用于理解追问和代词，
          * 当前业务事实仍然必须以本次工具查询结果为准。
          */
         String conversationMemory = StringUtils.hasText(request.getConversationMemory())
@@ -155,7 +155,7 @@ public class DefaultAnswerComposer implements AnswerComposer {
                 .conversationId(request.getConversationId())
                 .userId(request.getUserId())
                 .callType(ModelCallType.ANSWER)
-                // 中文注释：最终回答使用用户当前选择的聊天模型。
+                //  最终回答使用用户当前选择的聊天模型。
                 .modelCode(request.getModelCode())
                 .callSequence(1)
                 .build();

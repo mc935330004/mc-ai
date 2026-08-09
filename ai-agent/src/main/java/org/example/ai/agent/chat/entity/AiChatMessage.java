@@ -39,7 +39,7 @@ public class AiChatMessage {
     private String messageType;
 
     /**
-     * 中文注释：结构化消息载荷 JSON。
+     *  结构化消息载荷 JSON。
      *
      * ACTION_FORM 保存 ActionFormVO；
      * ACTION_PREVIEW 保存 ActionPreviewVO；

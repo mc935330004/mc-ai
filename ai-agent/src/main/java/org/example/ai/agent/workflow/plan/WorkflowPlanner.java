@@ -56,7 +56,7 @@ public class WorkflowPlanner {
     private final TrackedChatClientService chatClientService;
     private final ObjectMapper objectMapper;
     /**
-     * 中文注释：将 Schema 校验结果转换成业务人员能理解的提示。
+     *  将 Schema 校验结果转换成业务人员能理解的提示。
      */
     private final UserFriendlyClarifyQuestionBuilder clarifyQuestionBuilder;
     /**
@@ -78,35 +78,69 @@ public class WorkflowPlanner {
      */
     private final CapabilityOptionService capabilityOptionService;
     /**
-     * 中文注释：非聊天入口不携带会话参数，保持原有调用行为。
+     * 非聊天入口不携带会话参数和业务关键词。
      */
-    public WorkflowPlan plan(String userQuestion,ModelCallContext sourceContext) {
-        return plan(
-                userQuestion,
-                sourceContext,
-                null,
-                Map.of()
-        );
+    public WorkflowPlan plan(
+            String userQuestion,
+            ModelCallContext sourceContext) {
+        return plan( userQuestion,sourceContext,null,Map.of());
     }
+
+    /**
+     * 兼容已有调用，不改变非路由入口的工作流选择行为。
+     */
+    public WorkflowPlan plan(String userQuestion,ModelCallContext sourceContext,String previousWorkflowCode,Map<String, Object> inheritedInput) {
+        return plan(userQuestion,sourceContext,previousWorkflowCode,inheritedInput,List.of());
+    }
+
     public WorkflowPlan plan(String userQuestion,
                              ModelCallContext sourceContext,
                              String previousWorkflowCode,
-                             Map<String, Object> inheritedInput) {
-        // 中文注释：从这里开始保留原 plan 方法的全部业务代码。
+                             Map<String, Object> inheritedInput,
+                             List<String> workflowKeywords) {
+        //  从这里开始保留原 plan 方法的全部业务代码。
         List<WorkflowDefinition> candidates =workflowService.listAgentCallableDefinitions();
-
         if (candidates.isEmpty()) {
-            return notMatched(
-                    "当前没有已发布工作流"
-            );
+            return notMatched("当前没有已发布工作流");
         }
 
-        WorkflowSelectionDecision decision =
-                selectWorkflow(
+        // 上下文已经确认工作流时直接复用，避免补参阶段再次调用模型选择工作流。
+        WorkflowDefinition previousWorkflow = candidates.stream()
+                .filter(item -> Objects.equals(item.getWorkflowCode(),previousWorkflowCode))
+                .findFirst()
+                .orElse(null);
+
+        WorkflowSelectionDecision decision;
+
+        if (previousWorkflow != null) {
+            // 已确认的上下文工作流优先级最高。
+            decision = new WorkflowSelectionDecision(
+                    true,
+                    previousWorkflow.getWorkflowCode(),
+                    1.0D,
+                    "复用上一轮已确认的工作流",
+                    null
+            );
+        } else {
+            WorkflowDefinition keywordWorkflow =findUniqueWorkflowByKeywords(candidates,workflowKeywords);
+            if (keywordWorkflow != null) {
+                // 业务关键词只能对应一个已发布工作流时，不再调用模型重复判断。
+                decision = new WorkflowSelectionDecision(
+                        true,
+                        keywordWorkflow.getWorkflowCode(),
+                        1.0D,
+                        "业务关键词唯一命中已发布工作流",
+                        null
+                );
+            } else {
+                // 零匹配或多匹配仍交给模型，避免错误调用业务接口。
+                decision = selectWorkflow(
                         userQuestion,
                         candidates,
                         sourceContext
                 );
+            }
+        }
 
         if (!Boolean.TRUE.equals(decision.matched())) {
             return notMatched( decision.reason());
@@ -170,7 +204,7 @@ public class WorkflowPlanner {
                         userQuestion,
                         published,
                         sourceContext);
-        // 中文注释：只有再次命中同一工作流时才继承旧参数。
+        //  只有再次命中同一工作流时才继承旧参数。
         Map<String, Object> effectiveInput = mergeInheritedInput(
                         selected.getWorkflowCode(),
                         previousWorkflowCode,
@@ -234,7 +268,7 @@ public class WorkflowPlanner {
                                     : writeNode.name()
                     ).input(
                             writeConfig == null
-                                    // 中文注释：READ 工作流只保存通过 Schema 清洗的部分参数。
+                                    //  READ 工作流只保存通过 Schema 清洗的部分参数。
                                     ? validation.getSanitizedInput()
                                     : rawActionInput
                     )
@@ -539,7 +573,48 @@ public class WorkflowPlanner {
                 )
                 .build();
     }
+    /**
+     * 业务关键词全部命中且只对应一个工作流时，返回确定性结果。
+     */
+    private WorkflowDefinition findUniqueWorkflowByKeywords(
+            List<WorkflowDefinition> candidates,
+            List<String> workflowKeywords) {
 
+        if (candidates == null || candidates.isEmpty() || workflowKeywords == null || workflowKeywords.isEmpty()) {
+            return null;
+        }
+        List<String> normalizedKeywords = workflowKeywords.stream()
+                .filter(StringUtils::hasText)
+                .map(String::trim)
+                .distinct()
+                .toList();
+        if (normalizedKeywords.isEmpty()) {
+            return null;
+        }
+        List<WorkflowDefinition> matchedWorkflows = candidates.stream()
+                .filter(candidate ->
+                        containsAllWorkflowKeywords(
+                                candidate,
+                                normalizedKeywords
+                        ))
+                .toList();
+        return matchedWorkflows.size() == 1 ? matchedWorkflows.get(0) : null;
+    }
+
+    /**
+     * 工作流名称和用途必须包含本次命中的全部业务关键词。
+     */
+    private boolean containsAllWorkflowKeywords(
+            WorkflowDefinition workflow,
+            List<String> workflowKeywords) {
+        String searchableText = String.join(
+                " ",
+                Optional.ofNullable(workflow.getWorkflowName()).orElse(""),
+                Optional.ofNullable(workflow.getDescription()).orElse("")
+        );
+        return workflowKeywords.stream()
+                .allMatch(searchableText::contains);
+    }
     private WorkflowSelectionDecision selectWorkflow(
             String userQuestion,
             List<WorkflowDefinition> candidates,
@@ -569,7 +644,7 @@ public class WorkflowPlanner {
         }
 
         /*
-         * 中文注释：工作流是业务编排的最高优先级入口。
+         *  工作流是业务编排的最高优先级入口。
          * 只要用户意图匹配已发布工作流，就必须选择工作流；
          * 只有没有任何匹配工作流时，才允许回退普通能力。
          */
@@ -778,7 +853,7 @@ public class WorkflowPlanner {
     }
 
     /**
-     * 中文注释：同一工作流继承旧参数，当前问题提取的参数拥有最高优先级。
+     *  同一工作流继承旧参数，当前问题提取的参数拥有最高优先级。
      */
     private Map<String, Object> mergeInheritedInput(
             String selectedWorkflowCode,
@@ -795,7 +870,7 @@ public class WorkflowPlanner {
             merged.putAll(inheritedInput);
         }
 
-        // 中文注释：后写入的当前参数覆盖同名历史参数。
+        //  后写入的当前参数覆盖同名历史参数。
         if (currentInput != null) {
             merged.putAll(currentInput);
         }

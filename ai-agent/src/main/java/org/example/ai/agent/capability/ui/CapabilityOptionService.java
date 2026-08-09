@@ -121,7 +121,7 @@ public class CapabilityOptionService {
 
         Map<String, Object> optionInput =
                 buildOptionInput(source,form == null? Map.of() : form );
-// 中文注释：只打印参数名称，不打印用户数据和敏感值。
+//  只打印参数名称，不打印用户数据和敏感值。
         log.info(
                 "远程选项能力入参检查，capabilityCode={}, inputKeys={}",
                 source.capabilityCode(),

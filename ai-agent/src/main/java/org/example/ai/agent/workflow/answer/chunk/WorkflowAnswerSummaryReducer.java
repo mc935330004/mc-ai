@@ -60,7 +60,25 @@ public class WorkflowAnswerSummaryReducer {
            7. 不输出模型名称、Token消耗、生成时间、数据来源声明和AI免责声明。
            8. 查询结果不完整时，只说明缺少的业务结果以及用户需要补充的业务条件。
            """;
+    /**
+     *  结构化分析只允许返回 JSON，
+     * 禁止返回 Markdown、HTML 和表格。
+     */
+    private static final String STRUCTURED_SYSTEM_PROMPT = """
+        你是企业PM项目管理系统的结构化分析助手。
 
+        只能依据输入数据生成分析结果。
+        禁止编造项目、金额、日期和状态。
+        禁止输出Markdown、HTML、CSS和表格。
+        必须只返回一个合法JSON对象。
+
+        JSON格式必须是：
+        {
+          "summary": "简短总结",
+          "highlights": ["重点一", "重点二"],
+          "warnings": ["风险一", "风险二"]
+        }
+        """;
     private final TrackedChatClientService chatClientService;
 
     private final int maxGroupItems;
@@ -104,61 +122,83 @@ public class WorkflowAnswerSummaryReducer {
 
         this.maxReductionLevels = maxReductionLevels;
     }
-
+    /**
+     *  保留旧版 Markdown 汇总能力。
+     */
     public WorkflowAnswerReductionResult reduce(
             AgentRequest request,
             String runId,
             String fieldSemanticsJson,
             WorkflowAnswerChunkCoverage coverage) {
 
+        return reduceInternal(
+                request,
+                runId,
+                fieldSemanticsJson,
+                coverage,
+                false
+        );
+    }
+    /**
+     *  生成结构化报告分析。
+     */
+    public WorkflowAnswerReductionResult reduceStructured(
+            AgentRequest request,
+            String runId,
+            String fieldSemanticsJson,
+            WorkflowAnswerChunkCoverage coverage) {
+        return reduceInternal(
+                request,
+                runId,
+                fieldSemanticsJson,
+                coverage,
+                true
+        );
+    }
+
+    private WorkflowAnswerReductionResult reduceInternal(
+            AgentRequest request,
+            String runId,
+            String fieldSemanticsJson,
+            WorkflowAnswerChunkCoverage coverage,
+            boolean structuredFinal) {
         validateCoverage(coverage);
 
-        List<ReductionItem> currentItems =
-                coverage.analyses()
+        List<ReductionItem> currentItems = coverage.analyses()
                         .stream()
                         .map(analysis ->
-                                new ReductionItem(
-                                        List.of(
-                                                analysis.chunkIndex()
-                                        ),
-                                        analysis.summary()
-                                )
-                        )
+                        new ReductionItem(List.of(analysis.chunkIndex()),analysis.summary()))
                         .toList();
 
-        ReductionState state =
-                new ReductionState(
+        ReductionState state =new ReductionState(
                         coverage.plannedChunks() + 1
                 );
 
         for (int level = 1; level <= maxReductionLevels; level++) {
-
             List<List<ReductionItem>> groups =groupItems(currentItems);
-
             /*
              * 当前全部摘要能够放进一个提示词时，
              * 直接生成最终回答，不再多调用一次模型。
              */
             if (groups.size() == 1) {
                 List<ReductionItem> finalGroup = groups.get(0);
-
                 List<Integer> coveredIndexes = collectIndexes(finalGroup);
-
                 verifyCoveredIndexes(
                         coveredIndexes,
                         coverage.plannedChunks()
                 );
 
-                String finalAnswer =callModel(
-                                request,
-                                runId,
-                                fieldSemanticsJson,
-                                coverage,
-                                finalGroup,
-                                level,
-                                true,
-                                state
-                        );
+                String finalAnswer = callModel(
+                        request,
+                        runId,
+                        fieldSemanticsJson,
+                        coverage,
+                        finalGroup,
+                        level,
+                        true,
+                        structuredFinal,
+                        state
+                );
 
                 return new WorkflowAnswerReductionResult(
                         finalAnswer,
@@ -175,23 +215,10 @@ public class WorkflowAnswerSummaryReducer {
 
                 List<Integer> sourceIndexes = collectIndexes(group);
 
-                String mergedSummary =
-                        callModel(
-                                request,
-                                runId,
-                                fieldSemanticsJson,
-                                coverage,
-                                group,
-                                level,
-                                false,
-                                state
-                        );
+                String mergedSummary = callModel(request, runId,fieldSemanticsJson,coverage,group,level,false,
+                        structuredFinal, state);
 
-                nextItems.add(new ReductionItem(
-                                sourceIndexes,
-                                mergedSummary
-                        )
-                );
+                nextItems.add(new ReductionItem(sourceIndexes,mergedSummary));
             }
 
             currentItems =List.copyOf(nextItems);
@@ -279,14 +306,14 @@ public class WorkflowAnswerSummaryReducer {
             List<ReductionItem> items,
             int level,
             boolean finalCall,
+            boolean structuredFinal,
             ReductionState state) {
 
         int callSequence =state.allocateCallSequence();
 
         List<Integer> sourceIndexes =collectIndexes(items);
 
-        String userPrompt =
-                buildPrompt(
+        String userPrompt = buildPrompt(
                         request,
                         fieldSemanticsJson,
                         coverage,
@@ -296,14 +323,12 @@ public class WorkflowAnswerSummaryReducer {
                 );
 
         Exception lastException = null;
-
         for (int attempt = 1; attempt <= 2;attempt++) {
             if (attempt == 2) {
                 state.recordRetry();
             }
 
-            ModelCallType callType =
-                    attempt == 1
+            ModelCallType callType =attempt == 1
                             ? ModelCallType.ANSWER
                             : ModelCallType.ANSWER_RETRY;
 
@@ -322,21 +347,15 @@ public class WorkflowAnswerSummaryReducer {
                                     request.getModelCode()
                             )
                             .build();
-
             try {
-                ChatResponse response =
-                        chatClientService.call(
-                                context,
-                                SYSTEM_PROMPT,
-                                userPrompt
-                        );
+                String systemPrompt =structuredFinal && finalCall ? STRUCTURED_SYSTEM_PROMPT: SYSTEM_PROMPT;
 
+                ChatResponse response =chatClientService.call(context,systemPrompt,userPrompt);
                 /*
                  * 空文本同样进入重试，
                  * 不能把空报告当成生成成功。
                  */
                 return extractText(response);
-
             } catch (Exception exception) {
                 lastException = exception;
 

@@ -76,7 +76,7 @@ public class AgentStreamEvent {
     private String contentHash;
 
     /**
-     * 中文注释：当前回答的展示类型。
+     *  当前回答的展示类型。
      *
      * REPORT：报告组件；
      * MARKDOWN：普通Markdown。
@@ -84,7 +84,7 @@ public class AgentStreamEvent {
     private String presentationType;
 
     /**
-     * 中文注释：报告标题。
+     *  报告标题。
      */
     private String presentationTitle;
 

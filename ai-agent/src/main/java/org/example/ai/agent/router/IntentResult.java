@@ -2,6 +2,7 @@ package org.example.ai.agent.router;
 
 import lombok.Builder;
 import lombok.Data;
+import org.example.ai.agent.common.enums.ReportQueryType;
 import org.example.ai.agent.plan.DynamicCapabilityPlan;
 import org.example.ai.agent.workflow.plan.WorkflowPlan;
 import java.util.List;
@@ -75,4 +76,13 @@ public class IntentResult {
      * 已选中的工作流计划。
      */
     private WorkflowPlan workflowPlan;
+
+    /**
+     * 报告查询类型。
+     *
+     * 非报告路由默认使用 DATA_QUERY，
+     * 避免每个 IntentResult 构建位置都重复设置默认值。
+     */
+    @Builder.Default
+    private ReportQueryType queryType = ReportQueryType.DATA_QUERY;
 }

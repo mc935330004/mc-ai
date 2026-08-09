@@ -13,7 +13,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 中文注释：发布时校验所有必填字段都配置了用户可读名称。
+ *  发布时校验所有必填字段都配置了用户可读名称。
  */
 @Component
 @RequiredArgsConstructor
@@ -22,7 +22,7 @@ public class UserFacingSchemaValidator {
     private final ObjectMapper objectMapper;
 
     /**
-     * 中文注释：校验普通能力的输入 Schema。
+     *  校验普通能力的输入 Schema。
      */
     public void validateCapabilitySchema(String capabilityCode,String schemaJson) {
         JsonNode schema = readJson(
@@ -36,7 +36,7 @@ public class UserFacingSchemaValidator {
     }
 
     /**
-     * 中文注释：从工作流 GraphSpec 中读取并校验 inputSchema。
+     *  从工作流 GraphSpec 中读取并校验 inputSchema。
      */
     public void validateWorkflowGraph(String workflowCode,
             String graphSpecJson) {
@@ -60,7 +60,7 @@ public class UserFacingSchemaValidator {
     }
 
     /**
-     * 中文注释：收集缺少 title 或 x-user-label 的必填字段。
+     *  收集缺少 title 或 x-user-label 的必填字段。
      */
     private void validateRequiredLabels(
             String owner,
@@ -89,7 +89,7 @@ public class UserFacingSchemaValidator {
     }
 
     /**
-     * 中文注释：递归检查对象及数组中的嵌套必填字段。
+     *  递归检查对象及数组中的嵌套必填字段。
      */
     private void collectUnlabeledRequiredFields(
             JsonNode schema,
@@ -148,7 +148,7 @@ public class UserFacingSchemaValidator {
     }
 
     /**
-     * 中文注释：自定义用户名称优先，标准 title 作为后备。
+     *  自定义用户名称优先，标准 title 作为后备。
      */
     private boolean hasUserLabel(JsonNode fieldSchema) {
         if (fieldSchema == null
@@ -168,7 +168,7 @@ public class UserFacingSchemaValidator {
     }
 
     /**
-     * 中文注释：发布校验失败时返回配置错误，不进入运行阶段。
+     *  发布校验失败时返回配置错误，不进入运行阶段。
      */
     private JsonNode readJson(
             String json,

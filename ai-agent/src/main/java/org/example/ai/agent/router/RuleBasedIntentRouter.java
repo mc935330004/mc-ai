@@ -4,6 +4,7 @@ import cn.hutool.core.collection.CollectionUtil;
 import lombok.RequiredArgsConstructor;
 import org.example.ai.agent.chat.entity.AgentRequest;
 import org.example.ai.agent.common.enums.ModelCallType;
+import org.example.ai.agent.common.enums.ReportQueryType;
 import org.example.ai.agent.common.enums.WorkflowPlanStatus;
 import org.example.ai.agent.common.modelusage.ModelCallContext;
 import org.example.ai.agent.plan.DynamicCapabilityPlan;
@@ -43,11 +44,10 @@ public class RuleBasedIntentRouter implements IntentRouter {
     private final WorkflowPlanner workflowPlanner;
     /**
      * 业务数据类关键词。
-     *
-     * 命中这些词，通常说明用户想查项目、合同、回款、任务等真实业务数据。
      */
     private static final List<String> BUSINESS_KEYWORDS = List.of(
-            "项目", "合同", "金额", "回款", "付款", "客户", "任务", "审批", "编号", "进度","产值"
+            "项目","结算","概算","现金流","合同","回款","付款","成本",
+            "金额","客户","任务","审批","编号","进度","产值"
     );
 
     /**
@@ -65,7 +65,7 @@ public class RuleBasedIntentRouter implements IntentRouter {
      * 命中这些词，通常说明用户不只是要查数据，还要解释原因、风险或建议。
      */
     private static final List<String> ANALYSIS_KEYWORDS = List.of(
-             "原因", "建议", "分析", "对比", "是否异常", "有没有问题"
+            "原因","建议", "分析","对比","风险","异常","趋势","是否异常","有没有问题"
     );
 
     /**
@@ -111,17 +111,17 @@ public class RuleBasedIntentRouter implements IntentRouter {
                 .userId(request == null ? null : request.getUserId())
                 .callType(ModelCallType.PLANNER)
                 .callSequence(1)
-                // 中文注释：工作流回答使用当前会话选择的聊天模型。
+                //  工作流回答使用当前会话选择的聊天模型。
                 .modelCode(request.getModelCode())
                 .build();
         /*
-         * 中文注释：question 已经是后端补全后的有效问题。
+         *  question 已经是后端补全后的有效问题。
          * 工作流和能力规划器不再拼接原始聊天记录，避免旧业务对象污染新问题。
          */
         String plannerQuestion = question;
         Map<String, Object> actionForm =readActionForm(request);
         if (actionForm != null) {
-            // 中文注释：WRITE 表单必须走专用入口，禁止继承历史查询参数。
+            //  WRITE 表单必须走专用入口，禁止继承历史查询参数。
             WorkflowPlan workflowPlan = workflowPlanner.planActionForm(
                             actionForm,
                             plannerContext,
@@ -232,7 +232,7 @@ public class RuleBasedIntentRouter implements IntentRouter {
     }
 
     /**
-     * 中文注释：路由优先使用后端补全问题，不接受前端提供的上下文问题。
+     *  路由优先使用后端补全问题，不接受前端提供的上下文问题。
      */
     private String normalizeQuestion(AgentRequest request) {
         if (request == null
@@ -267,14 +267,14 @@ public class RuleBasedIntentRouter implements IntentRouter {
     }
 
     /**
-     * 中文注释：构建普通澄清结果。
+     *  构建普通澄清结果。
      */
     private IntentResult clarify(String question) {
         return clarify(question, null);
     }
 
     /**
-     * 中文注释：能力已确定时保留能力计划，供会话状态记录器保存。
+     *  能力已确定时保留能力计划，供会话状态记录器保存。
      */
     private IntentResult clarify(String question,DynamicCapabilityPlan dynamicPlan) {
         return IntentResult.builder()
@@ -295,19 +295,31 @@ public class RuleBasedIntentRouter implements IntentRouter {
     }
 
     /**
-     * 中文注释：业务查询优先匹配已发布工作流。
+     *  业务查询优先匹配已发布工作流。
      * 只有工作流明确未匹配时，才回退到普通能力模块。
      */
-    private IntentResult routeBusiness( AgentRequest request,String plannerQuestion, RouteType routeType,List<String> matchedKeywords,String routeReason,
-            double confidence,ModelCallContext plannerContext) {
-        // 中文注释：业务追问将上一轮工作流身份和参数交给规划器。
-        WorkflowPlan workflowPlan =workflowPlanner.plan(
-                        plannerQuestion,
-                        plannerContext,
-                        request.getPreviousWorkflowCode(),
-                        request.getInheritedInput()
-                );
-
+    private IntentResult routeBusiness( AgentRequest request,
+                                        String plannerQuestion,
+                                        RouteType routeType,
+                                        List<String> matchedKeywords,
+                                        String routeReason,
+                                        double confidence,
+                                        ModelCallContext plannerContext) {
+        ReportQueryType queryType = resolveReportQueryType(matchedKeywords);
+        // 工作流确定性匹配只使用业务关键词，分析、统计和知识库词不参与业务类型判断。
+        List<String> workflowKeywords = matchedKeywords == null
+                ? List.of()
+                : matchedKeywords.stream()
+                  .filter(BUSINESS_KEYWORDS::contains)
+                  .distinct()
+                  .toList();
+        WorkflowPlan workflowPlan = workflowPlanner.plan(
+                plannerQuestion,
+                plannerContext,
+                request.getPreviousWorkflowCode(),
+                request.getInheritedInput(),
+                workflowKeywords
+        );
         if (workflowPlan.getStatus()== WorkflowPlanStatus.NEED_CLARIFY) {
             return IntentResult.builder()
                     .routeType(RouteType.CLARIFY)
@@ -351,15 +363,14 @@ public class RuleBasedIntentRouter implements IntentRouter {
                                     .getWorkflowName()
                     )
                     .needClarify(false)
-                    .matchedKeywords(
-                            matchedKeywords
-                    )
+                    .matchedKeywords(matchedKeywords)
                     .entities(Map.of())
+                    .queryType(queryType)
                     .workflowPlan(workflowPlan)
                     .build();
         }
         /*
-         * 中文注释：只有工作流明确未匹配时才允许回退普通能力。
+         *  只有工作流明确未匹配时才允许回退普通能力。
          * 未知或未来新增状态必须失败关闭，不能误调用业务能力。
          */
         if (workflowPlan.getStatus() != WorkflowPlanStatus.NOT_MATCHED) {
@@ -370,7 +381,7 @@ public class RuleBasedIntentRouter implements IntentRouter {
                 plannerContext,
                 request.getPreviousCapabilityCode(),
                 request.getInheritedInput());
-        // 中文注释：能力已经确定但参数不足时，保留能力计划并向用户追问。
+        //  能力已经确定但参数不足时，保留能力计划并向用户追问。
         if (dynamicPlan.isNeedClarify()) {
             return clarify(
                     dynamicPlan.getClarifyQuestion(),
@@ -412,6 +423,7 @@ public class RuleBasedIntentRouter implements IntentRouter {
         // READ 能力才允许进入正常工具执行链路
         return IntentResult.builder()
                 .routeType(routeType)
+                .queryType(queryType)
                 .confidence(confidence)
                 .reason(routeReason + "；" + dynamicPlan.getReason())
                 .matchedKeywords(matchedKeywords)
@@ -419,6 +431,16 @@ public class RuleBasedIntentRouter implements IntentRouter {
                 .entities(Map.of())
                 .dynamicCapabilityPlan(dynamicPlan)
                 .build();
+    }
+    /**
+     * 根据已经命中的分析关键词判断报告查询类型。
+     */
+    private ReportQueryType resolveReportQueryType(List<String> matchedKeywords) {
+        if (matchedKeywords == null || matchedKeywords.isEmpty()) {
+            return ReportQueryType.DATA_QUERY;
+        }
+        boolean requiresAnalysis =matchedKeywords.stream().anyMatch(ANALYSIS_KEYWORDS::contains);
+        return requiresAnalysis ? ReportQueryType.ANALYSIS_REPORT : ReportQueryType.DATA_QUERY;
     }
     /**
      * 根据能力目录匹配写操作能力。
@@ -443,7 +465,7 @@ public class RuleBasedIntentRouter implements IntentRouter {
         }
 
         DynamicCapabilityPlan dynamicPlan = dynamicCapabilityPlanner.plan(plannerQuestion, plannerContext);
-        // 中文注释：写能力参数不足时同样保留能力身份，禁止直接进入操作预览。
+        //  写能力参数不足时同样保留能力身份，禁止直接进入操作预览。
         if (dynamicPlan.isNeedClarify()) {
             return clarify(
                     dynamicPlan.getClarifyQuestion(),

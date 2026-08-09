@@ -11,7 +11,7 @@ import java.util.List;
 import java.util.Objects;
 
 /**
- * 中文注释：将内部 JSON Path 校验结果转换成用户可读的补充提示。
+ *  将内部 JSON Path 校验结果转换成用户可读的补充提示。
  */
 @Slf4j
 @Component
@@ -21,7 +21,7 @@ public class UserFriendlyClarifyQuestionBuilder {
     private final ObjectMapper objectMapper;
 
     /**
-     * 中文注释：只展示 Schema 配置的用户名称，绝不展示字段名和 JSON Path。
+     *  只展示 Schema 配置的用户名称，绝不展示字段名和 JSON Path。
      */
     public String build(String businessName, String schemaJson,CapabilityInputValidationResult validation) {
         List<String> missingLabels =
@@ -41,7 +41,7 @@ public class UserFriendlyClarifyQuestionBuilder {
 
         if (!validation.getValidationErrors().isEmpty()) {
             /*
-             * 中文注释：格式错误可能包含内部路径，
+             *  格式错误可能包含内部路径，
              * 这里只返回统一的用户提示。
              */
             return "为了准确完成"
@@ -55,7 +55,7 @@ public class UserFriendlyClarifyQuestionBuilder {
     }
 
     /**
-     * 中文注释：根据缺失路径查找 Schema 中配置的用户显示名称。
+     *  根据缺失路径查找 Schema 中配置的用户显示名称。
      */
     private List<String> resolveMissingLabels(
             String schemaJson,
@@ -80,7 +80,7 @@ public class UserFriendlyClarifyQuestionBuilder {
                     .distinct()
                     .toList();
         } catch (Exception exception) {
-            // 中文注释：Schema 解析失败时返回通用提示，不泄露内部错误。
+            //  Schema 解析失败时返回通用提示，不泄露内部错误。
             log.warn(
                     "生成用户参数提示时解析Schema失败",
                     exception
@@ -90,7 +90,7 @@ public class UserFriendlyClarifyQuestionBuilder {
     }
 
     /**
-     * 中文注释：将 $.projectKeys 等路径定位到对应字段 Schema。
+     *  将 $.projectKeys 等路径定位到对应字段 Schema。
      */
     private JsonNode resolveFieldSchema(
             JsonNode root,
@@ -136,7 +136,7 @@ public class UserFriendlyClarifyQuestionBuilder {
     }
 
     /**
-     * 中文注释：优先读取自定义用户名称，其次读取标准 JSON Schema title。
+     *  优先读取自定义用户名称，其次读取标准 JSON Schema title。
      */
     private String readUserLabel(JsonNode fieldSchema) {
         String userLabel =

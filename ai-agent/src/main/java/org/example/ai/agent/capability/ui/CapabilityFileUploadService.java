@@ -94,7 +94,7 @@ public class CapabilityFileUploadService {
         }
 
         /*
-         * 中文注释：
+         *  
          * 上传能力编码只能从WRITE能力Schema读取，
          * 不能使用Controller请求参数直接指定。
          */
@@ -139,7 +139,7 @@ public class CapabilityFileUploadService {
         validateUploadCapability(uploadCapability);
 
         /*
-         * 中文注释：
+         *  
          * 文件上传本身属于WRITE操作，
          * 调用业务接口前重新读取PM真实权限。
          */
@@ -202,7 +202,7 @@ public class CapabilityFileUploadService {
         );
 
         /*
-         * 中文注释：
+         *  
          * 只有配置了resultObjectPath才提取文件对象。
          * 旧的上传配置不会返回item，也不会改变原有提交结构。
          */
@@ -231,7 +231,7 @@ public class CapabilityFileUploadService {
             String resultObjectPath) {
 
         /*
-         * 中文注释：
+         *  
          * 没有配置对象路径时保持旧上传协议，
          * 返回null即可。
          */
@@ -323,7 +323,7 @@ public class CapabilityFileUploadService {
                 new MultipartBodyBuilder();
 
         /*
-         * 中文注释：
+         *  
          * 上传能力requestBindingJson产生的普通BODY参数
          * 继续作为multipart普通表单项发送。
          */

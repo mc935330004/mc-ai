@@ -47,7 +47,7 @@ public class AgentSessionService {
      */
     public String createSession(PmSsoIdentity identity) {
         /*
-         * 中文注释：
+         *  
          * 同一浏览器重新进行SSO登录时先销毁旧会话，
          * 避免旧会话长期并存。
          *
@@ -152,7 +152,6 @@ public class AgentSessionService {
      */
     public void deleteCurrentSession() {
         String sessionId = getCurrentSessionId();
-
         if (StringUtils.hasText(sessionId)) {
             redisTemplate.delete(buildSessionKey(sessionId));
         }

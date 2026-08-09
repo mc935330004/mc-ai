@@ -59,12 +59,12 @@ public class AgentStreamSession {
      */
     private volatile String finalMarkdown = "";
     /**
-     * 中文注释：当前回答最终展示类型。
+     *  当前回答最终展示类型。
      */
     private volatile String finalPresentationType ="MARKDOWN";
 
     /**
-     * 中文注释：当前回答报告标题。
+     *  当前回答报告标题。
      */
     private volatile String finalPresentationTitle;
 
@@ -92,6 +92,17 @@ public class AgentStreamSession {
     public synchronized void send(String eventName,AgentStreamEvent event) throws Exception {
         if (completed.get()) {
             return;
+        }
+        /*
+         * 报告事件必须同步更新最终展示协议，
+         * 避免 complete() 发送 ANSWER_DONE 时回退为 MARKDOWN。
+         */
+        if ("REPORT".equalsIgnoreCase(event.getPresentationType())) {
+            finalPresentationType = "REPORT";
+            String presentationTitle = event.getPresentationTitle();
+            if (presentationTitle != null && !presentationTitle.isBlank()) {
+                finalPresentationTitle = presentationTitle.substring(0,Math.min(presentationTitle.length(), 128));
+            }
         }
         long currentSequence = sequence.incrementAndGet();
 
@@ -134,7 +145,7 @@ public class AgentStreamSession {
         finalMarkdown = markdown == null ? "": markdown;
 
         /*
-         * 中文注释：
+         *  
          * 当前协议只开放REPORT和MARKDOWN。
          * 其他值统一降级为普通Markdown。
          */
@@ -147,7 +158,7 @@ public class AgentStreamSession {
                         : presentationTitle.trim();
 
         /*
-         * 中文注释：
+         *  
          * 报告标题不允许无限增长。
          */
         finalPresentationTitle =normalizedTitle == null

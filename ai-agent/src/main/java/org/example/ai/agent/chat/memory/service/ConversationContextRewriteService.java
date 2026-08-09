@@ -19,7 +19,7 @@ import java.util.Map;
 import java.util.Optional;
 
 /**
- * 中文注释：使用低随机性模型判断当前问题是否依赖上一轮上下文。
+ *  使用低随机性模型判断当前问题是否依赖上一轮上下文。
  */
 @Slf4j
 @Service
@@ -29,7 +29,7 @@ public class ConversationContextRewriteService {
     private static final double MIN_CONFIDENCE = 0.80D;
 
     /**
-     * 中文注释：历史内容只用于语义判断，限制长度避免完整报告占满提示词。
+     *  历史内容只用于语义判断，限制长度避免完整报告占满提示词。
      */
     private static final int MAX_HISTORY_CHARS = 6000;
 
@@ -342,7 +342,7 @@ public class ConversationContextRewriteService {
         };
     }
     /**
-     * 中文注释：保留最新历史尾部，结构化状态负责补充业务身份和参数。
+     *  保留最新历史尾部，结构化状态负责补充业务身份和参数。
      */
     private String limitHistory(String history) {
         if (!StringUtils.hasText(history)) {
@@ -360,7 +360,7 @@ public class ConversationContextRewriteService {
     }
 
     /**
-     * 中文注释：兼容模型返回 json 代码块，但只读取第一个 JSON 对象。
+     *  兼容模型返回 json 代码块，但只读取第一个 JSON 对象。
      */
     private String extractJson(String content) {
         if (!StringUtils.hasText(content)) {

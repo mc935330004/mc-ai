@@ -11,7 +11,7 @@ import java.time.LocalDateTime;
 @TableName("ai_chat_session")
 public class AiChatSession {
 
-    /** 中文注释：会话ID直接作为前端 conversationId 使用。 */
+    /**  会话ID直接作为前端 conversationId 使用。 */
     @TableId(type = IdType.INPUT)
     private String id;
 

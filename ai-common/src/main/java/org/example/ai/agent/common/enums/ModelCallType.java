@@ -56,7 +56,7 @@ public enum ModelCallType {
      */
     WORKFLOW_PARAMETER_EXTRACTOR,
     /**
-     * 中文注释：判断当前问题是否依赖上一轮会话，并生成独立完整问题。
+     *  判断当前问题是否依赖上一轮会话，并生成独立完整问题。
      */
     CONTEXT_REWRITE,
     /**

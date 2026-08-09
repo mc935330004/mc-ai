@@ -182,7 +182,7 @@ agent:
     exchange-path: /pm/ai-agent/sso/exchange
     client-id: mc-ai-agent
     client-secret: Dz6idVg6MjSsS7RqBiWTe7q90Lvrz6nw3mwDa17uCwM=
-    session-ttl-seconds: 1800
+    session-ttl-seconds: 86400
     session-cookie-name: AGENT_SESSION
     # 本地HTTP使用false，正式HTTPS使用true
     cookie-secure: false

@@ -18,7 +18,7 @@ public class AgentAccessWebConfiguration implements WebMvcConfigurer {
     public void addInterceptors( InterceptorRegistry registry) {
 
         /*
-         * 中文注释：
+         *  
          * auth接口同样需要进行Origin校验，
          * 但AgentAccessInterceptor不会要求首次Ticket交换已有会话。
          */

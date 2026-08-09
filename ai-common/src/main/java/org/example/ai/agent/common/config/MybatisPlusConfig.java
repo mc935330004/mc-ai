@@ -13,7 +13,7 @@ public class MybatisPlusConfig {
     @Bean
     public MybatisPlusInterceptor mybatisPlusInterceptor() {
         MybatisPlusInterceptor interceptor = new MybatisPlusInterceptor();
-        // 中文注释：只对带有 @Version 的实体生效，防止并发覆盖会话状态。
+        //  只对带有 @Version 的实体生效，防止并发覆盖会话状态。
         interceptor.addInnerInterceptor(
                 new OptimisticLockerInnerInterceptor()
         );

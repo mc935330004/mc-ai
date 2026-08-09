@@ -36,7 +36,7 @@ public class DefaultTrackedChatClientService implements TrackedChatClientService
     private final ModelUsageService modelUsageService;
     private final TokenUsageExtractor tokenUsageExtractor;
     /**
-     * 中文注释：聊天模型配置，只用于生成模型切换。
+     *  聊天模型配置，只用于生成模型切换。
      */
     private final AgentModelProperties modelProperties;
 
@@ -84,7 +84,7 @@ public class DefaultTrackedChatClientService implements TrackedChatClientService
 
             try {
                 /*
-                 * 中文注释：为当前请求设置聊天生成模型。
+                 *  为当前请求设置聊天生成模型。
                  * 此处不会影响向量化使用的 EmbeddingModel。
                  */
                 responseFlux = chatClient.prompt()
@@ -192,7 +192,7 @@ public class DefaultTrackedChatClientService implements TrackedChatClientService
         String observedModelName = null;
         try {
             /*
-             * 中文注释：合并业务参数和用户选择的聊天模型。
+             *  合并业务参数和用户选择的聊天模型。
              *
              * Planner 传入的 temperature 等参数会保留，
              * 最终 model 由后端配置中的 modelName 决定。
@@ -353,7 +353,7 @@ public class DefaultTrackedChatClientService implements TrackedChatClientService
         return prompt == null ? "" : prompt;
     }
     /**
-     * 中文注释：构建当前调用使用的聊天模型参数。
+     *  构建当前调用使用的聊天模型参数。
      *
      * 只覆盖 model，不修改 temperature、topK 等已有参数。
      */

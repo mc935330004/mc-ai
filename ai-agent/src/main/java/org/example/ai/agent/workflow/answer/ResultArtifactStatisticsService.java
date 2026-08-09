@@ -58,19 +58,12 @@ public class ResultArtifactStatisticsService {
      * @return 有值表示已经完成本地统计；
      *         空值表示属于定性分析，继续走原来的模型分块链路。
      */
-    public Optional<ResultArtifactAnalysisResult>
-    tryAnalyze(
-            AgentRequest request,
-            String runId,
-            ResultArtifactSnapshot snapshot) {
+    public Optional<ResultArtifactAnalysisResult> tryAnalyze( AgentRequest request,
+            String runId,ResultArtifactSnapshot snapshot) {
 
-        List<WorkflowAnswerFieldContext> fields =
-                readFieldSemantics(
-                        snapshot.fieldSemanticsJson()
-                );
+        List<WorkflowAnswerFieldContext> fields = readFieldSemantics(snapshot.fieldSemanticsJson());
 
-        List<FieldOption> fieldOptions =
-                buildFieldOptions(fields);
+        List<FieldOption> fieldOptions =buildFieldOptions(fields);
 
         AnalysisPlan plan;
 
@@ -137,38 +130,38 @@ public class ResultArtifactStatisticsService {
             );
         }
 
-        FieldOption metricField =
-                findField(
+        List<FieldOption> metricFields =
+                findFields(
                         fieldOptions,
-                        plan.metricFieldId()
+                        plan.metricFieldIds()
                 );
 
-        if (metricField == null
-                || !StringUtils.hasText(
-                metricField.fieldPath())) {
+        boolean missingFieldPath = metricFields.stream()
+                .anyMatch(field ->
+                        !StringUtils.hasText(field.fieldPath())
+                );
 
-            return Optional.of(
-                    guidance(
-                            snapshot,
-                            "没有在上一轮字段语义中找到可定位的统计字段。"
-                                    + "请检查字段字典的字段路径并重新执行查询。"
-                    )
-            );
+        if (metricFields.isEmpty() || missingFieldPath) {
+            return Optional.of( guidance(snapshot,
+                            "没有从上一轮报告中识别出用户指定的统计字段。"
+                                    + "请明确输入字段名称和求和、平均、最大、最小或计数方式。"));
         }
 
         /*
          * 求和、平均值、最大值、最小值只能使用允许聚合的字段。
          * COUNT和COUNT_DISTINCT只读取字段出现次数，不强制聚合标志。
          */
-        if (!"COUNT".equals(operation)
-                && !"COUNT_DISTINCT".equals(operation)
-                && !metricField.aggregatable()) {
-
+        FieldOption disabledField = metricFields.stream().filter(field -> !"COUNT".equals(operation)
+                                && !"COUNT_DISTINCT".equals(operation)
+                                && !field.aggregatable())
+                .findFirst()
+                .orElse(null);
+        if (disabledField != null) {
             return Optional.of(
                     guidance(
                             snapshot,
                             "字段“"
-                                    + metricField.label()
+                                    + disabledField.label()
                                     + "”当前未开启聚合统计。"
                                     + "请在字段字典中将该字段设置为允许聚合后，"
                                     + "重新执行一次业务查询。"
@@ -182,45 +175,39 @@ public class ResultArtifactStatisticsService {
                             snapshot.chunkPlan()
                     );
 
-            JsonNode resultNode =
-                    payload.get("result");
+            JsonNode resultNode =payload.get("result");
 
-            if (resultNode == null
-                    || resultNode.isNull()
-                    || resultNode.isMissingNode()) {
-
-                return Optional.of(
-                        guidance(
-                                snapshot,
-                                "上一轮查询没有返回可以统计的业务数据。"
-                        )
-                );
+            if (resultNode == null || resultNode.isNull() || resultNode.isMissingNode()) {
+                return Optional.of(guidance(snapshot,"上一轮查询没有返回可以统计的业务数据。"));
             }
+            /*
+             * 确定性统计只读取工作流机器数据。
+             *
+             * workflowData 是当前标准字段；
+             * data 用于兼容没有 workflowData 的旧 Artifact；
+             * displayData 是展示副本，禁止参与统计。
+             */
+            JsonNode statisticsData =resolveStatisticsData(resultNode);
+            // 每个字段独立提取和计算，避免不同金额字段混在一起累计。
+            List<StatisticResult> statistics = new ArrayList<>();
 
-            FieldValueSet valueSet =
-                    extractFieldValues(
-                            resultNode,
-                            metricField
-                    );
-
-            Calculation calculation =
-                    calculate(
-                            operation,
-                            valueSet,
-                            metricField
-                    );
+            for (FieldOption metricField : metricFields) {
+                FieldValueSet valueSet =extractFieldValues(statisticsData, metricField );
+                Calculation calculation =calculate(
+                                operation,
+                                valueSet,
+                                metricField
+                        );
+                statistics.add(new StatisticResult(metricField,calculation));
+            }
 
             return Optional.of(
                     new ResultArtifactAnalysisResult(
                             renderMarkdown(
                                     operation,
-                                    metricField,
-                                    calculation,
-                                    Boolean.TRUE.equals(
-                                            snapshot.artifact()
-                                                    .getDataComplete()
-                                    )
-                            ),
+                                    statistics,
+                                    Boolean.TRUE.equals(snapshot.artifact().getDataComplete()),
+                                    requestsTenThousandYuan(request)),
                             resolveReportTitle(snapshot),
                             Boolean.TRUE.equals(
                                     snapshot.artifact()
@@ -309,16 +296,31 @@ public class ResultArtifactStatisticsService {
                     "统计规划结果为空"
             );
         }
-
         return new AnalysisPlan(
                 normalize(original.mode()),
                 normalize(original.operation()),
-                trimToNull(
-                        original.metricFieldId()
-                ),
+                null,
+                resolveMetricFieldIds(original),
                 original.confidence(),
                 trimToNull(original.reason())
         );
+    }
+    /**
+     * 优先读取多字段协议，同时兼容旧的单字段结果。
+     */
+    private List<String> resolveMetricFieldIds(AnalysisPlan plan) {
+        List<String> fieldIds = new ArrayList<>();
+        if (plan.metricFieldIds() != null) {
+            fieldIds.addAll(plan.metricFieldIds());
+        }
+        if (StringUtils.hasText(plan.metricFieldId())) {
+            fieldIds.add(plan.metricFieldId());
+        }
+        return fieldIds.stream()
+                .filter(StringUtils::hasText)
+                .map(String::trim)
+                .distinct()
+                .toList();
     }
 
     private String buildSystemPrompt() {
@@ -354,30 +356,31 @@ public class ResultArtifactStatisticsService {
 
                 必须遵守：
 
-                1. metricFieldId只能选择字段目录中的字段ID。
-                2. SUM、AVG、MIN、MAX必须选择aggregatable=true的字段。
-                3. 不得自己编造字段ID、字段名称或者字段路径。
-                4. 不得计算最终金额。
-                5. 不得输出Markdown。
-                6. 只输出一个JSON对象。
-
+                1. metricFieldIds只能选择字段目录中的字段ID。
+                2. 用户要求统计多个字段时，必须返回全部对应字段ID。
+                3. 用户只要求一个字段时，metricFieldIds也必须返回数组。
+                4. SUM、AVG、MIN、MAX必须选择aggregatable=true的字段。
+                5. 不得自己编造字段ID、字段名称或者字段路径。
+                6. 不得计算最终金额。
+                7. 不得输出Markdown。
+                8. 只输出一个JSON对象。
+                9. “各自”“分别”表示需要选择用户明确提到的全部字段。
+                10. “换算成万元”等单位要求不影响统计字段和统计方式选择。
+                11. 单位换算由后端Java执行，规划器不得因为单位换算要求返回CLARIFY。
+                
                 输出格式：
-
+                
                 {
                   "mode": "STATISTICS",
                   "operation": "SUM",
-                  "metricFieldId": "F3",
+                  "metricFieldIds": ["F3", "F4"],
                   "confidence": 0.98,
-                  "reason": "用户要求汇总本次结算金额"
+                  "reason": "用户要求分别汇总含税金额和不含税金额"
                 }
                 """;
     }
 
-    private String buildUserPrompt(
-            AgentRequest request,
-            List<FieldOption> fieldOptions)
-            throws Exception {
-
+    private String buildUserPrompt(AgentRequest request,List<FieldOption> fieldOptions)throws Exception {
         return """
                 用户问题：
                 %s
@@ -385,10 +388,9 @@ public class ResultArtifactStatisticsService {
                 可选择字段目录：
                 %s
                 """.formatted(
-                request.getEffectiveQuestion(),
-                objectMapper.writeValueAsString(
-                        fieldOptions
-                )
+                // 统计字段、统计方式和目标单位必须以用户原话为准，避免上下文改写丢失限定条件。
+                request.getUserQuestion().trim(),
+                objectMapper.writeValueAsString(fieldOptions)
         );
     }
 
@@ -471,6 +473,60 @@ public class ResultArtifactStatisticsService {
     }
 
     /**
+     * 根据模型返回的受控字段ID查找全部统计字段。
+     *
+     * 任意字段ID不存在时返回空列表，禁止部分字段静默参与计算。
+     */
+    private List<FieldOption> findFields(
+            List<FieldOption> fields,
+            List<String> fieldIds) {
+
+        if (fieldIds == null || fieldIds.isEmpty()) {
+            return List.of();
+        }
+
+        List<FieldOption> result = new ArrayList<>();
+
+        for (String fieldId : fieldIds) {
+            FieldOption field = findField(fields, fieldId);
+
+            if (field == null) {
+                return List.of();
+            }
+
+            if (!result.contains(field)) {
+                result.add(field);
+            }
+        }
+
+        return List.copyOf(result);
+    }
+
+    /**
+     * 选择确定性统计使用的机器数据。
+     *
+     * 不修改 Artifact 原始内容，只选择唯一可信分支。
+     */
+    private JsonNode resolveStatisticsData(JsonNode resultNode) {
+        JsonNode workflowData = resultNode.get("workflowData");
+        if (workflowData != null && workflowData.isContainerNode()) {
+            return workflowData;
+        }
+        /*
+         * 兼容旧 Artifact。
+         * 旧结构没有 workflowData 时，data 是唯一可用的业务数据。
+         */
+        JsonNode data = resultNode.get("data");
+        if (data != null && data.isContainerNode()) {
+            return data;
+        }
+        /*
+         * 兼容结果本身就是业务对象的简单工作流。
+         */
+        return resultNode;
+    }
+
+    /**
      * 根据完整字段路径从最终result中提取全部值。
      *
      * 优先使用完整路径后缀匹配。
@@ -510,27 +566,13 @@ public class ResultArtifactStatisticsService {
          * 避免同名金额字段被错误累加。
          */
         if (matches.isEmpty()) {
-            matches = leaves.stream()
-                    .filter(leaf ->
-                            !leaf.pathTokens().isEmpty()
-                                    && field.fieldName()
-                                    .equals(
-                                            leaf.pathTokens()
-                                                    .get(
-                                                            leaf.pathTokens()
-                                                                    .size() - 1
-                                                    )
-                                    )
-                    )
-                    .toList();
+            matches = leaves.stream().filter(leaf ->!leaf.pathTokens().isEmpty() &&
+                            field.fieldName().equals(leaf.pathTokens().get(leaf.pathTokens().size() - 1))).toList();
         }
 
         if (matches.isEmpty()) {
             throw new AnalysisDataException(
-                    "上一轮结果中没有找到字段“"
-                            + field.label()
-                            + "”。请检查字段字典路径后重新查询。"
-            );
+                    "上一轮业务数据中没有找到字段“"+ field.label() + "”。请确认字段配置已经发布后重新查询。");
         }
 
         Map<String, List<JsonNode>> valuesByPath =
@@ -558,12 +600,10 @@ public class ResultArtifactStatisticsService {
          */
         if (valuesByPath.size() != 1) {
             throw new AnalysisDataException(
-                    "字段“"
-                            + field.label()
-                            + "”在上一轮结果中对应多个数据结构，"
+                    "字段“"+ field.label()
+                            + "”在上一轮业务数据中出现于多个区域，"
                             + "为避免重复统计，本次没有计算。"
-                            + "请为需要统计的字段配置更精确的字段路径。"
-            );
+                            + "请联系管理员完善该字段的统计配置。");
         }
 
         Map.Entry<String, List<JsonNode>> entry =
@@ -894,44 +934,45 @@ public class ResultArtifactStatisticsService {
         return normalized.toPlainString();
     }
 
-    private String renderMarkdown(
-            String operation,
-            FieldOption field,
-            Calculation calculation,
-            boolean dataComplete) {
-
-        StringBuilder markdown =
-                new StringBuilder();
-
+    /**
+     * 将多个字段的统计结果渲染为一张固定表格。
+     */
+    private String renderMarkdown(String operation,List<StatisticResult> statistics,
+                                   boolean dataComplete,boolean convertToTenThousandYuan) {
+        StringBuilder markdown = new StringBuilder();
         markdown.append("## 上一轮结果统计")
                 .append("\n\n")
-                .append("| 统计项目 | 统计结果 |")
+                .append("| 统计字段 | 统计方式 | 参与计算数量 | 统计结果 |")
                 .append("\n")
-                .append("|---|---:|")
-                .append("\n")
-                .append("| 统计字段 | ")
-                .append(escapeMarkdown(field.label()))
-                .append(" |")
-                .append("\n")
-                .append("| 统计方式 | ")
-                .append(operationLabel(operation))
-                .append(" |")
-                .append("\n")
-                .append("| 参与计算数量 | ")
-                .append(calculation.usedCount())
-                .append(" |")
-                .append("\n")
-                .append("| 统计结果 | **")
-                .append(calculation.value())
-                .append("** |")
+                .append("|---|---|---:|---:|")
                 .append("\n");
 
-        if (calculation.nullCount() > 0) {
+        for (StatisticResult statistic : statistics) {
+            markdown.append("| ")
+                    .append(escapeMarkdown(statistic.field().label()))
+                    .append(" | ")
+                    .append(operationLabel(operation))
+                    .append(" | ")
+                    .append(statistic.calculation().usedCount())
+                    .append(" | **")
+                    .append(formatStatisticValue(operation,statistic,convertToTenThousandYuan))
+                    .append("** |")
+                    .append("\n");
+        }
+
+        for (StatisticResult statistic : statistics) {
+            if (statistic.calculation().nullCount() <= 0) {
+                continue;
+            }
+
             markdown.append("\n")
-                    .append("> 有 ")
-                    .append(calculation.nullCount())
-                    .append(" 条记录的该字段为空，"
-                            + "未参与计算，但没有被静默忽略。");
+                    .append("> 字段“")
+                    .append(escapeMarkdown(
+                            statistic.field().label()
+                    ))
+                    .append("”有 ")
+                    .append(statistic.calculation().nullCount())
+                    .append(" 条记录为空，未参与计算。");
         }
 
         if (!dataComplete) {
@@ -942,7 +983,50 @@ public class ResultArtifactStatisticsService {
 
         return markdown.toString();
     }
+    /**
+     * 判断用户是否明确要求将金额换算成万元。
+     */
+    private boolean requestsTenThousandYuan(
+            AgentRequest request) {
 
+        return request != null
+                && StringUtils.hasText(request.getUserQuestion())
+                && request.getUserQuestion().contains("万元");
+    }
+
+    /**
+     * 金额字段原始单位为元时，按照用户要求确定性换算为万元。
+     */
+    private String formatStatisticValue(
+            String operation,
+            StatisticResult statistic,
+            boolean convertToTenThousandYuan) {
+
+        String originalValue = statistic.calculation().value();
+
+        if (!convertToTenThousandYuan || "COUNT".equals(operation)
+                || "COUNT_DISTINCT".equals(operation)
+                || !isYuanAmountField(statistic.field())) {
+
+            return originalValue;
+        }
+
+        BigDecimal tenThousandYuan =new BigDecimal(originalValue).movePointLeft(4);
+
+        return formatNumber(tenThousandYuan)+ " 万元";
+    }
+
+    /**
+     * 只有字段字典明确声明原始单位为元的金额字段才允许换算。
+     */
+    private boolean isYuanAmountField( FieldOption field) {
+        return field != null
+                && "amount".equalsIgnoreCase(field.format())
+                && StringUtils.hasText(field.meaning())
+                && field.meaning()
+                .replace(" ", "")
+                .contains("单位元");
+    }
     private String operationLabel(
             String operation) {
 
@@ -1036,7 +1120,10 @@ public class ResultArtifactStatisticsService {
     private record AnalysisPlan(
             String mode,
             String operation,
+            // 兼容旧模型返回的单字段协议。
             String metricFieldId,
+            // 新协议支持一次选择多个受控字段。
+            List<String> metricFieldIds,
             Double confidence,
             String reason) {
     }
@@ -1072,10 +1159,15 @@ public class ResultArtifactStatisticsService {
             long nullCount,
             String value) {
     }
-
+    /**
+     * 保存一个字段及其本地计算结果。
+     */
+    private record StatisticResult(
+            FieldOption field,
+            Calculation calculation) {
+    }
     private static final class
-    AnalysisDataException
-            extends RuntimeException {
+    AnalysisDataException extends RuntimeException {
 
         private AnalysisDataException(
                 String message) {

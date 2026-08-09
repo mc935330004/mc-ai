@@ -19,7 +19,7 @@ import org.springframework.util.StringUtils;
 import java.util.Optional;
 
 /**
- * 中文注释：使用一条 JSON 状态记录保存每个会话的最新业务上下文。
+ *  使用一条 JSON 状态记录保存每个会话的最新业务上下文。
  */
 @Service
 @RequiredArgsConstructor
@@ -30,7 +30,7 @@ public class ConversationStateServiceImpl  implements ConversationStateService {
     private final ObjectMapper objectMapper;
 
     /**
-     * 中文注释：读取状态前校验会话归属，防止跨用户访问。
+     *  读取状态前校验会话归属，防止跨用户访问。
      */
     @Override
     public Optional<BusinessConversationState> loadState(
@@ -59,7 +59,7 @@ public class ConversationStateServiceImpl  implements ConversationStateService {
     }
 
     /**
-     * 中文注释：首次调用插入状态，后续调用通过版本号安全更新状态。
+     *  首次调用插入状态，后续调用通过版本号安全更新状态。
      */
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -92,7 +92,7 @@ public class ConversationStateServiceImpl  implements ConversationStateService {
 
         entity.setStateJson(stateJson);
 
-        // 中文注释：更新数量为零表示状态已被其他请求修改。
+        //  更新数量为零表示状态已被其他请求修改。
         if (stateMapper.updateById(entity) != 1) {
             throw new BusinessException(
                     409,
@@ -102,7 +102,7 @@ public class ConversationStateServiceImpl  implements ConversationStateService {
     }
 
     /**
-     * 中文注释：使用用户ID和会话ID共同删除，避免清理其他用户的数据。
+     *  使用用户ID和会话ID共同删除，避免清理其他用户的数据。
      */
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -115,7 +115,7 @@ public class ConversationStateServiceImpl  implements ConversationStateService {
     }
 
     /**
-     * 中文注释：查询指定用户和会话的唯一状态记录。
+     *  查询指定用户和会话的唯一状态记录。
      */
     private AiConversationState findState(
             String userId,
@@ -129,7 +129,7 @@ public class ConversationStateServiceImpl  implements ConversationStateService {
     }
 
     /**
-     * 中文注释：将结构化状态序列化成数据库 JSON。
+     *  将结构化状态序列化成数据库 JSON。
      */
     private String writeState(BusinessConversationState state) {
         try {
@@ -144,7 +144,7 @@ public class ConversationStateServiceImpl  implements ConversationStateService {
     }
 
     /**
-     * 中文注释：校验会话存在、未删除且属于当前用户。
+     *  校验会话存在、未删除且属于当前用户。
      */
     private void requireSession(String userId, String sessionId) {
         requireArguments(userId, sessionId);
@@ -165,7 +165,7 @@ public class ConversationStateServiceImpl  implements ConversationStateService {
     }
 
     /**
-     * 中文注释：统一校验状态操作所需的基础参数。
+     *  统一校验状态操作所需的基础参数。
      */
     private void requireArguments(String userId, String sessionId) {
         if (!StringUtils.hasText(userId)) {

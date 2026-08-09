@@ -96,7 +96,7 @@ public class AgentSsoProperties {
     /**
      * SSO启用时立即检查安全配置。
      *
-     * 中文注释：
+     *  
      * 配置错误应在系统启动时暴露，
      * 不能等用户登录时才发现密钥或Cookie配置错误。
      */

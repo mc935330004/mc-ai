@@ -7,23 +7,23 @@ import org.example.ai.agent.workflow.runtime.WorkflowExecutionOutcome;
 import java.util.List;
 
 /**
- * 中文注释：TEXT 类型助手消息的结构化展示快照。
+ *  TEXT 类型助手消息的结构化展示快照。
  * Markdown 正文仍保存在 AiChatMessage.content 中。
  */
 @Data
 @Builder
 public class ChatTextPayloadVO {
 
-    /** 中文注释：用于展示核心业务指标卡片。 */
+    /**  用于展示核心业务指标卡片。 */
     private List<FactPreviewVO> facts;
 
-    /** 中文注释：用于历史会话恢复 RAG 引用来源。 */
+    /**  用于历史会话恢复 RAG 引用来源。 */
     private List<KnowledgeDocumentQueryResponse.Reference> references;
 
-    /** 中文注释：用于历史会话恢复工作流执行结果。 */
+    /**  用于历史会话恢复工作流执行结果。 */
     private WorkflowExecutionOutcome workflow;
     /**
-     * 中文注释：固定报告组件使用的结构化数据。
+     *  固定报告组件使用的结构化数据。
      *
      * 保留旧 workflow 字段，
      * 让旧客户端继续兼容。

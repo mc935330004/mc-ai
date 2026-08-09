@@ -118,11 +118,11 @@ public class PendingActionController {
                     .append("** 已执行完成。\n\n");
             appendOutput(markdown, output);
         } else if ("FAILED".equals(action.getStatus())) {
-        // 中文注释：禁止向用户直接展示后台异常和内部状态码。
+        //  禁止向用户直接展示后台异常和内部状态码。
         markdown.append("## 操作未完成\n\n")
                 .append("业务操作未完成，请检查提交的信息后重试。");
         } else {
-                // 中文注释：未完成状态只展示用户可以理解的结果。
+                //  未完成状态只展示用户可以理解的结果。
                 markdown.append("## 操作处理中\n\n")
                         .append("当前操作尚未完成。");
         }

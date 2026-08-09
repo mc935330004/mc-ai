@@ -255,7 +255,7 @@ public class CapabilityUiSchemaParser {
         UploadSource uploadSource = null;
 
         /*
-         * 中文注释：
+         *  
          * 远程下拉和文件上传分别使用自己的配置协议，
          * 防止普通字段伪造能力编码调用其他业务接口。
          */
@@ -747,7 +747,7 @@ public class CapabilityUiSchemaParser {
             );
         }
         /*
-         * 中文注释：
+         *  
          * resultObjectPath表示从responseBinding已经提取出的data中，
          * 读取完整文件对象。
          *
@@ -832,7 +832,7 @@ public class CapabilityUiSchemaParser {
                 sourceNode.get("submitMapping");
 
         /*
-         * 中文注释：
+         *  
          * 没有submitMapping表示继续使用原有单值或ID数组模式。
          */
         if (mappingNode == null
@@ -878,7 +878,7 @@ public class CapabilityUiSchemaParser {
         }
 
         /*
-         * 中文注释：
+         *  
          * 文件对象集合必须写回当前FILE_UPLOAD字段，
          * 避免页面同时维护第三份重复状态。
          */

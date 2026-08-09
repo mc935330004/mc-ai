@@ -54,7 +54,7 @@ public class KnowledgeDocumentQueryService {
 
     private final TrackedChatClientService trackedChatClientService;
     /**
-     * 中文注释：只有包含上下文指代词的追问才拼接历史，
+     *  只有包含上下文指代词的追问才拼接历史，
      * 避免普通问题被无关会话内容干扰。
      */
     private static final List<String> CONTEXT_REFERENCE_WORDS = List.of(
@@ -157,7 +157,7 @@ public class KnowledgeDocumentQueryService {
     }
 
     /**
-     * 中文注释：兼容普通知识库查询，默认没有会话记忆。
+     *  兼容普通知识库查询，默认没有会话记忆。
      */
     public KnowledgeDocumentQueryResponse query(
             KnowledgeDocumentQueryRequest request,
@@ -181,7 +181,7 @@ public class KnowledgeDocumentQueryService {
             if (!StringUtils.hasText(question)) {
                 throw new BusinessException( ErrorCode.BAD_REQUEST, "问题不能为空" );
             }
-            // 中文注释：上下文追问使用历史信息补全检索语义，向量模型仍使用固定配置。
+            //  上下文追问使用历史信息补全检索语义，向量模型仍使用固定配置。
             String retrievalQuestion = buildRetrievalQuestion(
                     question,
                     conversationMemory
@@ -238,7 +238,7 @@ public class KnowledgeDocumentQueryService {
         }
     }
     /**
-     * 中文注释：为包含代词或省略信息的追问补充最近会话，
+     *  为包含代词或省略信息的追问补充最近会话，
      * 这里只改变检索文本，不切换或动态配置向量模型。
      */
     private String buildRetrievalQuestion(
@@ -252,7 +252,7 @@ public class KnowledgeDocumentQueryService {
             return question;
         }
 
-        // 中文注释：限制参与向量检索的历史长度，避免超过 Embedding 输入限制。
+        //  限制参与向量检索的历史长度，避免超过 Embedding 输入限制。
         String memory = conversationMemory.length() > MAX_RETRIEVAL_MEMORY_CHARS
                 ? conversationMemory.substring(
                 conversationMemory.length() - MAX_RETRIEVAL_MEMORY_CHARS
@@ -358,7 +358,7 @@ public class KnowledgeDocumentQueryService {
     }
 
     /**
-     * 中文注释：构建带最近会话记忆的 RAG 提示词。
+     *  构建带最近会话记忆的 RAG 提示词。
      *
      * 向量检索仍然只使用当前 question，
      * conversationMemory 不参与 Embedding 计算。

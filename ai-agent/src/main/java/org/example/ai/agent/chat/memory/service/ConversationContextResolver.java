@@ -51,48 +51,46 @@ public class ConversationContextResolver {
     /**
      * 解析当前问题与上一轮业务状态的关系。
      */
-    public String resolve(
-            AgentRequest request,
-            String runId) {
+    public String resolve(AgentRequest request,String runId) {
 
         if (request == null || !StringUtils.hasText( request.getUserQuestion())) {
-
             return null;
         }
 
-        String question =
-                request.getUserQuestion().trim();
+        String question =request.getUserQuestion().trim();
 
         /*
          * 清除上下文属于确定性系统命令，
          * 不需要调用模型判断。
          */
         if (isContextReset(question)) {
-            return resetContext(
-                    request,
-                    question
-            );
+            return resetContext( request,question);
         }
 
         try {
-            BusinessConversationState state =conversationStateService
-                            .loadState(request.getUserId(),
+
+            BusinessConversationState state =conversationStateService.loadState(request.getUserId(),
                             request.getConversationId()).orElse(null);
             if (state == null) {
                 return null;
             }
-            ConversationRewriteDecision decision =
-                    rewriteService.decide(
-                                    request,
-                                    state,
-                                    runId
-                            )
-                            .orElse(null);
-
-            if (decision == null) {
-                return null;
+            // 已明确等待用户补参时，简单业务编号直接复用结构化状态，不再调用模型判断。
+            String clarificationQuestion = resolveClarificationFallback(
+                    request,
+                    state,
+                    question
+            );
+            if (StringUtils.hasText(clarificationQuestion)) {
+                return clarificationQuestion;
             }
-
+            ConversationRewriteDecision decision =rewriteService.decide(request,state,runId).orElse(null);
+            if (decision == null) {
+                return resolveClarificationFallback(
+                        request,
+                        state,
+                        question
+                );
+            }
             /*
              * 分析上一轮已经返回的数据。
              */
@@ -104,17 +102,11 @@ public class ConversationContextResolver {
                  *
                  * 编排器会返回“请先查询数据”的用户提示。
                  */
-                request.setResultAnalysisRequest(
-                        true
-                );
+                request.setResultAnalysisRequest(true);
 
                 if (StringUtils.hasText(state.getResultArtifactId())) {
-                    applyState(
-                            request,
-                            state
-                    );
+                    applyState(request,state);
                 }
-
                 return StringUtils.hasText(
                         decision.rewrittenQuestion())
                         ? decision.rewrittenQuestion()
@@ -126,24 +118,16 @@ public class ConversationContextResolver {
              * 用户补充或者修改查询条件，
              * 重新执行上一轮查询。
              */
-            if (rewriteService.isFollowUpQuery(
-                    decision)) {
-
-                applyState(
-                        request,
-                        state
-                );
-
+            if (rewriteService.isFollowUpQuery(decision)) {
+                applyState(request,state);
                 return decision
                         .rewrittenQuestion()
                         .trim();
             }
-
             /*
-             * NEW_TOPIC和UNCERTAIN不继承旧状态。
+             * NEW_TOPIC 和 UNCERTAIN 不继承旧状态。
              */
             return null;
-
         } catch (RuntimeException exception) {
             /*
              * 分类失败时关闭上下文继承，
@@ -160,6 +144,30 @@ public class ConversationContextResolver {
         }
     }
 
+    /**
+     * 仅在上一轮明确等待补参时复用简单项目编号。
+     */
+    private String resolveClarificationFallback(AgentRequest request,BusinessConversationState state,String question) {
+
+        if (!state.isAwaitingClarification() || !isSimpleBusinessIdentifier(question)) {
+            return null;
+        }
+        applyState(request, state);
+        String topic = StringUtils.hasText(state.getBusinessTopic())
+                ? state.getBusinessTopic().trim()
+                : "上一轮业务查询";
+        return topic + "，补充查询条件：" + question;
+    }
+
+    /**
+     * 项目编号只允许常用字母、数字、下划线和连接符。
+     */
+    private boolean isSimpleBusinessIdentifier(String question) {
+        if (!StringUtils.hasText(question)) {
+            return false;
+        }
+        return question.trim().matches("[A-Za-z0-9_-]{2,64}");
+    }
     /**
      * 将服务端可信会话状态写入当前请求。
      */

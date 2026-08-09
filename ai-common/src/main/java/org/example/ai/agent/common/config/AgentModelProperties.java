@@ -13,14 +13,14 @@ import java.util.List;
 @ConfigurationProperties(prefix = "app.agent.model")
 public class AgentModelProperties {
 
-    /** 中文注释：默认模型编码，前端不传时使用。 */
+    /**  默认模型编码，前端不传时使用。 */
     private String defaultCode;
 
-    /** 中文注释：模型列表从 application.yml 读取，前端下拉框也读取这里。 */
+    /**  模型列表从 application.yml 读取，前端下拉框也读取这里。 */
     private List<ModelItem> models = new ArrayList<>();
 
     /**
-     * 中文注释：解析前端选择的聊天模型。
+     *  解析前端选择的聊天模型。
      *
      * 前端未传时使用默认模型；
      * 前端传入不存在或已停用的模型时直接拒绝，避免静默切换。

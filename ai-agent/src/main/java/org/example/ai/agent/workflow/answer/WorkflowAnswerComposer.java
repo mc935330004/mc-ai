@@ -5,12 +5,15 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.example.ai.agent.chat.entity.AgentRequest;
+import org.example.ai.agent.chat.vo.ReportSchemaVO;
 import org.example.ai.agent.workflow.answer.artifact.ResultArtifactService;
 import org.example.ai.agent.workflow.answer.chunk.*;
 import org.example.ai.agent.workflow.answer.trace.WorkflowAnswerTraceRecorder;
 import org.example.ai.agent.workflow.runtime.WorkflowExecutionOutcome;
 import org.springframework.stereotype.Service;
-
+import com.fasterxml.jackson.databind.JsonNode;
+import java.util.ArrayList;
+import java.util.List;
 /**
  * 根据工作流结构化结果生成最终中文回答。
  *
@@ -29,25 +32,149 @@ public class WorkflowAnswerComposer {
 
     private final ObjectMapper objectMapper;
 
-    private final WorkflowAnswerFieldContextResolver
-            fieldContextResolver;
+    private final WorkflowAnswerFieldContextResolver fieldContextResolver;
 
-    private final WorkflowAnswerPayloadFactory
-            answerPayloadFactory;
-
-    private final WorkflowAnswerChunkPlanner
-            chunkPlanner;
-
-    private final WorkflowAnswerChunkConsumer
-            chunkConsumer;
-
-    private final WorkflowAnswerSummaryReducer
-            summaryReducer;
+    private final WorkflowAnswerPayloadFactory answerPayloadFactory;
+    private final WorkflowAnswerChunkPlanner chunkPlanner;
+    private final WorkflowAnswerChunkConsumer chunkConsumer;
+    private final WorkflowAnswerSummaryReducer summaryReducer;
     private final WorkflowAnswerTraceRecorder traceRecorder;
-    /**
-     * 保存经过字段过滤后的安全结果快照。
-     */
     private final ResultArtifactService resultArtifactService;
+    /**
+     *  准备基础报告。
+     *
+     * 该方法只执行安全字段过滤、分块和 Artifact 保存，
+     * 不调用大模型。
+     */
+    public WorkflowAnswerPreparation prepareReport(AgentRequest request,WorkflowExecutionOutcome outcome) {
+        if (outcome == null) {
+            throw new IllegalArgumentException("工作流执行结果不能为空");
+        }
+        if (!outcome.success()) {
+            throw new IllegalStateException("工作流执行失败");
+        }
+        traceRecorder.recordWorkflowResult(
+                outcome.runId(),
+                outcome,
+                "REPORT"
+        );
+        WorkflowAnswerFieldPolicy fieldPolicy =fieldContextResolver.resolvePolicy(outcome);
+        WorkflowAnswerModelPayload modelPayload =answerPayloadFactory.create(
+                        outcome,
+                        fieldPolicy.hiddenFieldNames() );
+        String fieldSemanticsJson = writeJson(fieldPolicy.visibleFields());
+        WorkflowAnswerChunkPlan chunkPlan = chunkPlanner.plan(modelPayload);
+        String artifactId = resultArtifactService.save(
+                        request,
+                        outcome,
+                        fieldPolicy,
+                        chunkPlan
+                );
+        return new WorkflowAnswerPreparation(
+                outcome,
+                fieldPolicy,
+                modelPayload,
+                fieldSemanticsJson,
+                chunkPlan,
+                artifactId
+        );
+    }
+    /**
+     *  基于已保存 Artifact 生成结构化 AI 分析。
+     */
+    public WorkflowAnswerAnalysisResult analyzeReport(
+            AgentRequest request,
+            WorkflowAnswerPreparation preparation) {
+        WorkflowAnswerChunkPlan chunkPlan = preparation.chunkPlan();
+        long chunkStartedAt = System.currentTimeMillis();
+        WorkflowAnswerChunkCoverage coverage =chunkConsumer.consume(
+                        request,
+                        preparation.outcome().runId(),
+                        preparation.fieldSemanticsJson(),
+                        chunkPlan
+                );
+
+        traceRecorder.recordChunkSuccess(
+                preparation.outcome().runId(),
+                chunkPlan,
+                coverage,
+                System.currentTimeMillis() - chunkStartedAt
+        );
+
+        long reductionStartedAt = System.currentTimeMillis();
+
+        WorkflowAnswerReductionResult reduction =summaryReducer.reduceStructured(
+                        request,
+                        preparation.outcome().runId(),
+                        preparation.fieldSemanticsJson(),
+                        coverage
+                );
+
+        if (!reduction.complete(chunkPlan.totalChunks())) {
+            throw new IllegalStateException(
+                    "结构化分析没有覆盖全部数据分块"
+            );
+        }
+
+        traceRecorder.recordReductionSuccess(
+                preparation.outcome().runId(),
+                reduction,
+                System.currentTimeMillis() - reductionStartedAt
+        );
+
+        ReportSchemaVO.Analysis analysis = parseStructuredAnalysis(reduction.finalAnswer());
+        return new WorkflowAnswerAnalysisResult(
+                analysis,
+                preparation.artifactId()
+        );
+    }
+    /**
+     * 解析并校验模型返回的结构化分析 JSON。
+     */
+    private ReportSchemaVO.Analysis parseStructuredAnalysis(String json) {
+        JsonNode root;
+        try {
+            root = objectMapper.readTree(json);
+        } catch (Exception exception) {
+            throw new IllegalStateException(
+                    "AI分析结果不是合法的结构化JSON",
+                    exception
+            );
+        }
+        if (root == null || !root.isObject()) {
+            throw new IllegalStateException("AI分析结果必须是JSON对象");
+        }
+        ReportSchemaVO.Analysis analysis = new ReportSchemaVO.Analysis(
+                "DONE",
+                root.path("summary").asText("").trim(),
+                readStringList(root.path("highlights")),
+                readStringList(root.path("warnings"))
+        );
+        // 空JSON不能标记为分析完成，统一进入现有FAILED降级链路。
+        if (analysis.summary().isBlank()
+                && analysis.highlights().isEmpty()
+                && analysis.warnings().isEmpty()) {
+            throw new IllegalStateException("AI分析结果没有可展示内容");
+        }
+        return analysis;
+    }
+
+    /**
+     *  读取模型返回的字符串数组。
+     */
+    private List<String> readStringList(JsonNode node) {
+        if (node == null || !node.isArray()) {
+            return List.of();
+        }
+        List<String> values = new ArrayList<>();
+        for (JsonNode item : node) {
+            if (item.isTextual() && !item.asText().isBlank()) {
+                values.add(item.asText().trim());
+            }
+        }
+
+        return List.copyOf(values);
+    }
     /**
      * 根据工作流执行结果生成最终中文回答。
      *
@@ -71,7 +198,7 @@ public class WorkflowAnswerComposer {
             return WorkflowAnswerComposeResult.text("工作流执行失败："+ safeText(outcome.errorMessage()) );
         }
         /*
-         * 中文注释：
+         *  
          * 先记录工作流实际返回的业务对象和明细数量，
          * 后续即使字段策略、模型分块或最终汇总失败，
          * 仍然可以判断数据是否在进入回答链路前已经缺失。

@@ -53,7 +53,7 @@ public class CapabilityDefinitionServiceImpl extends ServiceImpl<CapabilityDefin
     private final CapabilityVersionService capabilityVersionService;
     private final CapabilityRuntimeSnapshotResolver runtimeSnapshotResolver;
     /**
-     * 中文注释：保证能力缺少参数时可以生成用户可读提示。
+     *  保证能力缺少参数时可以生成用户可读提示。
      */
     private final UserFacingSchemaValidator userFacingSchemaValidator;
     /**
@@ -617,7 +617,7 @@ public class CapabilityDefinitionServiceImpl extends ServiceImpl<CapabilityDefin
         validateBusinessSystem(capability);
         validateSideEffect(capability);
         validateSchema(capability.getCapabilityCode(),"inputSchemaJson",capability.getInputSchemaJson());
-        // 中文注释：输入 Schema 合法后，再校验必填字段用户名称。
+        //  输入 Schema 合法后，再校验必填字段用户名称。
         userFacingSchemaValidator.validateCapabilitySchema(capability.getCapabilityCode(),capability.getInputSchemaJson());
         validateWritePermission(capability);
         /*

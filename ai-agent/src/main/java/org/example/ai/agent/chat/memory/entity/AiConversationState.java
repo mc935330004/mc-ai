@@ -6,7 +6,7 @@ import lombok.Data;
 import java.time.LocalDateTime;
 
 /**
- * 中文注释：一个会话对应一条最新业务状态记录。
+ *  一个会话对应一条最新业务状态记录。
  */
 @Data
 @TableName("ai_conversation_state")

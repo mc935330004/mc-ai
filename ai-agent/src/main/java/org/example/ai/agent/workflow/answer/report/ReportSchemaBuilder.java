@@ -1,6 +1,8 @@
 package org.example.ai.agent.workflow.answer.report;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.example.ai.agent.common.enums.ReportQueryType;
+import org.example.ai.agent.common.enums.ReportType;
 import org.example.ai.agent.workflow.answer.WorkflowAnswerFieldContextResolver;
 import org.example.ai.agent.workflow.answer.WorkflowAnswerFieldPolicy;
 import org.example.ai.agent.workflow.answer.WorkflowAnswerModelPayload;
@@ -10,15 +12,15 @@ import org.example.ai.agent.workflow.answer.WorkflowResultTraceData;
 import org.example.ai.agent.workflow.runtime.WorkflowExecutionOutcome;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
-
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.example.ai.agent.workflow.answer.report.template.ReportTemplate;
+import org.example.ai.agent.workflow.answer.report.template.ReportTemplateRegistry;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
-import java.util.Map;
 
 /**
- * 中文注释：根据已有安全工作流结果生成固定 ReportSchema。
+ * 根据已有安全工作流结果生成固定 ReportSchema。
  *
  * 本类只负责数据转换：
  * 1. 不访问数据库；
@@ -30,85 +32,72 @@ import java.util.Map;
 @Component
 @RequiredArgsConstructor
 public class ReportSchemaBuilder {
-    /**
-     * 中文注释：读取当前工作流的字段展示策略。
-     */
-    private final WorkflowAnswerFieldContextResolver fieldContextResolver;
 
-    /**
-     * 中文注释：复用现有安全字段过滤逻辑。
-     */
+    private final WorkflowAnswerFieldContextResolver fieldContextResolver;
     private final WorkflowAnswerPayloadFactory answerPayloadFactory;
+    private final ObjectMapper objectMapper;
+    private final ReportTemplateRegistry reportTemplateRegistry;
     /**
-     * 构建基础报告。
-     *
-     * artifactId 在 AI 分析之前可能为空，
-     * 因此第一版使用 runId 作为 reportId，
-     * AI完成后再重新构建一次，补充 artifactId。
+     * 根据工作流结果构建基础报告。
      */
-    public ReportSchemaVO build(WorkflowExecutionOutcome outcome, String artifactId) {
+    public ReportSchemaVO build(
+            WorkflowExecutionOutcome outcome,
+            String artifactId,
+            ReportQueryType queryType) {
+
+        ReportQueryType safeQueryType =queryType == null
+                        ? ReportQueryType.DATA_QUERY
+                        : queryType;
+
         if (outcome == null) {
+            List<String> warnings = List.of("工作流没有返回结果");
+            // 工作流错误归属数据状态区，不写入 AI 分析风险。
             return new ReportSchemaVO(
+                    ReportSchemaVO.CURRENT_SCHEMA_VERSION,
                     "",
-                    "GENERIC_WORKFLOW_REPORT",
-                    "DATA_QUERY",
+                    ReportType.GENERIC_WORKFLOW_REPORT.name(),
+                    safeQueryType.name(),
                     "业务查询报告",
                     "",
                     "FAILED",
                     false,
-                    List.of(),
-                    ReportSchemaVO.Analysis.pending(List.of("工作流没有返回结果")),
+                    List.of(buildWarningSection(warnings)),
+                    ReportSchemaVO.Analysis.initial(safeQueryType.name()),
                     ReportSchemaVO.Meta.empty()
             );
         }
 
-        /*
-         * 直接复用现有统计逻辑，避免重新计算成功数、
-         * 失败数和后代明细数量。
-         */
-        WorkflowResultTraceData trace =WorkflowResultTraceData.from(outcome,"REPORT");
+        WorkflowResultTraceData trace =WorkflowResultTraceData.from(
+                        outcome,
+                        "REPORT");
 
         String reportId =StringUtils.hasText(artifactId)
                         ? artifactId
                         : outcome.runId();
 
-        /*
-         * 暂时使用已有 workflowCode 作为稳定 reportType，
-         * 不让模型自由编造报告类型。
-         *
-         * 后续如果项目已有 ReportDefinitionRegistry，
-         * 再将这里替换成注册表查询。
-         */
-        String reportType =StringUtils.hasText(outcome.workflowCode())
-                        ? outcome.workflowCode()
-                        .trim()
-                        .toUpperCase(Locale.ROOT)
-                        : "GENERIC_WORKFLOW_REPORT";
+        ReportTemplate reportTemplate = reportTemplateRegistry
+                .find(outcome.workflowCode())
+                .orElse(null);
+        String reportType = reportTemplate == null
+                ? ReportType.GENERIC_WORKFLOW_REPORT.name()
+                : reportTemplate.reportType().name();
 
-        String title =
-                StringUtils.hasText(outcome.workflowName())
+        String title =StringUtils.hasText(outcome.workflowName())
                         ? outcome.workflowName()
                         : "业务查询报告";
 
-        String status =
-                !trace.workflowSuccess()
+        String status =!trace.workflowSuccess()
                         ? "FAILED"
                         : trace.workflowDataComplete()
-                        ? "BASE_READY"
-                        : "PARTIAL";
+                          ? "BASE_READY"
+                          : "PARTIAL";
 
-        List<String> warnings =
-                buildWarnings(trace);
+        // 数据提示只描述业务数据完整性，AI 执行状态由 analysis 独立维护。
+        List<String> warnings = buildWarnings(trace);
 
-        List<ReportSchemaVO.Section> sections =
-                List.of(
-                        buildMetricsSection(trace),
-                        buildTableSection(outcome),
-                        buildWarningSection(warnings)
-                );
+        List<ReportSchemaVO.Section> sections = buildReportSections(outcome, trace,reportTemplate, warnings);
 
-        ReportSchemaVO.Meta meta =
-                new ReportSchemaVO.Meta(
+        ReportSchemaVO.Meta meta = new ReportSchemaVO.Meta(
                         trace.topLevelTotalCount(),
                         trace.topLevelSuccessCount(),
                         trace.topLevelPartialCount(),
@@ -121,22 +110,29 @@ public class ReportSchemaBuilder {
                         artifactId
                 );
 
+        String subtitle =
+                safeQueryType.requiresAnalysis()
+                        ? "基础业务数据已先行展示"
+                        : "业务数据查询完成";
+
         return new ReportSchemaVO(
+                ReportSchemaVO.CURRENT_SCHEMA_VERSION,
                 reportId,
                 reportType,
-                "DATA_QUERY",
+                safeQueryType.name(),
                 title,
-                "基础业务数据已先行展示",
+                subtitle,
                 status,
                 trace.workflowDataComplete(),
                 sections,
-                ReportSchemaVO.Analysis.pending(warnings),
+                // AI 分析状态与业务数据告警分别维护。
+                ReportSchemaVO.Analysis.initial(safeQueryType.name()),
                 meta
         );
     }
 
     /**
-     * 中文注释：固定指标区块顺序。
+     *  固定指标区块顺序。
      */
     private ReportSchemaVO.Section buildMetricsSection(
             WorkflowResultTraceData trace) {
@@ -188,54 +184,48 @@ public class ReportSchemaBuilder {
     }
 
     /**
-     * 中文注释：
-     * 使用现有字段安全策略生成结构化数据。
+     * 根据固定模板生成业务区块。
      *
-     * 第一版只返回一个 JSON 数据区块，
-     * 不擅自拆分项目和嵌套明细，
-     * 避免重复计数和字段泄露。
+     * 没有模板或安全字段策略异常时，
+     * 只返回指标和告警，禁止降级返回原始 JSON。
      */
-    private ReportSchemaVO.Section buildTableSection(WorkflowExecutionOutcome outcome) {
+    private List<ReportSchemaVO.Section> buildReportSections(
+            WorkflowExecutionOutcome outcome,
+            WorkflowResultTraceData trace,
+            ReportTemplate reportTemplate,
+            List<String> warnings) {
 
-        List<ReportSchemaVO.Column> columns =List.of(
-                new ReportSchemaVO.Column(
-                                "data",
-                                "业务数据",
-                                "JSON"));
-
-        Map<String, Object> row = new LinkedHashMap<>();
+        if (reportTemplate == null) {
+            warnings.add("当前工作流没有固定报告模板，明细暂不展示");
+            return List.of(buildMetricsSection(trace),buildWarningSection(warnings));
+        }
+        List<ReportSchemaVO.Section> sections = new ArrayList<>();
         try {
             WorkflowAnswerFieldPolicy policy =fieldContextResolver.resolvePolicy(outcome);
-
-            /*
-             * 结果存在但没有可用字段策略时，
-             * 禁止直接把原始业务数据发给前端。
-             */
             if (outcome.result() != null && policy.visibleFields().isEmpty()) {
-                row.put( "data","字段展示策略未就绪，暂不展示明细");
+                warnings.add("字段展示策略未就绪，明细暂不展示");
+                sections.add(buildMetricsSection(trace));
             } else {
                 WorkflowAnswerModelPayload safePayload =answerPayloadFactory.create(outcome,policy.hiddenFieldNames() );
-                row.put("data", safePayload.result());
+                JsonNode safeResult =objectMapper.valueToTree(safePayload.result());
+                sections.addAll(reportTemplate.buildSections(safeResult));
             }
         } catch (RuntimeException exception) {
-            log.warn("报告字段安全投影失败，runId={}，已降级为提示信息",outcome.runId(), exception);
-            /*
-             * 字段策略加载失败时，只返回安全提示，
-             * 不返回原始业务数据。
-             */
-            row.put("data", "字段展示策略加载失败，暂不展示明细");
+            log.warn(
+                    "固定报告模板构建失败，runId={}，workflowCode={}，errorType={}",
+                    outcome.runId(),
+                    outcome.workflowCode(),
+                    exception.getClass().getSimpleName()
+            );
+            warnings.add("固定报告模板构建失败，明细暂不展示");
+            sections.add(buildMetricsSection(trace));
         }
-
-        return new ReportSchemaVO.Section(
-                "TABLE",
-                "业务数据",
-                List.of(),
-                columns,
-                List.of(row)
-        );
+        sections.add(buildWarningSection(warnings));
+        return List.copyOf(sections);
     }
+
     /**
-     * 中文注释：构建数据状态提示。
+     *  构建数据状态提示。
      */
     private ReportSchemaVO.Section buildWarningSection(
             List<String> warnings) {
@@ -260,9 +250,9 @@ public class ReportSchemaBuilder {
     }
 
     /**
-     * 中文注释：只根据已有执行状态生成提示，不编造业务结论。
+     * 根据工作流执行结果生成业务数据提示。
      */
-    private List<String> buildWarnings( WorkflowResultTraceData trace) {
+    private List<String> buildWarnings(WorkflowResultTraceData trace) {
         List<String> warnings = new ArrayList<>();
         if (!trace.workflowSuccess()) {
             warnings.add("工作流执行失败");
@@ -270,9 +260,33 @@ public class ReportSchemaBuilder {
         if (trace.partialSuccess() || !trace.workflowDataComplete()) {
             warnings.add("部分项目或明细没有成功返回");
         }
-        if (warnings.isEmpty()) {
-            warnings.add("基础业务数据已完整返回，AI分析尚未开始");
+        if (!warnings.isEmpty()) {
+            return warnings;
         }
+        // 数据状态不能携带会过期的 AI 执行状态。
+        warnings.add("基础业务数据已完整返回");
         return warnings;
+    }
+
+    /**
+     * 在基础报告上追加 AI 分析结果。
+     */
+    public ReportSchemaVO withAnalysis(ReportSchemaVO reportSchema,ReportSchemaVO.Analysis analysis) {
+        if (reportSchema == null) {
+            return null;
+        }
+        return new ReportSchemaVO(
+                reportSchema.schemaVersion(),
+                reportSchema.reportId(),
+                reportSchema.reportType(),
+                reportSchema.queryType(),
+                reportSchema.title(),
+                reportSchema.subtitle(),
+                reportSchema.status(),
+                reportSchema.dataComplete(),
+                reportSchema.sections(),
+                analysis == null ? reportSchema.analysis() : analysis,
+                reportSchema.meta()
+        );
     }
 }

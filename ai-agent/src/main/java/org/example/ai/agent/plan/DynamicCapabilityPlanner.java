@@ -52,7 +52,7 @@ public class DynamicCapabilityPlanner {
     private final TrackedChatClientService trackedChatClientService;
     private final CapabilityRouteAuditService routeAuditService;
     /**
-     * 中文注释：隐藏能力参数名、JSON Path 和 Schema 校验细节。
+     *  隐藏能力参数名、JSON Path 和 Schema 校验细节。
      */
     private final UserFriendlyClarifyQuestionBuilder clarifyQuestionBuilder;
     /**
@@ -65,7 +65,7 @@ public class DynamicCapabilityPlanner {
      */
     private final CapabilityInputSchemaValidator inputSchemaValidator;
     /**
-     * 中文注释：非聊天调用保持原行为，不继承会话参数。
+     *  非聊天调用保持原行为，不继承会话参数。
      */
     public DynamicCapabilityPlan plan(
             String userQuestion,
@@ -199,7 +199,7 @@ public class DynamicCapabilityPlanner {
                             selectedCapability,
                             parameterContext
                     );
-            // 中文注释：能力相同时用旧参数补缺，当前提取结果覆盖旧值。
+            //  能力相同时用旧参数补缺，当前提取结果覆盖旧值。
             Map<String, Object> effectiveInput = mergeInheritedInput(
                             selectedCapability.getCapabilityCode(),
                             previousCapabilityCode,
@@ -254,7 +254,7 @@ public class DynamicCapabilityPlanner {
         }
     }
     /**
-     * 中文注释：只有同一能力才能继承参数，防止跨业务接口串用条件。
+     *  只有同一能力才能继承参数，防止跨业务接口串用条件。
      */
     private Map<String, Object> mergeInheritedInput(
             String selectedCapabilityCode,
@@ -267,7 +267,7 @@ public class DynamicCapabilityPlanner {
             merged.putAll(inheritedInput);
         }
 
-        // 中文注释：当前问题明确提供的新参数覆盖上一轮参数。
+        //  当前问题明确提供的新参数覆盖上一轮参数。
         if (currentInput != null) {
             merged.putAll(currentInput);
         }
@@ -503,14 +503,14 @@ public class DynamicCapabilityPlanner {
     }
 
     /**
-     * 中文注释：能力已经确定但参数不完整时，保留能力身份和已清洗参数。
+     *  能力已经确定但参数不完整时，保留能力身份和已清洗参数。
      */
     private DynamicCapabilityPlan convertToClarify(
             DynamicCapabilityPlan plan,
             CapabilityDefinition capability,
             CapabilityInputValidationResult validation) {
 
-        // 中文注释：matched 继续表示能力已经匹配，needClarify 阻止能力立即执行。
+        //  matched 继续表示能力已经匹配，needClarify 阻止能力立即执行。
         plan.setMatched(true);
         plan.setNeedClarify(true);
         plan.setCapabilityCode(capability.getCapabilityCode());
@@ -519,7 +519,7 @@ public class DynamicCapabilityPlanner {
                 validation.getSanitizedInput()
         ));
 
-        // 中文注释：reason 只用于后台排查，不展示接口参数。
+        //  reason 只用于后台排查，不展示接口参数。
         plan.setReason("能力已确定，但查询条件不完整");
         plan.setClarifyQuestion(
                 clarifyQuestionBuilder.build(

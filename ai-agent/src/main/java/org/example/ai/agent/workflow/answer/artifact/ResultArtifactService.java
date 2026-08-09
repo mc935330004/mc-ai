@@ -163,7 +163,7 @@ public class ResultArtifactService {
         int storedChunkCount = 0;
 
         /*
-         * 中文注释：
+         *  
          * 这里直接逐块插入，逻辑最简单且不会产生超大批量SQL。
          * 现有分块最大约12KB，即使数据较多也不会单条写入过大。
          */
@@ -330,7 +330,7 @@ public class ResultArtifactService {
             );
         }
         /*
-         * 中文注释：
+         *  
          * 必须同时匹配artifactId、用户和会话，
          * 防止跨用户、跨会话读取结果。
          */
@@ -406,7 +406,7 @@ public class ResultArtifactService {
                 );
 
         /*
-         * 中文注释：
+         *  
          * 校验全部分块的顺序摘要，
          * 防止数据库内容被异常修改后继续参与回答。
          */
