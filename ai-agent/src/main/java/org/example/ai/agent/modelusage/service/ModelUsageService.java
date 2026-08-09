@@ -3,6 +3,7 @@ package org.example.ai.agent.modelusage.service;
 import org.example.ai.agent.common.modelusage.ModelCallContext;
 import org.example.ai.agent.modelusage.entity.ModelUsageRecord;
 import org.example.ai.agent.modelusage.model.TokenUsageData;
+import org.example.ai.agent.modelusage.vo.ModelUsageOverviewVO;
 
 import java.util.List;
 
@@ -65,5 +66,16 @@ public interface ModelUsageService {
     String findLatestSuccessfulAnswerModelCode(
             String runId,
             String userId
+    );
+
+    /**
+     * 查询管理端模型调用监控数据。
+     *
+     * @param days 统计最近多少天
+     * @param failureLimit 最近失败数量
+     */
+    ModelUsageOverviewVO getOverview(
+            int days,
+            int failureLimit
     );
 }

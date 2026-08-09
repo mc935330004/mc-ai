@@ -1,0 +1,81 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="org.example.ai.agent.modelusage.mapper.ModelUsageMapper">
+
+    <!-- 管理端模型调用总览。 -->
+    <select id="selectOverview"
+            resultType="org.example.ai.agent.modelusage.vo.ModelUsageOverviewVO">
+        SELECT
+            COUNT(*) AS callCount,
+            COALESCE(
+                    SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END),
+                    0
+            ) AS successCount,
+            COALESCE(
+                    SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END),
+                    0
+            ) AS failureCount,
+            CASE
+                WHEN COUNT(*) = 0 THEN 0
+                ELSE ROUND(
+                        SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END)
+                            * 100.0 / COUNT(*),
+                        2
+                     )
+                END AS successRate,
+            COALESCE(SUM(total_tokens), 0) AS totalTokens,
+            COALESCE(ROUND(AVG(duration_ms)), 0) AS averageDurationMs
+        FROM ai_model_usage
+        WHERE created_at <![CDATA[>=]]> #{startTime}
+    </select>
+
+    <!-- 按稳定模型编码统计调用情况。 -->
+    <select id="selectUsageByModel"
+            resultType="org.example.ai.agent.modelusage.vo.ModelUsageByModelVO">
+        SELECT
+            COALESCE(NULLIF(model_code, ''), 'UNKNOWN') AS modelCode,
+            MAX(provider) AS provider,
+            MAX(model_name) AS modelName,
+            COUNT(*) AS callCount,
+            SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) AS successCount,
+            SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) AS failureCount,
+            CASE
+                WHEN COUNT(*) = 0 THEN 0
+                ELSE ROUND(
+                        SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END)
+                            * 100.0 / COUNT(*),
+                        2
+                     )
+                END AS successRate,
+            COALESCE(SUM(total_tokens), 0) AS totalTokens,
+            COALESCE(ROUND(AVG(duration_ms)), 0) AS averageDurationMs
+        FROM ai_model_usage
+        WHERE created_at <![CDATA[>=]]> #{startTime}
+        GROUP BY COALESCE(NULLIF(model_code, ''), 'UNKNOWN')
+        ORDER BY callCount DESC, modelCode ASC
+    </select>
+
+    <!--
+        最近失败只返回失败分类。
+        原始错误内容可能包含供应商响应或内部地址，不直接返回前端。
+    -->
+    <select id="selectRecentFailures"
+            resultType="org.example.ai.agent.modelusage.vo.RecentModelFailureVO">
+        SELECT
+            run_id AS runId,
+            model_code AS modelCode,
+            provider AS provider,
+            model_name AS modelName,
+            call_type AS callType,
+            error_category AS errorCategory,
+            duration_ms AS durationMs,
+            created_at AS createdAt
+        FROM ai_model_usage
+        WHERE success = 0
+          AND created_at <![CDATA[>=]]> #{startTime}
+        ORDER BY id DESC
+            LIMIT #{limit}
+    </select>
+
+</mapper>

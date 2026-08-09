@@ -3,12 +3,15 @@ package org.example.ai.agent.modelusage.service.impl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import lombok.RequiredArgsConstructor;
 import org.example.ai.agent.common.enums.ModelCallType;
+import org.example.ai.agent.common.enums.ModelFailureCategory;
 import org.example.ai.agent.common.enums.TokenMeasureType;
 import org.example.ai.agent.common.modelusage.ModelCallContext;
 import org.example.ai.agent.modelusage.entity.ModelUsageRecord;
 import org.example.ai.agent.modelusage.mapper.ModelUsageMapper;
 import org.example.ai.agent.modelusage.model.TokenUsageData;
 import org.example.ai.agent.modelusage.service.ModelUsageService;
+import org.example.ai.agent.modelusage.vo.ModelUsageOverviewVO;
+import org.example.ai.agent.modelusage.vo.RecentModelFailureVO;
 import org.example.ai.agent.observability.AgentMetrics;
 import org.example.ai.agent.trace.mapper.RunTraceMapper;
 import org.springframework.stereotype.Service;
@@ -16,6 +19,7 @@ import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.Arrays;
 import java.util.List;
@@ -187,6 +191,99 @@ public class ModelUsageServiceImpl implements ModelUsageService {
         return record == null
                 ? null
                 : record.getModelCode();
+    }
+
+
+    /**
+     * 查询管理端模型调用监控数据。
+     */
+    @Override
+    @Transactional(readOnly = true)
+    public ModelUsageOverviewVO getOverview(
+            int days,
+            int failureLimit) {
+
+        int normalizedDays =
+                Math.max(1, Math.min(days, 30));
+
+        int normalizedFailureLimit =
+                Math.max(1, Math.min(failureLimit, 100));
+
+        LocalDateTime endTime = LocalDateTime.now();
+        LocalDateTime startTime =
+                endTime.minusDays(normalizedDays);
+
+        ModelUsageOverviewVO overview =
+                modelUsageMapper.selectOverview(startTime);
+
+        if (overview == null) {
+            overview = createEmptyOverview();
+        }
+
+        List<RecentModelFailureVO> recentFailures =
+                modelUsageMapper.selectRecentFailures(
+                        startTime,
+                        normalizedFailureLimit
+                );
+
+        /*
+         * 原始异常信息不返回管理页面。
+         * 页面只展示统一失败分类对应的安全提示。
+         */
+        recentFailures.forEach(failure ->
+                failure.setErrorMessage(
+                        resolveSafeFailureMessage(
+                                failure.getErrorCategory()
+                        )
+                )
+        );
+
+        overview.setStartTime(startTime);
+        overview.setEndTime(endTime);
+        overview.setModels(
+                modelUsageMapper.selectUsageByModel(startTime)
+        );
+        overview.setRecentFailures(recentFailures);
+
+        return overview;
+    }
+
+    /**
+     * 创建没有调用数据时的默认汇总。
+     */
+    private ModelUsageOverviewVO createEmptyOverview() {
+        ModelUsageOverviewVO overview =
+                new ModelUsageOverviewVO();
+
+        overview.setCallCount(0L);
+        overview.setSuccessCount(0L);
+        overview.setFailureCount(0L);
+        overview.setSuccessRate(BigDecimal.ZERO);
+        overview.setTotalTokens(0L);
+        overview.setAverageDurationMs(0L);
+        overview.setModels(List.of());
+        overview.setRecentFailures(List.of());
+
+        return overview;
+    }
+
+    /**
+     * 将失败分类转换为允许在管理页面展示的安全提示。
+     */
+    private String resolveSafeFailureMessage(
+            String errorCategory) {
+
+        if (!StringUtils.hasText(errorCategory)) {
+            return ModelFailureCategory.UNKNOWN.safeMessage();
+        }
+
+        try {
+            return ModelFailureCategory
+                    .valueOf(errorCategory)
+                    .safeMessage();
+        } catch (IllegalArgumentException exception) {
+            return ModelFailureCategory.UNKNOWN.safeMessage();
+        }
     }
 
     /**
