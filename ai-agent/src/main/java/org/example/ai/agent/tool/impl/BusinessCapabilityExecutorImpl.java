@@ -132,10 +132,7 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
      * 普通Agent运行不能保存raw。
      */
     @Override
-    public ToolResult executeReadTest(
-            ToolExecutionContext context,
-            PlanStep step) {
-
+    public ToolResult executeReadTest(ToolExecutionContext context,PlanStep step) {
         return executeInternal(
                 context,
                 step,
@@ -148,12 +145,8 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
     /**
      * 统一业务能力执行入口。
      */
-    private ToolResult executeInternal(
-            ToolExecutionContext context,
-            PlanStep step,
-            boolean confirmedWrite,
-            String idempotencyKey,
-            boolean adminReadTest) {
+    private ToolResult executeInternal(ToolExecutionContext context,PlanStep step,
+            boolean confirmedWrite,String idempotencyKey,boolean adminReadTest) {
 
         String capabilityCode = step.getCapabilityCode();
 
@@ -169,12 +162,10 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
                 );
             }
 
-            ToolResult sideEffectFailure =
-                    validateSideEffect(
+            ToolResult sideEffectFailure =validateSideEffect(
                             capability,
                             step,
-                            confirmedWrite
-                    );
+                            confirmedWrite);
 
             if (sideEffectFailure != null) {
                 return sideEffectFailure;
@@ -208,8 +199,7 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
                             idempotencyKey
                     );
 
-            Object raw =
-                    httpInvoker.invoke(httpRequest);
+            Object raw =httpInvoker.invoke(httpRequest);
 
             /*
              * HTTP 2xx只表示传输成功。
@@ -306,25 +296,15 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
                     )
                     .fields(fields)
                     .facts(facts)
-                    .summary(
-                            interpreted.emptyData()
-                                    ? "业务能力调用成功，但未查询到数据："
-                                      + capability.getCapabilityName()
-                                    : "业务能力调用成功："
-                                      + capability.getCapabilityName()
-                    )
+                    .summary(interpreted.emptyData()
+                                    ? "业务能力调用成功，但未查询到数据：" + capability.getCapabilityName():
+                            "业务能力调用成功："+ capability.getCapabilityName())
 
                     /*
                      * 只有管理端测试可以临时保留raw。
                      */
-                    .raw(
-                            adminReadTest
-                                    ? raw
-                                    : null
-                    )
-                    .input(
-                            httpRequest.getAuditInput()
-                    )
+                    .raw(adminReadTest ? raw : null)
+                    .input( httpRequest.getAuditInput())
                     .build();
 
         } catch (CapabilityInvocationException exception) {
@@ -362,24 +342,16 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
      * 管理端测试允许加载尚未发布的草稿能力。
      */
     private CapabilityDefinition loadCapability(
-            String capabilityCode,
-            boolean adminReadTest) {
+            String capabilityCode,boolean adminReadTest) {
 
         if (adminReadTest) {
             return capabilityDefinitionService
                     .lambdaQuery()
-                    .eq(
-                            CapabilityDefinition
-                                    ::getCapabilityCode,
-                            capabilityCode
-                    )
+                    .eq(CapabilityDefinition ::getCapabilityCode, capabilityCode)
                     .one();
         }
 
-        return capabilityDefinitionService
-                .getEnabledByCode(
-                        capabilityCode
-                );
+        return capabilityDefinitionService.getEnabledByCode(capabilityCode);
     }
 
     /**
@@ -616,29 +588,11 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
             Object input,
             String errorCode,
             String errorMessage) {
-
-        return ToolResult.builder()
-                .success(false)
-                .capabilityCode(
-                        step == null
-                                ? null
-                                : step.getCapabilityCode()
-                )
-                .outputKey(
-                        step == null
-                                ? null
-                                : step.getOutputKey()
-                )
-                .errorCode(
-                        errorCode
-                )
-                .errorMessage(
-                        errorMessage
-                )
-                .summary(
-                        "业务能力调用失败："
-                                + errorMessage
-                )
+        return ToolResult.builder().success(false).capabilityCode( step == null ? null : step.getCapabilityCode())
+                .outputKey(step == null ? null : step.getOutputKey())
+                .errorCode(errorCode)
+                .errorMessage(errorMessage)
+                .summary("业务能力调用失败："+ errorMessage)
                 .input(input)
                 .build();
     }
