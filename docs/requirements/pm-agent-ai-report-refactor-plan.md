@@ -2,7 +2,7 @@
 
 > 项目：`mc-ai`
 >
-> 当前阶段：Phase 6 项目结算最终业务数据核对与闭环确认
+> 当前阶段：扩展 Phase 4D 独立追问消息与最终闭环
 >
 > 目标：解决 AI Report 响应慢、样式不稳定、数据较多时拥挤或疑似丢失，并为项目结算、概算、现金流、产值、合同、回款、成本、进度、风险等报告提供可扩展基础。
 
@@ -1165,12 +1165,12 @@ Phase 5 运行验收通过后，进入项目结算最终业务数据核对与闭
 
 ### 当前状态
 
-- Phase 6 已启动
+- Phase 6 已由用户完成运行验收
 - 后台代码：暂无新增修改
 - 前端代码：暂无新增修改
 - 数据库、Flyway、配置和依赖：不修改
 - 测试与编译：按用户要求不执行
-- 最终闭环：待用户完成本阶段业务数据核对并明确确认
+- 最终闭环：项目结算 AI Report 已完成最终闭环
 
 ### 问题处理规则
 
@@ -1199,3 +1199,440 @@ Phase 5 运行验收通过后，进入项目结算最终业务数据核对与闭
 ### 最终闭环后的下一阶段
 
 本阶段全部通过后，明确提示“项目结算 AI Report 最终闭环完成”，并提醒用户提供项目概算的真实工作流结构、安全结果结构和字段字典，开始 `ProjectEstimateReportTemplate`。
+
+---
+
+## 19. 扩展计划：后台可配置报告与工作流二次问答
+
+本扩展计划在项目结算 AI Report 闭环后执行。目标不是为概算、现金流、产值、合同、回款、开票、成本和利润分别复制页面，而是让普通业务报告复用统一协议、配置和前端组件。
+
+### 扩展 Phase 0：现状审计与协议冻结
+
+#### 本阶段目标
+
+- 核对现有 `ReportSchema + ReportTemplate + 前端组件注册表` 的真实能力
+- 明确后台可配置的边界，避免把业务字段识别错误地交给大模型
+- 冻结普通报告、动态树表和会话二次问答的最小协议
+- 明确概算模块所需的真实输入，不根据示意图伪造工作流编码和字段路径
+- 本阶段不修改后台业务代码、不修改前端代码、不新增数据库表
+
+#### 现有能力事实
+
+- 后端已经存在 `ReportSchemaVO`、`ReportTemplate`、`ReportTemplateRegistry` 和 `ReportSchemaBuilder`
+- `ReportTemplateRegistry` 当前根据 Spring Bean 和 `workflowCode` 选择模板，不是数据库配置
+- `ReportSchemaVO.Section` 当前使用字符串 `type`，已有 `items`、`columns` 和 `rows`
+- 前端通用报告当前只渲染 `METRICS`、`TABLE`、`WARNINGS` 和 AI 分析区
+- 项目结算通过 `ProjectSettlementReportTemplate` 和专用前端组件渲染
+- 当前不存在 `ReportDefinition`、报告配置表、`KEY_VALUE`、`TREE_TABLE` 或通用组件动态注册配置
+- 当前会话状态能保存上一工作流、输入参数和 Artifact ID，但不存在“等待用户选择业务明细”的通用状态
+- `previousWorkflowCode` 只用于复用上一工作流，不能用于从概算汇总切换到概算科目明细工作流
+- 当前报告消息存在 `reportSchema` 时，前端不会同时展示同一条消息的普通正文；继续查询提示必须作为独立助手消息处理
+- 当前源码中没有发现概算汇总工作流、概算科目明细工作流、真实安全结果结构和字段字典
+
+#### 前提纠正
+
+- 后台配置可以消除普通列表的重复页面和大部分重复模板代码，但不能自动理解任意上游 JSON
+- 如果不同业务工作流返回完全不同的数据结构，每个模块仍需提供字段映射；推荐把映射放进受校验的报告定义，而不是为每个模块复制 Java 页面模板
+- 大模型不负责决定金额字段、比例、层级关系和页面列，也不负责生成 HTML、Markdown 或 CSS
+- “是否继续查询科目明细”的提示可以由后端确定性生成，不需要调用大模型；只有科目名称存在歧义时才考虑模型辅助匹配
+
+#### 冻结的 ReportSchema 区块协议
+
+| 区块类型 | 数据位置 | 用途 | 约束 |
+|---|---|---|---|
+| `KEY_VALUE` | `items` | 项目编号、名称、经理、部门等基本信息 | 只允许标量值 |
+| `METRICS` | `items` | 概算金额、已用金额、项目结余、成本率等核心指标 | 金额和比例由后端计算并格式化 |
+| `TABLE` | `columns + rows` | 普通平面列表 | 不允许对象或数组作为单元格值 |
+| `TREE_TABLE` | `columns + rows` | 动态科目、成本分类等层级数据 | 每行必须有稳定 `rowKey`，子级使用 `children`，汇总行可使用 `summary=true` |
+| `WARNINGS` | `items` | 数据缺失、部分成功和业务状态提示 | 不混入 AI 分析状态 |
+
+#### 概算展示协议
+
+- 项目信息使用 `KEY_VALUE`
+- 概算核心指标使用 `METRICS`
+- 动态、不固定的概算科目使用 `TREE_TABLE`
+- 概算表格列固定为：科目名称、变更后概算、占比、已用金额、已用率
+- 概算表格不包含“操作”列
+- 报告内部不提供科目下拉框、查看按钮或继续查询表单
+- 普通概算查询不调用 AI；分析概算时才异步追加 AI 分析
+
+#### 冻结的会话二次问答协议
+
+```text
+用户查询概算汇总
+→ 汇总工作流返回 ReportSchema
+→ 前端立即展示概算报告
+→ 后端保存通用待追问状态
+→ 后端发送独立助手消息：是否继续查询某个概算科目的详细信息
+→ 用户输入否定语句：清除待追问状态并结束
+→ 用户输入科目名称：继承项目标识并切换到配置的明细工作流
+→ 科目唯一匹配：执行明细查询并输出报告
+→ 科目零匹配或多匹配：只追问澄清，不误执行工作流
+```
+
+待追问状态必须是通用结构，至少包含：来源报告类型、来源 Artifact ID、目标明细工作流编码、继承参数和提示文本。不得把完整业务结果或所有科目明细写入会话状态 JSON。
+
+#### 后台配置边界
+
+普通报告定义后续至少需要配置：
+
+- `reportType`
+- `workflowCode`
+- 报告标题和区块顺序
+- 区块类型
+- 字段 ID、字段路径、显示名称、数据类型和格式
+- 是否允许聚合及字段业务含义
+- 树表的行标识字段和子节点字段
+- 是否启用会话追问
+- 目标明细工作流编码和追问文本
+
+字段路径必须经过安全字段策略校验。配置不存在、字段路径无效或数据类型不匹配时应返回告警并拒绝展示该字段，禁止回退显示原始 JSON。
+
+#### 本阶段明确不做
+
+- 不新增 `ProjectEstimateReportTemplate`
+- 不新增前端概算专用组件
+- 不新增报告配置数据库表或 Flyway
+- 不修改 SSE 事件
+- 不修改会话路由和工作流执行代码
+- 不根据页面示意图猜测概算接口字段
+- 不运行测试或编译
+
+#### Phase 0 产出与验收结论
+
+- 已完成现有后端报告链路、会话状态和前端渲染能力的静态检查
+- 已冻结 `KEY_VALUE`、`METRICS`、`TABLE`、`TREE_TABLE`、`WARNINGS` 五类通用区块协议
+- 已确定概算动态科目使用 `children` 树结构，且不包含操作列
+- 已确定二次问答通过独立助手消息和通用待追问状态实现，不使用报告内选择控件
+- 已确定 `previousWorkflowCode` 不能承担汇总工作流到明细工作流的切换
+- 已明确后台配置只能替代重复映射代码，不能替代真实业务字段契约
+- Phase 0 已完成；本阶段没有修改后台或前端源码
+
+#### 进入 Phase 1 前必须提供
+
+1. 概算汇总工作流编码及版本
+2. 概算科目明细工作流编码及版本
+3. 两个工作流的 GraphSpec 和输入参数定义
+4. 概算汇总真实安全结果样例
+5. 科目明细真实安全结果样例
+6. 字段字典中的字段 ID、字段路径、格式、含义和聚合权限
+7. 科目唯一标识、父子关系字段和项目标识字段
+
+### 下一阶段
+
+扩展 Phase 1：设计并实现最小后台报告定义模型。先支持配置驱动的 `KEY_VALUE`、`METRICS`、`TABLE` 和 `TREE_TABLE` 投影，不接入会话二次问答，也不修改概算业务工作流。
+
+### 扩展 Phase 1：最小后台报告定义模型
+
+#### 本阶段架构结论
+
+- 报告定义放入现有 `GraphSpec.reportDefinition`，随工作流草稿一起校验并随发布版本一起固化
+- 不新增独立报告配置表，避免工作流版本回滚后报告字段配置发生漂移
+- `ai_field_dictionary` 继续负责字段中文名称、类型、格式、业务含义和展示权限
+- 报告定义只负责区块、数据来源路径、字段字典 ID 和树结构映射，不重复保存字段语义
+- 现有专用 `ReportTemplate` 优先级高于配置报告，保证项目结算模板行为不变
+- 没有专用模板且存在有效 `reportDefinition` 时才使用通用配置投影
+- 配置缺失或校验失败时继续失败关闭，只展示指标和告警，不回退原始 JSON
+
+#### 本阶段代码范围
+
+- 新增 GraphSpec 报告定义模型：`ReportDefinitionSpec`、`ReportSectionSpec`、`ReportFieldBindingSpec`、`ReportSectionType`
+- `GraphSpec` 增加可选的 `reportDefinition`
+- 新增 `ReportDefinitionValidator`，在工作流发布快照生成前校验配置结构和受限路径
+- 新增 `ReportDefinitionResolver`，按工作流发布版本读取配置并校验字段字典归属、发布状态和展示权限
+- 新增 `ReportValueReader`，只支持确定性的受限点路径和数组展开，不支持脚本、过滤器或函数
+- 新增 `ConfigurableReportSectionBuilder`，生成 `KEY_VALUE`、`METRICS`、`TABLE` 和 `TREE_TABLE`
+- 修改 `ReportSchemaBuilder`，接入配置报告并保留专用模板优先级
+
+#### 本阶段明确不做
+
+- 不新增数据库表、字段或 Flyway
+- 不新增 Controller、Service CRUD 或后台管理页面
+- 不修改前端组件
+- 不接入会话二次问答
+- 不新增概算专用模板
+- 不修改项目结算专用模板
+- 不调用大模型生成字段映射或页面结构
+
+#### 当前状态
+
+- 现有字段字典、工作流发布快照、模板注册器和报告构建器已完成静态检查
+- 后台详细代码示例已在当前对话给出，等待用户手工应用
+- 后台源码尚未由 Codex 直接修改
+- 前端源码未修改
+- 测试与编译按用户要求不执行
+- 用户应用后只检查文件位置、调用关系、中文注释和是否存在重复或无用代码
+- Phase 1 尚未完成，必须在用户应用代码并完成静态位置检查后才能进入下一阶段
+
+#### 用户首次应用后的静态检查
+
+- 已确认报告定义模型、GraphSpec 字段、发布校验和 `ReportSchemaBuilder` 主调用位置均已加入
+- 未运行测试或编译
+- 检查未通过：`ReportValueReader` 使用 Java 21 的 `List.getFirst()`，项目 Java 17 必须改为 `get(0)`
+- 检查未通过：`ReportDefinitionResolver`、`ResolvedReportDefinition`、`ReportValueReader` 和 `ConfigurableReportSectionBuilder` 被放入 `graph.model.report.config`，运行期组件和 Mapper 依赖不得放入纯 GraphSpec 模型包，应移动到 `workflow.answer.report.config`
+- 检查未通过：字段字典校验尚未验证绑定 `sourcePath` 的末级字段与字段字典 `fieldName` 一致，存在错误标签映射和业务金额含义错配风险
+- 可接受调整：`ReportSectionType` 放在 `ai-common` 的稳定枚举包可以保留，不要求移动
+- 当前状态：等待用户按本轮最小整改示例修改后再次静态检查，Phase 1 仍未完成
+
+#### 下一阶段预告
+
+Phase 1 静态检查通过后进入扩展 Phase 2：前端通用 `KEY_VALUE` 和 `TREE_TABLE` 渲染。概算表格配置不包含操作列，前端也不自动生成操作列。
+
+#### 用户第二次应用后的静态检查结论
+
+- Java 17 兼容问题已修复：`List.getFirst()` 已替换为 `get(0)`
+- `ResolvedReportDefinition`、`ReportDefinitionResolver`、`ReportValueReader` 和 `ConfigurableReportSectionBuilder` 已移动到 `workflow.answer.report.config`
+- 旧的 `graph.model.report.config` 包和引用已清理
+- 字段绑定已校验 `sourcePath` 末级字段与字段字典机器字段一致，避免展示含义错配
+- `ReportSchemaBuilder` 已引用新的运行期配置包
+- 专用 `ReportTemplate` 仍然优先于配置报告，项目结算模板不受影响
+- 配置缺失、无效或构建失败时仍然只展示指标和告警，不返回原始 JSON
+- 未发现 Java 21 集合 API、旧包引用或补丁空白错误
+- 按用户要求未运行测试或编译，本结论仅为源码位置和调用关系静态检查
+- Phase 1 已完成
+
+### 扩展 Phase 2：前端通用区块渲染
+
+#### 本阶段目标
+
+- 前端支持后端配置报告返回的 `KEY_VALUE` 和 `TREE_TABLE`
+- 按后端 `sections` 原始顺序渲染，不再只取每种类型的第一个区块
+- 概算动态科目使用 `rowKey + children` 展开，不固定科目名称和层级
+- 概算树表不自动增加操作列、查看按钮、下拉框或继续查询表单
+- 保留已有项目结算专用组件，不改变结算报告展示
+
+#### 前端实际修改
+
+- 新增 `src/components/AiChat/ReportKeyValueSection.vue`
+- 新增 `src/components/AiChat/ReportTreeTableSection.vue`
+- 修改 `src/components/AiChat/AiReport.vue`
+- `KEY_VALUE` 使用三列响应式键值布局，窄屏自动切换两列和单列
+- `TREE_TABLE` 使用 Element Plus 原生树表，默认展开后台返回的动态层级
+- 数字和比例列右对齐，汇总行使用固定浅蓝背景
+- 表格最大高度为 520px，避免大数据把聊天页面无限撑高
+- 单元格只展示标量值，复杂对象和数组不降级为 JSON
+- 未识别的区块类型直接忽略，不展示原始结果
+- 通用指标区改为三列紧凑布局，与概算参考图的信息密度一致
+
+#### 影响范围与兼容性
+
+- 项目结算仍由 `ProjectSettlementReport.vue` 优先渲染
+- 普通 `TABLE` 和 `WARNINGS` 继续使用原组件和协议
+- 新组件不包含概算字段、工作流编码或科目名称，可复用于成本、预算、现金流和进度等模块
+- 用户已有的 `WorkflowCanvasNode.vue` 和 `vite.config.js` 修改未触碰
+- 后台源码、数据库、Flyway、依赖和配置均未修改
+
+#### 检查结论
+
+- 已完成前端源码静态检查和补丁空白检查
+- 已确认不存在报告内操作列、查看按钮、下拉框或继续查询区域
+- 按用户要求未运行测试、构建、开发服务器或浏览器验收
+- Product Design 视觉运行验收因用户规则主动跳过，不能声称已经完成浏览器像素级验证
+- Phase 2 已完成
+
+#### 下一阶段
+
+扩展 Phase 3：使用概算汇总工作流的真实发布结构配置首个 `PROJECT_ESTIMATE` 报告。需要提供工作流编码、版本、真实安全结果样例、字段字典 ID，以及科目树的 `rowKey`、`children` 和字段路径。
+
+### 扩展 Phase 3：首个 PROJECT_ESTIMATE 配置报告
+
+#### 已核对的真实配置
+
+- 工作流编码：`project_budget_list`
+- 工作流名称：`查询项目概算列表信息`
+- 当前活动版本：版本 7，版本记录 ID 为 14
+- 工作流已经发布并启用，活动版本已经配置 `PROJECT_ESTIMATE reportDefinition`
+- 概算列表能力：`pm_test.queryByPage_31`
+- 概算详情能力：`pm_test.info_24`
+- 按科目查询已用金额能力：`pm_test.getUsedList`
+- 三项能力均已发布并启用，字段字典已经存在
+
+#### 当前阻断问题
+
+- 概算列表和详情查询已经完成调试运行，查询流程本身不再阻断
+- 活动版本 5 的 END 已返回 `$vars.project_budget_list.workflowData`
+- 活动版本 5 已包含 `PROJECT_ESTIMATE reportDefinition`，共包含项目概况、核心指标和概算明细三个区块
+- `detailList` 的真实结果是平铺科目，不包含 `children`
+- 当前字段字典只有 `subjectCode` 和 `parentSubjectId`，没有可与 `parentSubjectId` 匹配的科目行 `id` 字段，不能可靠构造父子树
+- 概算核心指标中的项目结余、成本率和利润率缺少已确认的业务公式，不能通过父子科目混合列表直接求和推断
+
+#### Phase 3A：先完成工作流结果闭环
+
+- 复用已发布结算工作流的双层 `FOREACH` 结构，不默认选取模糊查询的第一条记录
+- 外层 `FOREACH` 遍历 `$input.projectKeys`，当前概算报告限制为单个项目关键字
+- 内层概算列表节点把 `queryStr` 改为读取 `$item`
+- 第二层 `FOREACH` 遍历 `$vars.project_records.workflowData.records`，概算详情节点从 `$item.id` 取值
+- 缺少 `id` 的列表记录按统一跳过策略处理，不调用概算详情接口
+- END 节点返回外层 `FOREACH` 的 `workflowData`，不再返回原始 `$input`
+- 本阶段真实查询必须使用准确项目编码；项目名称或模糊关键字可能返回多条记录，不能静默选取第一条
+- 重新校验、发布并执行一次真实概算查询，取得成功的安全结果样例
+
+#### Phase 3B：成功结果返回后继续
+
+- 根据真实安全结果确认项目基础信息、指标和科目明细路径
+- 如果 `detailList` 已有 `children`，直接配置 `TREE_TABLE`
+- 如果 `detailList` 只有 `parentSubjectId`，先补充通用的平铺转树协议，不能在概算模块中写专用转换
+- 只配置真实存在且业务含义明确的指标，不自行推断利润率、成本率或项目结余公式
+- 配置并发布首个 `PROJECT_ESTIMATE` 的 `reportDefinition`
+
+#### Phase 3B-1：当前实施步骤
+
+- 先使用 `TABLE` 展示后台返回的全部动态概算科目，不固定科目名称和数量
+- 项目概况只展示已确认的项目编码、名称、类型、经理、部门和公司
+- 核心指标暂时只展示真实存在的概算金额和合同金额
+- 不计算缺少业务公式的已分配预算、项目结余、成本率和利润率
+- 通用路径校验允许标量路径穿过中间数组，但路径末级仍必须是标量
+- 读取器在路径命中多个项目时继续抛出异常，不静默选取第一项
+- 概算工作流的 `projectKeys.maxItems` 配置为 1，保证固定报告只对应一个项目
+- 科目接口补充可与 `parentSubjectId` 匹配的行主键后，再把明细区块切换为 `TREE_TABLE`
+
+#### 当前状态
+
+- Phase 3 已开始
+- 概算流程已由用户验证并发布；数据库已确认工作流为 `PUBLISHED`、已启用、草稿无未发布修改
+- 已确认活动发布版本为版本 5，版本记录 ID 为 12，共 10 个节点、7 条连线
+- 已确认发布快照的 `projectKeys.maxItems` 为 1，END 输出和三个报告区块配置均正确
+- 已完成版本 5 发布后的正式 `CHAT` 查询，运行 ID 为 `537a35ad9fb54529860fc8fb042743b3`
+- 正式运行绑定工作流版本记录 ID 12、版本号 5，状态为 `SUCCESS`，1 个项目全部成功
+- 前端已正常展示项目概算信息、概算核心指标和概算明细，没有展示原始 JSON
+- 前端工作流工作台已增加“列表 + 详情模板”，可一键生成开始、双层 FOREACH 和结束节点
+- 旧画布正好存在两个能力时，模板按从左到右顺序带入列表能力和详情能力，并根据能力 Binding 自动重建参数
+- END 节点连接唯一上游后自动输出 `$vars.<outputKey>.workflowData`
+- 打开旧草稿或保存时，如果 END 仍为默认 `$input` 或旧式 `$vars.<outputKey>`，会自动修正；用户已配置的高级表达式不会被覆盖
+- 前端 GraphSpec 编辑链路已补充 `reportDefinition` 原样透传，避免打开、应用源码或保存画布时丢失报告配置
+- 前端输入协议规范化已改为保留显式的 `projectKeys.maxItems`，概算可限制为单项目，其他工作流仍可配置 1～5 个项目
+- Phase 3A 的业务查询流程和 END 规范化已经完成
+- Phase 3B-1 的平铺动态明细配置已经完成正式聊天验收，本阶段完成
+- Phase 3B-2 已开始，科目行 `id` 字段字典已经补齐；指标业务公式仍待确认
+- 上一次正式结果生成时字段字典尚未包含 `id`；当时的 `parentSubjectId` 为 408、415 等业务主键，不能与 `subjectCode` 匹配
+- 如果详情接口原始响应已有 `id`，需要为 `$.data.detailList[].id` 生成并发布 `visible=1` 的字段字典，但不把它绑定为表格展示列；如果原始响应没有 `id`，需要由 PM 业务接口补充稳定科目主键
+- 不能把树节点 `id` 配置为 `visible=0`，因为当前安全结果策略会在构建 ReportSchema 前删除隐藏字段，导致树构建器无法读取主键
+- 合同金额 173 来自业务接口字段 `sumContractAmt=173`，当前未发现前端格式化或报告映射错误，业务单位和数值正确性需由数据源确认
+- 概算详情能力已补充科目主键字段字典，字段 ID 为 135，路径为 `$.data.detailList[].id`，类型为 `string`，状态为 `PUBLISHED`，`visible=1`
+- 概算详情能力和概算工作流当前均无脏草稿，仅新增字段字典不要求重新发布工作流
+- Phase 3B-2 下一步为扩展通用 `TREE_TABLE` 协议：支持 `rowKeyPath + parentKeyPath + rootParentValue` 将平铺数据安全转换为树形数据
+- 平铺转树必须校验重复主键、缺失父节点、循环引用、最大层级和最大行数，不允许静默丢弃错误关系
+- 用户已完成 `ReportSectionSpec`、`ReportDefinitionValidator` 和 `ConfigurableReportSectionBuilder` 的通用平铺转树代码
+- 静态检查确认旧 `childrenPath` 嵌套树保持兼容，新平铺树分支包含重复键、缺父节点、循环、最大 10 层和最大 5000 行保护
+- 概算工作流版本 6 已将明细区块更新为 `TREE_TABLE` 并发布，发布快照中的 `rowKeyPath=id`、`parentKeyPath=parentSubjectId`、`rootParentValue=0` 均正确
+- 版本 6 已产生正式 `CHAT` 运行 `a1677bd06e1b43a9aa14a309332364ca`，工作流本身执行成功，但 ReportSchema 构建抛出 `IllegalStateException`
+- 根因是当前 `id` 为概算明细记录主键（119032～119054），`parentSubjectId` 为科目定义主键（408、415），两者不属于同一主键空间
+- 树构建器因此无法在行主键中找到父节点 408、415；不能将缺失父节点静默当作根节点，否则会掩盖错误业务关系
+- PM 详情接口需要补充与 `parentSubjectId` 同域的 `subjectId`，字段字典路径建议为 `$.data.detailList[].subjectId`，发布后将 `rowKeyPath` 改为 `subjectId`
+- 概算详情字段字典已发布 `subjectId`（字段 ID 136），实际来源路径为 `$.data.detailList[].subjectDetailId`，安全结果字段名为 `subjectId`
+- 工作流版本 7 已将 `rowKeyPath` 更新为 `subjectId`，正式 `CHAT` 运行 `3809ced0f7b047ada10709b051bb8020` 状态为 `SUCCESS`
+- 已核对父子关系：其他费用 408 对应子科目 409～412，项目组奖励 415 对应子科目 416，主键空间一致
+- 前端树表已修正层级视觉：移除导致文字错位的自定义连接线和左侧标志，保留原生展开箭头、父行底色和缩进，并加宽科目列避免长名称错乱换行
+- Phase 3B-2 的动态科目树数据和展示链路已经闭环，下一步处理完整指标映射
+
+#### Phase 3C：概算完整指标映射
+
+- 业务系统当前不能调整概算响应结构，也不能提供可靠的独立汇总指标对象
+- 暂时取消概算 `METRICS` 区块，不展示无法确认业务口径的合同金额、已用金额、项目结余、成本率和利润率统计卡片
+- 不在通用报告构建器中按 `subjectCode` 写死概算指标，也不让前端计算父子科目和合计行
+- AI 分析只用于定性摘要、重要科目识别、异常提示和风险建议，不作为精确业务统计结果
+- 用户明确要求普通概算查询完成后也自动追加简短 AI 解读，不再只在分析类提问时展示 AI 区域
+- 新增工作流报告级 `analysisPolicy`，建议支持 `ON_DEMAND`、`ALWAYS`、`DISABLED`；默认 `ON_DEMAND` 保持已有工作流兼容
+- 概算报告配置为 `ALWAYS`：即使查询类型是 `DATA_QUERY`，也先展示基础报告，再异步追加 `summary / highlights / warnings`
+- `ANALYSIS_REPORT` 继续按用户明确的“分析、风险、异常、建议”等意图触发；查询类型与是否自动分析分别表达，不能强行把普通查询改写成分析查询
+- AI 只能读取字段策略过滤后的安全数据，不得生成 HTML、Markdown、CSS，不得把缺失值当作 0，不得自行汇总父子科目
+- Phase 3C 调整为“报告级可配置自动 AI 解读”，复用现有异步分析链路，不新增接口、数据库表或专用分析框架
+- 自动分析会增加模型调用、Token 成本和最终完成时间，但基础报告仍必须立即展示，不能等待 AI
+- Phase 3C-1 后台实施范围：新增 `ReportAnalysisPolicy`，扩展 `ReportDefinitionSpec`，由 `ReportSchemaBuilder` 计算有效分析策略，编排器根据 `analysis.status=PENDING` 启动现有异步分析
+- `ReportQueryType` 继续表示用户意图，不能为了自动分析把 `DATA_QUERY` 改写为 `ANALYSIS_REPORT`
+- AI 分块和结构化汇总提示词需要补充空值、父子科目、合计行、事实与推断边界
+- Phase 3C-1 后台代码已由用户应用，并完成静态位置与调用链检查：`ReportAnalysisPolicy`、`ReportDefinitionSpec`、`ReportSchemaBuilder`、`ReportSchemaVO.Analysis` 和编排器接入位置符合本阶段要求
+- 概算 GraphSpec 的下一步配置已经确定：移除口径不可靠的 `METRICS`，保留 `KEY_VALUE + TREE_TABLE`，并配置 `analysisPolicy=ALWAYS`
+- 当前等待用户将完整 GraphSpec 应用、校验并发布；发布后验收“基础报告立即展示，AI 摘要、重要科目、异常和风险提示异步追加”
+- 概算工作流已发布版本 8，活动版本记录 ID 为 15，发布快照中 `analysisPolicy=ALWAYS` 且只保留 `KEY_VALUE + TREE_TABLE`
+- 正式 `CHAT` 运行 `8d2331865aa14ff2b364f8243a31b6e4` 状态为 `SUCCESS`，最终助手消息的分析状态为 `DONE`
+- Phase 3C 已闭环：基础概算报告与自动 AI 定性分析链路均已生效
+- 未修改后台 Java 源码、数据库结构、Flyway 或依赖
+- 按用户要求未运行测试或编译
+
+### 扩展 Phase 4：报告后的通用业务追问
+
+#### Phase 4A：追问配置与会话状态协议
+
+- 当前真实明细能力为 `pm_test.getUsedList`，已发布并启用，输入参数为 `projectCode`、`subjectCode`、`subjectName` 和 `history`
+- 当前仅存在概算汇总工作流 `project_budget_list`，尚未创建概算科目明细工作流，不能直接配置一个不存在的目标工作流编码
+- 在 `ReportDefinitionSpec` 增加可选 `followUp`，只描述追问提示、候选行路径、候选键与名称路径、目标工作流和目标输入映射
+- 输入映射只允许标量常量、`$source` 安全路径和 `$selected` 安全路径，不允许脚本、函数或模型生成 JSONPath
+- 在 `BusinessConversationState` 增加通用 `pendingReportFollowUp`，只保存来源报告、Artifact ID、目标工作流和已解析的继承参数，不保存完整报告或全部科目列表
+- 用户否定时只清除待追问状态，保留上一份 Artifact，避免破坏后续“分析上面报告”的上下文
+- 科目唯一匹配才允许执行目标工作流；零匹配和多匹配必须继续澄清
+- 本阶段不接入编排器、不发送追问消息、不创建数据库表、不修改前端
+- 用户已完成 `ReportFollowUpSpec`、`ReportDefinitionSpec.followUp`、发布结构校验、`PendingReportFollowUp` 和 `BusinessConversationState.pendingReportFollowUp`
+- 静态检查确认配置模型位于 GraphSpec 纯模型包，校验器只处理通用安全路径和标量映射，会话状态没有保存完整报告或候选科目列表
+- 未发现概算工作流编码、概算字段名称或能力编码进入通用校验和状态模型
+- Phase 4A 已完成
+
+#### Phase 4B：概算科目明细目标工作流
+
+- 目标工作流编码确定为 `project_budget_subject_detail`
+- 目标能力使用已发布的 `pm_test.getUsedList`
+- 工作流输入固定为 `projectCode`、`subjectCode`、`subjectName` 和 `history`，与能力真实输入协议保持一致
+- 第一小步只创建、校验、发布并调试目标工作流，不提前猜测安全结果外层结构
+- 已从最近一次完整 Artifact 核对真实候选科目，例如合同额 `HTE`、人员费用 `RYFY`、项目组奖励 `XMZJL`
+- 取得一次真实安全结果后，再根据真实结果路径配置通用 `TABLE` 报告，不回退展示原始 JSON
+- 用户已完成 `project_budget_subject_detail` 的验证和发布，但复核发现该工作流只有一个 READ 能力节点
+- 项目现有 `DefaultToolExecutor + BusinessCapabilityExecutorImpl` 已能直接执行已发布 READ 能力，并统一处理权限、参数绑定、字段字典投影和运行记录
+- 因此单能力场景不再强制创建包装工作流；Phase 4 设计调整为“能力优先，工作流按需”
+- `followUp` 目标后续统一使用 `targetType + targetCode`：`CAPABILITY` 直接执行单个只读能力，`WORKFLOW` 用于循环、多节点、条件或组合业务流程
+- 已发布的 `project_budget_subject_detail` 暂时保留但不接入追问链路；直接能力链路验收通过后再由用户决定是否禁用，不执行直接删除
+- Phase 4B 调整后的第一步：将 `ReportFollowUpSpec` 和 `PendingReportFollowUp` 的 `targetWorkflowCode` 替换为通用 `targetType + targetCode`
+- 当前尚无已发布报告配置使用 `followUp`，因此不保留旧字段兼容层，避免长期维护重复目标字段
+- `targetType` 当前只允许 `CAPABILITY` 和 `WORKFLOW`，其中单个 READ 能力默认使用 `CAPABILITY`
+
+#### Phase 4 后续步骤
+
+1. Phase 4A：应用并静态检查追问配置和会话状态模型
+2. Phase 4B：创建并发布概算科目明细工作流，取得真实安全结果并配置通用 `TABLE` 报告
+3. Phase 4C：实现 Artifact 候选匹配、否定处理、唯一匹配和目标工作流确定性切换
+4. Phase 4D：在报告完成后发送独立助手追问消息，并完成刷新恢复、失败降级和最终闭环验收
+
+#### Phase 4C-1：追问状态激活与确定性候选匹配
+
+- `targetType + targetCode` 协议已由用户完成，静态检查通过，旧 `targetWorkflowCode` 引用已经清理
+- 新增通用 `ReportFollowUpService`，复用已发布工作流快照、完整 Artifact 还原器和受限路径读取器
+- 报告成功后只解析 `$source` 和固定输入，生成 `PendingReportFollowUp`；`$selected` 参数等待下一轮唯一匹配后补充
+- 否定回答采用确定性本地规则，只清除待追问状态，不清除上一轮 Artifact
+- 科目匹配优先完整名称或编码，其次允许当前问题包含完整名称或编码；不进行拼音、编辑距离或模型猜测
+- 零匹配和多匹配只返回澄清提示，不调用能力
+- 本小步不修改编排器、不执行目标能力、不发送追问消息；完成静态检查后进入 Phase 4C-2
+- 用户应用后的静态检查发现两项需同步修正：未配置 `followUp` 的普通报告不能记录准备失败警告；目标类型和候选文本大小写转换必须使用 `Locale.ROOT`
+
+#### Phase 4C-2：编排器确定性执行直接能力
+
+- `ConversationContextResolver` 在上下文重置处理之后发现 `pendingReportFollowUp` 时跳过模型关系分类，由专用追问服务处理用户回答
+- `DefaultAgentOrchestrator` 在结果分析和普通意图路由之前处理 `CANCELLED / CLARIFY / READY`
+- `READY + CAPABILITY` 通过 `PlanTemplateRegistry` 创建单能力 `RoutePlan`，继续复用现有 `ToolExecutor`、运行步骤记录、字段字典投影和回答保存
+- 目标能力执行成功后复用 `recordToolResult` 覆盖会话状态，从而自然清除旧的待追问；执行失败时保留待追问，允许用户重试
+- 本小步暂不执行 `READY + WORKFLOW`，当前概算配置只使用 `CAPABILITY`；工作流目标待出现真实多节点需求时再接入
+- 用户已完成本小步后台代码；静态检查确认追问拦截位于结果分析和普通路由之前，单能力计划继续复用现有工具执行链
+- Phase 4C-2 已完成，尚未运行测试或编译
+
+#### Phase 4D：独立追问消息与最终闭环
+
+- 新增通用 `REPORT_FOLLOW_UP` SSE 事件；该事件只携带服务端已发布配置中的提示文本，不携带候选业务数据
+- 前端收到事件后新增独立助手消息，不覆盖报告消息，也不在报告内提供下拉框或操作列
+- 追问消息必须单独持久化；刷新页面后继续按照普通助手历史消息恢复
+- 无需 AI 分析的报告在 `REPORT_DONE` 后发送追问；需要 AI 分析的报告在分析成功或失败降级完成后发送追问
+- 追问消息保存或发送失败不能破坏已经生成的基础报告，服务端只记录告警并正常结束报告响应
+- 前端 `src/views/knowledge/AiChat/index.vue` 已完成 `REPORT_FOLLOW_UP` 事件处理和重复事件去重
+- 用户已完成 Phase 4D 后台代码；静态检查确认普通报告、AI 分析成功和AI分析失败三条完成路径都会在报告完成后发送独立追问
+- 独立追问先保存为普通助手历史消息，再发送 `REPORT_FOLLOW_UP`，且位于报告最终更新之后，不会被同一 `runId` 的报告更新覆盖
+- `project_budget_list` 当前已发布启用，活动版本为版本 9、版本记录 ID 为 17，`draftDirty=0`
+- 活动发布快照中的 `followUp` 已启用，目标为只读能力 `pm_test.getUsedList`，候选路径和四个输入映射均已核对
+- 当前进入 Phase 4D 最终运行验收；通过独立追问、刷新恢复、科目查询、否定结束和异常澄清后才能标记最终闭环
+- 按用户要求未运行测试或编译
+
+#### 附加排查：页面空闲后身份服务偶发 503
+
+- 该 503 由 `HeaderCurrentUserProvider` 调用 PM `/user/info` 时发生 `RestClientException` 触发
+- Redis Session 缺失或过期会返回 401，不会返回“业务系统用户身份服务暂时不可用”
+- 公共 `RestClient` 当前没有应用已经配置的连接超时和读取超时，配置实际未生效
+- 刷新后恢复符合空闲连接被网关关闭、连接重置或短暂网络抖动的特征，但当前代码没有记录异常类型，仍需日志确认最终原因
+- 推荐只对 `/user/info` 的网络传输异常立即重试一次；401、403 和其他 HTTP 状态不重试
+- 不使用 Redis 中的旧权限快照兜底，避免权限撤销延迟和管理接口越权风险
+- 后台修改仍由用户手工应用，Codex 只提供文件位置和完整代码示例

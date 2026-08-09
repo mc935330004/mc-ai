@@ -61,7 +61,7 @@ public class WorkflowAnswerSummaryReducer {
            8. 查询结果不完整时，只说明缺少的业务结果以及用户需要补充的业务条件。
            """;
     /**
-     *  结构化分析只允许返回 JSON，
+     * 结构化分析只允许返回 JSON，
      * 禁止返回 Markdown、HTML 和表格。
      */
     private static final String STRUCTURED_SYSTEM_PROMPT = """
@@ -72,11 +72,23 @@ public class WorkflowAnswerSummaryReducer {
         禁止输出Markdown、HTML、CSS和表格。
         必须只返回一个合法JSON对象。
 
+        分析规则：
+        1. summary 只概括当前数据中的主要事实。
+        2. highlights 只列出有明确数据依据的重要科目和业务事实。
+        3. warnings 只列出异常、缺失数据、潜在风险和建议核实事项。
+        4. 缺失、空白或未提供的数据不得解释为0。
+        5. 不得自行汇总父科目、子科目和合计行。
+        6. 不得自行计算项目结余、成本率、利润率等精确业务指标。
+        7. 已知事实和风险推断必须明确区分。
+        8. 数据不足时使用“建议核实”，不得生成推测金额。
+        9. 不输出内部ID、字段路径、节点信息或原始JSON。
+        10. 每个数组最多输出5项，避免分析内容淹没基础报告。
+
         JSON格式必须是：
         {
-          "summary": "简短总结",
-          "highlights": ["重点一", "重点二"],
-          "warnings": ["风险一", "风险二"]
+          "summary": "简短事实摘要",
+          "highlights": ["重要事实一", "重要事实二"],
+          "warnings": ["风险或建议核实事项一"]
         }
         """;
     private final TrackedChatClientService chatClientService;

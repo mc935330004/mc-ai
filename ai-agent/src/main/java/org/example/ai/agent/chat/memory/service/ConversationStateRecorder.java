@@ -25,6 +25,10 @@ import java.util.Map;
 public class ConversationStateRecorder {
 
     private final ConversationStateService conversationStateService;
+    /**
+     * 根据报告配置准备通用待追问状态。
+     */
+    private final ReportFollowUpService reportFollowUpService;
 
     /**
      *  记录普通能力查询成功后的实际能力和实际调用参数。
@@ -140,6 +144,15 @@ public class ConversationStateRecorder {
          * 只保存结果快照ID，不把完整业务数据写入会话状态JSON。
          */
         state.setResultArtifactId(artifactId);
+        /*
+         * 追问配置不存在或准备失败时返回空，
+         * 不能影响已经成功生成的基础报告。
+         */
+        state.setPendingReportFollowUp(reportFollowUpService.preparePending(
+                        request,
+                        outcome,
+                        artifactId).orElse(null)
+        );
         saveSafely(request, state);
     }
 

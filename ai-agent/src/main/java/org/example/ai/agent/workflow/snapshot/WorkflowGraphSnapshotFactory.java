@@ -37,6 +37,7 @@ public class WorkflowGraphSnapshotFactory {
     private final ObjectMapper objectMapper;
     private final GraphSpecParser graphSpecParser;
     private final GraphSpecCompiler graphSpecCompiler;
+    private final ReportDefinitionValidator reportDefinitionValidator;
 
     /**
      * 分析工作流草稿。
@@ -104,13 +105,13 @@ public class WorkflowGraphSnapshotFactory {
         return analyze(graph);
     }
 
-    private WorkflowGraphMaterial analyze(
-            GraphSpec graph) {
+    private WorkflowGraphMaterial analyze(GraphSpec graph) {
 
         GraphCompilationResult graphCompilation = graphSpecCompiler.compile(graph);
         List<GraphValidationError> errors = new ArrayList<>(graphCompilation.errors());
         validateInputSchema(graph.getInputSchema(),errors );
-
+        // 报告定义与工作流一起校验，禁止发布无效字段路径和区块结构。
+        errors.addAll(reportDefinitionValidator.validate(graph.getReportDefinition()));
         GraphCompilationResult compilation =errors.isEmpty()
                         ? graphCompilation
                         : GraphCompilationResult.failure(

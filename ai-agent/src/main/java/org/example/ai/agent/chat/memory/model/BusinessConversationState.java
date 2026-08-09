@@ -33,4 +33,12 @@ public class BusinessConversationState {
      * 后续追问统计时直接读取该快照，不再重新路由工作流。
      */
     private String resultArtifactId;
+
+    /**
+     * 当前报告完成后等待用户回答的通用业务追问。
+     *
+     * 该字段保存在 state_json 中，
+     * 不需要修改 ai_conversation_state 表结构。
+     */
+    private PendingReportFollowUp pendingReportFollowUp;
 }

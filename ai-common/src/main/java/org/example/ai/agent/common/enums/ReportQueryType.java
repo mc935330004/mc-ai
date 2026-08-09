@@ -1,10 +1,13 @@
 package org.example.ai.agent.common.enums;
 
 /**
- * 报告查询类型。
+ * 报告查询意图类型。
  *
- * DATA_QUERY 只展示业务数据，不调用 AI 分析。
- * ANALYSIS_REPORT 先展示业务数据，再异步执行 AI 分析。
+ * DATA_QUERY 表示用户主要请求查询业务数据。
+ * ANALYSIS_REPORT 表示用户明确请求分析、风险或建议。
+ *
+ * 是否最终执行 AI 分析，还需要结合报告的
+ * ReportAnalysisPolicy 判断。
  */
 public enum ReportQueryType {
 

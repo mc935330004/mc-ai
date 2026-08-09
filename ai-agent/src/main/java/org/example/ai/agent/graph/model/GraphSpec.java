@@ -7,6 +7,7 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 import com.fasterxml.jackson.databind.JsonNode;
+import org.example.ai.agent.graph.model.report.ReportDefinitionSpec;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -59,4 +60,11 @@ public class GraphSpec {
      * 都必须经过该Schema校验。
      */
     private JsonNode inputSchema;
+
+    /**
+     * 当前工作流发布版本使用的固定报告定义。
+     *
+     * 不配置时继续使用已有专用模板或通用降级报告。
+     */
+    private ReportDefinitionSpec reportDefinition;
 }

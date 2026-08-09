@@ -74,6 +74,16 @@ public class ConversationContextResolver {
             if (state == null) {
                 return null;
             }
+            /*
+             * 报告追问使用确定性候选匹配，
+             * 不需要调用上下文分类模型。
+             *
+             * 上下文重置已经在本方法前面处理，
+             * 因此不会拦截“清除上下文”等控制命令。
+             */
+            if (state.getPendingReportFollowUp() != null) {
+                return null;
+            }
             // 已明确等待用户补参时，简单业务编号直接复用结构化状态，不再调用模型判断。
             String clarificationQuestion = resolveClarificationFallback(
                     request,

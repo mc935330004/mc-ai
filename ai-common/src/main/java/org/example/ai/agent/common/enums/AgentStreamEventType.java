@@ -79,4 +79,8 @@ public enum AgentStreamEventType {
      * 已发布工作流执行结果。
      */
     WORKFLOW_RESULT,
+    /**
+     * 报告完成后的独立业务追问。
+     */
+    REPORT_FOLLOW_UP,
 }

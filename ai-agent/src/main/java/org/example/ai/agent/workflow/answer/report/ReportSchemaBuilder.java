@@ -3,6 +3,9 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.example.ai.agent.common.enums.ReportQueryType;
 import org.example.ai.agent.common.enums.ReportType;
+import org.example.ai.agent.workflow.answer.report.config.ConfigurableReportSectionBuilder;
+import org.example.ai.agent.workflow.answer.report.config.ReportDefinitionResolver;
+import org.example.ai.agent.workflow.answer.report.config.ResolvedReportDefinition;
 import org.example.ai.agent.workflow.answer.WorkflowAnswerFieldContextResolver;
 import org.example.ai.agent.workflow.answer.WorkflowAnswerFieldPolicy;
 import org.example.ai.agent.workflow.answer.WorkflowAnswerModelPayload;
@@ -37,6 +40,8 @@ public class ReportSchemaBuilder {
     private final WorkflowAnswerPayloadFactory answerPayloadFactory;
     private final ObjectMapper objectMapper;
     private final ReportTemplateRegistry reportTemplateRegistry;
+    private final ReportDefinitionResolver reportDefinitionResolver;
+    private final ConfigurableReportSectionBuilder configurableReportSectionBuilder;
     /**
      * 根据工作流结果构建基础报告。
      */
@@ -78,13 +83,40 @@ public class ReportSchemaBuilder {
         ReportTemplate reportTemplate = reportTemplateRegistry
                 .find(outcome.workflowCode())
                 .orElse(null);
-        String reportType = reportTemplate == null
-                ? ReportType.GENERIC_WORKFLOW_REPORT.name()
-                : reportTemplate.reportType().name();
 
-        String title =StringUtils.hasText(outcome.workflowName())
-                        ? outcome.workflowName()
-                        : "业务查询报告";
+    // 数据提示先创建，配置报告解析失败时需要追加告警。
+        List<String> warnings = buildWarnings(trace);
+
+        ResolvedReportDefinition configuredReport = resolveConfiguredReport(
+                        outcome,
+                        reportTemplate,
+                        warnings
+                );
+        boolean analysisRequired =resolveAnalysisRequired(safeQueryType,configuredReport);
+        String reportType;
+        if (reportTemplate != null) {
+            reportType = reportTemplate.reportType().name();
+        } else if (configuredReport != null) {
+            reportType = configuredReport
+                    .definition()
+                    .reportType()
+                    .name();
+        } else {
+            reportType =
+                    ReportType.GENERIC_WORKFLOW_REPORT.name();
+        }
+
+        String title = configuredReport != null
+                        && StringUtils.hasText(
+                        configuredReport.definition() .title())
+                        ? configuredReport
+                          .definition()
+                          .title()
+                          .trim()
+                        : StringUtils.hasText(
+                        outcome.workflowName())
+                          ? outcome.workflowName()
+                          : "业务查询报告";
 
         String status =!trace.workflowSuccess()
                         ? "FAILED"
@@ -92,10 +124,7 @@ public class ReportSchemaBuilder {
                           ? "BASE_READY"
                           : "PARTIAL";
 
-        // 数据提示只描述业务数据完整性，AI 执行状态由 analysis 独立维护。
-        List<String> warnings = buildWarnings(trace);
-
-        List<ReportSchemaVO.Section> sections = buildReportSections(outcome, trace,reportTemplate, warnings);
+        List<ReportSchemaVO.Section> sections =buildReportSections( outcome,trace,reportTemplate,configuredReport,warnings );
 
         ReportSchemaVO.Meta meta = new ReportSchemaVO.Meta(
                         trace.topLevelTotalCount(),
@@ -111,8 +140,8 @@ public class ReportSchemaBuilder {
                 );
 
         String subtitle =
-                safeQueryType.requiresAnalysis()
-                        ? "基础业务数据已先行展示"
+                analysisRequired
+                        ? "基础业务数据已展示，AI 正在分析"
                         : "业务数据查询完成";
 
         return new ReportSchemaVO(
@@ -125,8 +154,7 @@ public class ReportSchemaBuilder {
                 status,
                 trace.workflowDataComplete(),
                 sections,
-                // AI 分析状态与业务数据告警分别维护。
-                ReportSchemaVO.Analysis.initial(safeQueryType.name()),
+                ReportSchemaVO.Analysis.initial(analysisRequired ),
                 meta
         );
     }
@@ -193,9 +221,10 @@ public class ReportSchemaBuilder {
             WorkflowExecutionOutcome outcome,
             WorkflowResultTraceData trace,
             ReportTemplate reportTemplate,
+            ResolvedReportDefinition configuredReport,
             List<String> warnings) {
 
-        if (reportTemplate == null) {
+        if (reportTemplate == null && configuredReport == null) {
             warnings.add("当前工作流没有固定报告模板，明细暂不展示");
             return List.of(buildMetricsSection(trace),buildWarningSection(warnings));
         }
@@ -208,7 +237,14 @@ public class ReportSchemaBuilder {
             } else {
                 WorkflowAnswerModelPayload safePayload =answerPayloadFactory.create(outcome,policy.hiddenFieldNames() );
                 JsonNode safeResult =objectMapper.valueToTree(safePayload.result());
-                sections.addAll(reportTemplate.buildSections(safeResult));
+                if (reportTemplate != null) {
+                    // 已有专用模板优先，保证项目结算展示不受影响。
+                    sections.addAll(reportTemplate.buildSections(safeResult));
+                } else {
+                    // 没有专用模板时才使用工作流发布版本中的配置报告。
+                    sections.addAll(configurableReportSectionBuilder.build(configuredReport,safeResult)
+                    );
+                }
             }
         } catch (RuntimeException exception) {
             log.warn(
@@ -224,6 +260,47 @@ public class ReportSchemaBuilder {
         return List.copyOf(sections);
     }
 
+    /**
+     * 根据用户意图和报告配置计算最终分析策略。
+     *
+     * 没有配置报告时保持原有查询类型逻辑，
+     * 避免影响结算专用模板和历史工作流。
+     */
+    private boolean resolveAnalysisRequired(
+            ReportQueryType queryType,
+            ResolvedReportDefinition configuredReport) {
+        if (configuredReport == null) {
+            return queryType.requiresAnalysis();
+        }
+        return configuredReport
+                .definition()
+                .analysisPolicy()
+                .requiresAnalysis(queryType);
+    }
+
+    /**
+     * 只有不存在专用模板时才解析配置报告。
+     */
+    private ResolvedReportDefinition resolveConfiguredReport(
+            WorkflowExecutionOutcome outcome,
+            ReportTemplate reportTemplate,
+            List<String> warnings) {
+        if (reportTemplate != null) {
+            return null;
+        }
+        try {
+            return reportDefinitionResolver.resolve(outcome).orElse(null);
+        } catch (RuntimeException exception) {
+            log.warn(
+                    "配置报告解析失败，runId={}，workflowCode={}，errorType={}",
+                    outcome.runId(),
+                    outcome.workflowCode(),
+                    exception.getClass().getSimpleName()
+            );
+            warnings.add("报告配置无效，业务明细暂不展示");
+            return null;
+        }
+    }
     /**
      *  构建数据状态提示。
      */

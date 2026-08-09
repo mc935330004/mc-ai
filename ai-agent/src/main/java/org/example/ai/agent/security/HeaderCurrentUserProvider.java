@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.example.ai.agent.common.exception.BusinessException;
 import org.example.ai.agent.sso.AgentSessionService;
 import org.springframework.http.HttpHeaders;
@@ -24,6 +25,7 @@ import java.util.Set;
  * 当前请求只访问一次PM的/user/info，
  * 用户身份和权限只在HttpServletRequest生命周期内缓存。
  */
+@Slf4j
 @Component
 @RequiredArgsConstructor
 public class HeaderCurrentUserProvider implements CurrentUserProvider {
@@ -34,6 +36,14 @@ public class HeaderCurrentUserProvider implements CurrentUserProvider {
     private final ObjectMapper objectMapper;
     private final RestClient restClient;
     private final AgentSessionService agentSessionService;
+    /**
+     * 身份查询总尝试次数。
+     *
+     * 第一次请求可能遇到空闲连接被网关关闭，
+     * GET 请求允许立即重试一次。
+     */
+    private static final int PM_USER_INFO_MAX_ATTEMPTS = 2;
+
     @Override
     public String getRequiredUserId() {
         return getRequiredContext() .userId();
@@ -87,11 +97,7 @@ public class HeaderCurrentUserProvider implements CurrentUserProvider {
         String authorization = getRequiredAuthorization();
         JsonNode response;
         try {
-            String responseBody =restClient.get() .uri("/user/info")
-                            .header(HttpHeaders.AUTHORIZATION,authorization)
-                            .retrieve()
-                            .body(String.class);
-
+            String responseBody =requestPmUserInfo(authorization);
             if (!StringUtils.hasText(responseBody)) {
                 throw new BusinessException( 401,"业务系统没有返回当前用户信息");
             }
@@ -144,6 +150,45 @@ public class HeaderCurrentUserProvider implements CurrentUserProvider {
         }
 
         return new VerifiedUserContext(userId.trim(),Set.copyOf(permissions));
+    }
+
+    /**
+     * 请求 PM 当前用户信息。
+     *
+     * 只重试网络传输异常。
+     * 401、403、500 等明确 HTTP 响应不重试。
+     */
+    private String requestPmUserInfo(String authorization) {
+        RestClientException lastException = null;
+        for (int attempt = 1; attempt <= PM_USER_INFO_MAX_ATTEMPTS; attempt++) {
+            try {
+                return restClient.get()
+                        .uri("/user/info")
+                        .header(HttpHeaders.AUTHORIZATION,authorization)
+                        .retrieve()
+                        .body(String.class);
+
+            } catch (RestClientResponseException exception) {
+                /*
+                 * PM 已经返回明确 HTTP 状态，
+                 * 继续交给 loadFromPm() 按原规则处理。
+                 */
+                throw exception;
+            } catch (RestClientException exception) {
+                lastException = exception;
+
+                /*
+                 * 日志不记录 Authorization、Cookie 或 Token。
+                 */
+                log.warn(
+                        "PM用户身份查询发生网络异常，attempt={}, errorType={}, message={}",
+                        attempt,
+                        exception.getClass().getSimpleName(),
+                        exception.getMessage()
+                );
+            }
+        }
+        throw new RestClientException( "PM用户身份查询连续失败",lastException);
     }
 
     /**

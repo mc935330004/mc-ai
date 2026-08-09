@@ -91,22 +91,43 @@ public record ReportSchemaVO(
     /**
      * AI 分析区域。
      */
-    public record Analysis(String status,String summary,
-            List<String> highlights,List<String> warnings) {
+    public record Analysis(
+            String status,
+            String summary,
+            List<String> highlights,
+            List<String> warnings) {
 
         /**
-         * 根据查询类型创建初始分析状态。
+         * 兼容原有根据查询类型创建分析状态的调用。
          */
         public static Analysis initial(String queryType) {
-            if ("ANALYSIS_REPORT".equalsIgnoreCase(queryType)) {
-                return pending();
-            }
 
-            return notRequired();
+            boolean analysisRequired =
+                    "ANALYSIS_REPORT".equalsIgnoreCase(
+                            queryType
+                    );
+            return initial(analysisRequired);
         }
 
         /**
-         * 普通数据查询不需要 AI 分析。
+         * 根据最终分析策略创建初始状态。
+         */
+        public static Analysis initial(boolean analysisRequired) {
+
+            return analysisRequired
+                    ? pending()
+                    : notRequired();
+        }
+
+        /**
+         * 当前基础报告是否等待执行 AI 分析。
+         */
+        public boolean requiresExecution() {
+            return "PENDING".equalsIgnoreCase(status);
+        }
+
+        /**
+         * 当前报告不需要 AI 分析。
          */
         public static Analysis notRequired() {
             return new Analysis(
@@ -118,7 +139,7 @@ public record ReportSchemaVO(
         }
 
         /**
-         * 分析报告等待异步分析。
+         * 当前报告等待异步 AI 分析。
          */
         public static Analysis pending() {
             // 业务数据提示由报告区块维护，不能混入 AI 风险列表。

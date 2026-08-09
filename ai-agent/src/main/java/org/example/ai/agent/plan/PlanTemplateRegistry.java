@@ -2,10 +2,12 @@ package org.example.ai.agent.plan;
 
 import lombok.RequiredArgsConstructor;
 import org.example.ai.agent.chat.entity.AgentRequest;
+import org.example.ai.agent.chat.memory.model.ReportFollowUpDecision;
 import org.example.ai.agent.router.IntentResult;
 import org.example.ai.agent.router.RouteType;
 import org.example.ai.agent.workflow.plan.WorkflowPlan;
 import org.springframework.stereotype.Component;
+import org.springframework.util.StringUtils;
 
 import java.util.List;
 import java.util.Map;
@@ -105,6 +107,71 @@ public class PlanTemplateRegistry {
                                 .stepType(StepType.LLM_SUMMARY)
                                 .stepName("基于知识库检索结果生成回答")
                                 .inputKeys(List.of("ragDocs"))
+                                .outputKey("finalAnswer")
+                                .build()
+                ))
+                .build();
+    }
+    /**
+     * 为报告追问构建确定性的单能力查询计划。
+     *
+     * 能力编码和输入均来自服务端发布配置及 Artifact，
+     * 不再调用模型选择能力或提取参数。
+     */
+    public RoutePlan buildReportFollowUpCapabilityPlan(
+            String runId,
+            AgentRequest request,
+            ReportFollowUpDecision decision) {
+
+        if (decision == null
+                || decision.status()
+                != ReportFollowUpDecision.Status.READY
+                || !"CAPABILITY".equalsIgnoreCase(
+                decision.targetType())
+                || !StringUtils.hasText(
+                decision.targetCode())) {
+
+            throw new IllegalArgumentException(
+                    "报告追问缺少有效的直接能力执行计划"
+            );
+        }
+
+        return RoutePlan.builder()
+                .runId(runId)
+                .routeType(RouteType.BUSINESS_QUERY)
+                .userQuestion(request.getUserQuestion())
+                .goal("查询用户选择的业务明细")
+                .steps(List.of(
+                        PlanStep.builder()
+                                .stepNo(1)
+                                .stepType(
+                                        StepType.BUSINESS_TOOL
+                                )
+                                .stepName(
+                                        "执行报告追问能力："
+                                                + decision.targetCode()
+                                )
+                                .capabilityCode(
+                                        decision.targetCode()
+                                )
+                                .input(decision.input())
+                                .outputKey(
+                                        "reportFollowUpData"
+                                )
+                                .build(),
+                        PlanStep.builder()
+                                .stepNo(2)
+                                .stepType(
+                                        StepType.LLM_SUMMARY
+                                )
+                                .stepName(
+                                        "根据业务明细生成回答"
+                                )
+                                .inputKeys(
+                                        List.of(
+                                                "reportFollowUpData"
+                                        )
+                                )
                                 .outputKey("finalAnswer")
                                 .build()
                 ))

@@ -6,6 +6,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.example.ai.agent.answer.AnswerComposer;
 import org.example.ai.agent.chat.entity.AgentRequest;
 import org.example.ai.agent.chat.entity.AgentStreamEvent;
+import org.example.ai.agent.chat.memory.model.ReportFollowUpDecision;
+import org.example.ai.agent.chat.memory.service.ReportFollowUpService;
 import org.example.ai.agent.chat.service.AgentOrchestrator;
 import org.example.ai.agent.chat.vo.ChatTextPayloadVO;
 import org.example.ai.agent.common.enums.ReportQueryType;
@@ -122,6 +124,10 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
      */
     private final ReportSchemaBuilder reportSchemaBuilder;
     /**
+     * 处理报告后的确定性业务追问。
+     */
+    private final ReportFollowUpService reportFollowUpService;
+    /**
      * 使用显式构造器注入命名线程池。
      *
      * Executor 类型可能存在多个 Bean，必须使用 Qualifier 指定
@@ -145,6 +151,7 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
             //  注入会话服务，统一保存助手回答。
             AiChatSessionService aiChatSessionService,
             ResultArtifactAnalysisService resultArtifactAnalysisService,
+            ReportFollowUpService reportFollowUpService,
             ReportSchemaBuilder reportSchemaBuilder
     ) {
         this.streamSessionFactory = streamSessionFactory;
@@ -163,6 +170,7 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
         this.conversationContextResolver = conversationContextResolver;
         this.aiChatSessionService = aiChatSessionService;
         this.resultArtifactAnalysisService = resultArtifactAnalysisService;
+        this.reportFollowUpService = reportFollowUpService;
         this.reportSchemaBuilder = reportSchemaBuilder;
 
     }
@@ -216,6 +224,28 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                 );
                 runTraceService.markSuccess(runId,System.currentTimeMillis() - startTime);
                 stream.complete();
+                return;
+            }
+            /*
+             * 报告业务追问在结果分析和普通意图路由之前处理。
+             *
+             * 科目候选和目标参数已经由服务端确定，
+             * 不能再次调用模型选择能力。
+             */
+            ReportFollowUpDecision followUpDecision =reportFollowUpService.resolve(request);
+
+            if (followUpDecision.status()!= ReportFollowUpDecision.Status.NONE) {
+                handleReportFollowUp(
+                        request,
+                        stream,
+                        runId,
+                        followUpDecision
+                );
+
+                runTraceService.markSuccess(
+                        runId,
+                        System.currentTimeMillis() - startTime
+                );
                 return;
             }
             /*
@@ -456,6 +486,96 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
             stream.error(exception);
         }
     }
+
+    /**
+     * 处理报告后的确定性业务追问。
+     */
+    private void handleReportFollowUp(
+            AgentRequest request,
+            AgentStreamSession stream,
+            String runId,
+            ReportFollowUpDecision decision)
+            throws Exception {
+
+        switch (decision.status()) {
+            case CANCELLED, CLARIFY -> {
+                publishAssistantAnswer(
+                        request,
+                        stream,
+                        runId,
+                        decision.message()
+                );
+
+                stream.complete();
+            }
+
+            case READY -> executeReadyReportFollowUp(
+                    request,
+                    stream,
+                    runId,
+                    decision
+            );
+
+            case NONE -> throw new IllegalStateException(
+                    "无追问状态不能进入追问执行逻辑"
+            );
+        }
+    }
+
+    /**
+     * 执行唯一匹配后的报告追问。
+     */
+    private void executeReadyReportFollowUp(
+            AgentRequest request,
+            AgentStreamSession stream,
+            String runId,
+            ReportFollowUpDecision decision)
+            throws Exception {
+
+        /*
+         * 当前阶段只接入直接只读能力。
+         * 多节点 WORKFLOW 等出现真实需求后再接入。
+         */
+        if (!"CAPABILITY".equalsIgnoreCase(
+                decision.targetType())) {
+
+            publishAssistantAnswer(request, stream, runId,
+                    "当前追问目标暂不支持直接执行，请重新发起完整业务查询。");
+            stream.complete();
+            return;
+        }
+
+        runTraceService.updateRouteType(runId, RouteType.BUSINESS_QUERY);
+        RoutePlan routePlan =planTemplateRegistry
+                        .buildReportFollowUpCapabilityPlan(
+                                runId,
+                                request,
+                                decision
+                        );
+        stream.send(
+                "plan",
+                AgentStreamEvent.of(
+                        runId,
+                        AgentStreamEventType.PLAN.name(),
+                        "已生成业务明细查询计划。",
+                        routePlan
+                )
+        );
+
+        /*
+         * 复用现有执行、审计、字段投影和回答链路。
+         *
+         * 成功后 recordToolResult 会覆盖旧会话状态，
+         * 从而自然清除 pendingReportFollowUp。
+         */
+        executeToolPlan(
+                request,
+                stream,
+                runId,
+                routePlan
+        );
+    }
+
     /**
      * 基于上一轮结果快照回答追问。
      *
@@ -959,13 +1079,14 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
         ReportSchemaVO baseReportSchema =reportSchemaBuilder.build(outcome,
                         preparation == null ? null: preparation.artifactId(),
                         queryType);
+        boolean analysisRequired =baseReportSchema.analysis().requiresExecution();
         ChatTextPayloadVO basePayload =ChatTextPayloadVO.builder()
                         .workflow(outcome)
                         .reportSchema(baseReportSchema)
                         .presentationType("REPORT")
                         .presentationTitle(baseReportSchema.title())
                         .build();
-        String baseMessageContent =queryType.requiresAnalysis()
+        String baseMessageContent =analysisRequired
                         ? "基础报告已生成，正在进行 AI 分析。"
                         : "业务报告已生成。";
         // 先保存基础报告，保证刷新页面或分析失败时仍然有可恢复内容。
@@ -993,12 +1114,14 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                     preparation.artifactId()
             );
         }
-        /*
-         * 普通数据查询发送最终快照后直接完成，
-         * 不进入 AI 分析线程。
-         */
-        if (!queryType.requiresAnalysis()) {
-            completeDataQueryReport(stream,runId,baseReportSchema);
+
+        if (!analysisRequired) {
+            completeDataQueryReport(
+                    request,
+                    stream,
+                    runId,
+                    baseReportSchema
+            );
             return outcome;
         }
         if (preparation == null) {
@@ -1041,7 +1164,12 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
     /**
      * 完成普通数据查询报告。
      */
-    private void completeDataQueryReport(AgentStreamSession stream,String runId,ReportSchemaVO reportSchema) throws Exception {
+    private void completeDataQueryReport(
+            AgentRequest request,
+            AgentStreamSession stream,
+            String runId,
+            ReportSchemaVO reportSchema)
+            throws Exception {
 
         stream.send(
                 "report_done",
@@ -1051,8 +1179,21 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                         .content("")
                         .data(reportSchema)
                         .presentationType("REPORT")
-                        .presentationTitle(reportSchema.title())
-                        .build());
+                        .presentationTitle(
+                                reportSchema.title()
+                        )
+                        .build()
+        );
+
+        /*
+         * 报告先完成展示，再追加独立助手追问。
+         */
+        publishReportFollowUpPrompt(
+                request,
+                stream,
+                runId
+        );
+
         stream.complete();
     }
 
@@ -1110,6 +1251,17 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                     "基础报告和 AI 分析已生成。",
                     payload
             );
+
+            /*
+             * AI 分析完成后再发送追问，
+             * 避免用户输入框仍被当前请求占用。
+             */
+            publishReportFollowUpPrompt(
+                    request,
+                    stream,
+                    runId
+            );
+
             stream.complete();
         } catch (Exception exception) {
             sendReportAnalysisFailure(
@@ -1171,7 +1323,18 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                     stream,
                     runId,
                     "基础报告已生成，但 AI 分析暂时失败。",
-                    payload);
+                    payload
+            );
+
+            /*
+             * AI 分析失败不影响基础报告后的业务追问。
+             */
+            publishReportFollowUpPrompt(
+                    request,
+                    stream,
+                    runId
+            );
+
             stream.complete();
         } catch (Exception sendException) {
             stream.error(sendException);
@@ -1195,6 +1358,75 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                         .build()
         );
     }
+
+    /**
+     * 保存并发送报告完成后的独立助手追问。
+     *
+     * 追问属于增强信息，失败不能破坏已经完成的基础报告。
+     */
+    private void publishReportFollowUpPrompt(
+            AgentRequest request,
+            AgentStreamSession stream,
+            String runId) {
+
+        try {
+            String prompt =
+                    reportFollowUpService
+                            .findPendingPrompt(request)
+                            .orElse(null);
+
+            if (!StringUtils.hasText(prompt)) {
+                return;
+            }
+
+            /*
+             * 独立保存为普通助手消息，
+             * 页面刷新后可以按照聊天历史正常恢复。
+             *
+             * 必须在报告最终更新完成后保存，
+             * 避免 updateAssistantReportMessage 按 runId 更新到追问消息。
+             */
+            aiChatSessionService.saveAssistantMessage(
+                    request.getUserId(),
+                    request.getConversationId(),
+                    prompt,
+                    runId,
+                    request.getModelCode(),
+                    "TEXT",
+                    null
+            );
+
+            stream.send(
+                    "report_follow_up",
+                    AgentStreamEvent.builder()
+                            .runId(runId)
+                            .type(
+                                    AgentStreamEventType
+                                            .REPORT_FOLLOW_UP
+                                            .name()
+                            )
+                            .content(prompt)
+                            .data(Map.of(
+                                    "prompt",
+                                    prompt
+                            ))
+                            .presentationType("MARKDOWN")
+                            .build()
+            );
+        } catch (Exception exception) {
+            /*
+             * 追问发送失败只能记录告警，
+             * 不能将已经生成成功的报告改成失败。
+             */
+            log.warn(
+                    "发送报告独立追问失败，runId={}，errorType={}",
+                    runId,
+                    exception.getClass().getSimpleName(),
+                    exception
+            );
+        }
+    }
+
     /**
      *  最终 Markdown 与结构化展示快照必须在同一条 TEXT 消息中保存。
      */
