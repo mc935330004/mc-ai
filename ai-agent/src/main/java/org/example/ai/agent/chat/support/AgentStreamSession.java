@@ -67,6 +67,20 @@ public class AgentStreamSession {
      *  当前回答报告标题。
      */
     private volatile String finalPresentationTitle;
+    /**
+     * 用户请求的首选模型。
+     */
+    private volatile String requestedModelCode;
+
+    /**
+     * 最终成功完成回答的模型。
+     */
+    private volatile String effectiveModelCode;
+
+    /**
+     * 是否发生了自动模型切换。
+     */
+    private volatile boolean fallbackUsed;
 
     public AgentStreamSession(
             SseEmitter emitter,
@@ -283,6 +297,9 @@ public class AgentStreamSession {
                             .contentLength(finalMarkdown.length())
                             .contentHash(contentHash)
                             .finishReason("STOP")
+                            .requestedModelCode(requestedModelCode)
+                            .effectiveModelCode(effectiveModelCode)
+                            .fallbackUsed(fallbackUsed)
                             .build();
 
             AgentStreamEvent event = AgentStreamEvent.builder()
@@ -407,5 +424,35 @@ public class AgentStreamSession {
             return;
         }
         agentMetrics.recordSseClosed( protocolVersion,"CANCELLED");
+    }
+    /**
+     * 保存最终回答对应的模型信息。
+     */
+    public void setAnswerModelResult(
+            String requestedModelCode,
+            String effectiveModelCode) {
+
+        this.requestedModelCode =
+                normalizeModelCode(requestedModelCode);
+
+        this.effectiveModelCode =
+                normalizeModelCode(effectiveModelCode);
+
+        this.fallbackUsed =
+                this.requestedModelCode != null
+                        && this.effectiveModelCode != null
+                        && !this.requestedModelCode.equals(
+                        this.effectiveModelCode
+                );
+    }
+
+    /**
+     * 统一清理模型编码。
+     */
+    private String normalizeModelCode(String modelCode) {
+        if (modelCode == null || modelCode.isBlank()) {
+            return null;
+        }
+        return modelCode.trim();
     }
 }

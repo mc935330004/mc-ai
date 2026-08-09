@@ -46,4 +46,12 @@ public class ModelCallContext {
      */
     @Builder.Default
     private int callSequence = 1;
+
+    /**
+     * 同一次模型调用中的实际尝试序号。
+     *
+     * 主模型为1，第一次备用模型为2。
+     */
+    @Builder.Default
+    private int attemptSequence = 1;
 }

@@ -48,6 +48,16 @@ public class ModelUsageRecord {
     private Integer callSequence;
 
     /**
+     * 稳定模型配置编码。
+     */
+    private String modelCode;
+
+    /**
+     * 本次业务模型调用中的实际尝试序号。
+     */
+    private Integer attemptSequence;
+
+    /**
      * 模型供应商。
      */
     private String provider;
@@ -106,6 +116,11 @@ public class ModelUsageRecord {
      * 是否调用成功。
      */
     private Integer success;
+
+    /**
+     * 失败分类，成功时为空。
+     */
+    private String errorCategory;
 
     /**
      * 错误信息摘要。

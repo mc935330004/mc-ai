@@ -2,6 +2,7 @@ package org.example.ai.agent.modelusage.service.impl;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.example.ai.agent.common.enums.ModelFailureCategory;
 import org.example.ai.agent.common.modelusage.ModelCallContext;
 import org.example.ai.agent.common.modelusage.TrackedChatClientService;
 import org.example.ai.agent.modelusage.model.TokenUsageData;
@@ -14,11 +15,18 @@ import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.SignalType;
-import org.example.ai.agent.common.config.AgentModelProperties;
-
+import org.example.ai.agent.modelconfig.client.ModelClientRegistry;
+import org.example.ai.agent.modelconfig.model.ResolvedModelClient;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import org.example.ai.agent.common.exception.BusinessException;
+import org.example.ai.agent.common.exception.ErrorCode;
+import org.example.ai.agent.modelconfig.failover.ModelCandidateResolver;
 
+import org.example.ai.agent.modelconfig.failover.ModelFailureClassifier;
+import org.example.ai.agent.modelconfig.failover.ModelFailureTracker;
+
+import java.util.List;
 /**
  * 统一模型调用服务。
  *
@@ -30,19 +38,18 @@ import java.util.concurrent.atomic.AtomicReference;
 @RequiredArgsConstructor
 public class DefaultTrackedChatClientService implements TrackedChatClientService {
 
-    private static final String PROVIDER_NAME = "openai-compatible";
-
-    private final ChatClient chatClient;
-    private final ModelUsageService modelUsageService;
+    /**
+     * 根据模型编码获取实际客户端。
+     */
+    private final ModelClientRegistry modelClientRegistry;
     private final TokenUsageExtractor tokenUsageExtractor;
     /**
-     *  聊天模型配置，只用于生成模型切换。
+     * 根据模型编码获取实际客户端。
      */
-    private final AgentModelProperties modelProperties;
-
-    /**
-     * 同步模型调用。
-     */
+    private final ModelUsageService modelUsageService;
+    private final ModelCandidateResolver modelCandidateResolver;
+    private final ModelFailureClassifier modelFailureClassifier;
+    private final ModelFailureTracker modelFailureTracker;
     @Override
     public ChatResponse call(ModelCallContext context,String systemPrompt, String userPrompt ) {
         return call(context, systemPrompt, userPrompt,null );
@@ -81,26 +88,40 @@ public class DefaultTrackedChatClientService implements TrackedChatClientService
             AtomicReference<String> finishReason =new AtomicReference<>();
 
             final Flux<ChatResponse> responseFlux;
+            final ResolvedModelClient resolvedClient;
+            final ModelCallContext usageContext;
 
             try {
+                resolvedClient = modelClientRegistry.resolve(context);
+                usageContext = copyResolvedContext(context,resolvedClient.modelCode(),1);
+
                 /*
-                 *  为当前请求设置聊天生成模型。
-                 * 此处不会影响向量化使用的 EmbeddingModel。
+                 * 每个模型编码对应自己的地址、密钥和底层客户端。
                  */
-                responseFlux = chatClient.prompt()
-                        .options(buildModelOptions(context, null))
+                responseFlux = resolvedClient.chatClient()
+                        .prompt()
+                        .options(
+                                buildModelOptions(
+                                        resolvedClient,
+                                        null
+                                )
+                        )
                         .system(safePrompt(systemPrompt))
                         .user(safePrompt(userPrompt))
                         .stream()
                         .chatResponse();
+
+                modelName.set(resolvedClient.modelName());
             } catch (Exception exception) {
                 recordFailureSafely(
                         context,
+                        "unknown",
                         null,
                         TokenUsageData.unknown(),
                         System.currentTimeMillis() - startTime,
                         exception.getMessage()
                 );
+
                 return Flux.error(exception);
             }
 
@@ -141,7 +162,8 @@ public class DefaultTrackedChatClientService implements TrackedChatClientService
                          */
                         if (!responseReceived.get()) {
                             recordFailureSafely(
-                                    context,
+                                    usageContext,
+                                    resolvedClient.providerCode(),
                                     modelName.get(),
                                     bestUsage.get(),
                                     System.currentTimeMillis() - startTime,
@@ -151,7 +173,8 @@ public class DefaultTrackedChatClientService implements TrackedChatClientService
                         }
 
                         recordSuccessSafely(
-                                context,
+                                usageContext,
+                                resolvedClient.providerCode(),
                                 modelName.get(),
                                 requestId.get(),
                                 bestUsage.get(),
@@ -162,7 +185,8 @@ public class DefaultTrackedChatClientService implements TrackedChatClientService
                     .doOnError(exception -> {
                         if (usageRecorded.compareAndSet(false, true)) {
                             recordFailureSafely(
-                                    context,
+                                    usageContext,
+                                    resolvedClient.providerCode(),
                                     modelName.get(),
                                     bestUsage.get(),
                                     System.currentTimeMillis() - startTime,
@@ -174,7 +198,8 @@ public class DefaultTrackedChatClientService implements TrackedChatClientService
                         if (signalType == SignalType.CANCEL
                                 && usageRecorded.compareAndSet(false, true)) {
                             recordFailureSafely(
-                                    context,
+                                    usageContext,
+                                    resolvedClient.providerCode(),
                                     modelName.get(),
                                     bestUsage.get(),
                                     System.currentTimeMillis() - startTime,
@@ -186,63 +211,236 @@ public class DefaultTrackedChatClientService implements TrackedChatClientService
     }
 
     @Override
-    public ChatResponse call(ModelCallContext context, String systemPrompt, String userPrompt, ChatOptions.Builder<?> optionsBuilder) {
-        long startTime = System.currentTimeMillis();
-        TokenUsageData observedUsage = TokenUsageData.unknown();
-        String observedModelName = null;
-        try {
-            /*
-             *  合并业务参数和用户选择的聊天模型。
-             *
-             * Planner 传入的 temperature 等参数会保留，
-             * 最终 model 由后端配置中的 modelName 决定。
-             */
-            ChatClient.ChatClientRequestSpec requestSpec = chatClient.prompt()
-                    .options(buildModelOptions(context, optionsBuilder));
+    public ChatResponse call(
+            ModelCallContext context,
+            String systemPrompt,
+            String userPrompt,
+            ChatOptions.Builder<?> optionsBuilder) {
 
-            ChatResponse response = requestSpec
-                    .system(safePrompt(systemPrompt))
-                    .user(safePrompt(userPrompt))
-                    .call()
-                    .chatResponse();
-            observedUsage = tokenUsageExtractor.extract(response);
-            observedModelName = extractModelName(response);
-
-            if (response == null || response.getResult() == null) {
-                throw new IllegalStateException(
-                        "模型没有返回有效响应"
+        List<String> candidates =
+                modelCandidateResolver.resolveCandidates(
+                        context,
+                        false
                 );
+
+        ModelFailureCategory lastCategory = null;
+        int attemptSequence = 0;
+
+        for (String modelCode : candidates) {
+            /*
+             * 当前模型处于短时故障状态时直接跳过，
+             * 不产生新的供应商请求和Token费用。
+             */
+            if (modelFailureTracker.isBlocked(modelCode)) {
+                continue;
             }
 
-            String content =response.getResult()
-                            .getOutput()
-                            .getText();
+            attemptSequence++;
 
-            if (!StringUtils.hasText(content)) {
-                throw new IllegalStateException("模型返回内容为空");
+            ResolvedModelClient resolvedClient =
+                    modelClientRegistry.resolveByCode(
+                            modelCode
+                    );
+
+            ModelCallContext usageContext =
+                    copyResolvedContext(
+                            context,
+                            resolvedClient.modelCode(),
+                            attemptSequence
+                    );
+
+            long startTime = System.currentTimeMillis();
+
+            try {
+                ChatResponse response = executeSyncCall(
+                        resolvedClient,
+                        systemPrompt,
+                        userPrompt,
+                        optionsBuilder
+                );
+
+                TokenUsageData usage =
+                        tokenUsageExtractor.extract(response);
+
+                String actualModelName =
+                        extractModelName(response);
+
+                if (!StringUtils.hasText(actualModelName)) {
+                    actualModelName =
+                            resolvedClient.modelName();
+                }
+
+                recordSuccessSafely(
+                        usageContext,
+                        resolvedClient.providerCode(),
+                        actualModelName,
+                        extractRequestId(response),
+                        usage,
+                        System.currentTimeMillis()
+                                - startTime,
+                        extractFinishReason(response)
+                );
+
+                modelFailureTracker.recordSuccess(
+                        resolvedClient.modelCode()
+                );
+
+                return response;
+            } catch (Exception exception) {
+                ModelFailureCategory category =
+                        modelFailureClassifier.classify(
+                                exception
+                        );
+
+                recordFailureSafely(
+                        usageContext,
+                        resolvedClient.providerCode(),
+                        resolvedClient.modelName(),
+                        TokenUsageData.unknown(),
+                        System.currentTimeMillis()
+                                - startTime,
+                        category.name(),
+                        category.safeMessage()
+                );
+
+                if (!category.failoverAllowed()) {
+                    throw propagate(exception);
+                }
+
+                modelFailureTracker.recordFailure(
+                        resolvedClient.modelCode(),
+                        category
+                );
+
+                lastCategory = category;
             }
-
-            recordSuccessSafely(
-                    context,
-                    observedModelName,
-                    extractRequestId(response),
-                    observedUsage,
-                    System.currentTimeMillis() - startTime,
-                    extractFinishReason(response));
-
-            return response;
-        } catch (Exception exception) {
-            recordFailureSafely(
-                    context,
-                    observedModelName,
-                    observedUsage,
-                    System.currentTimeMillis() - startTime,
-                    exception.getMessage()
-            );
-            throw exception;
         }
+
+        String reason = lastCategory == null
+                ? "当前候选模型均处于短时不可用状态"
+                : lastCategory.safeMessage();
+
+        throw new BusinessException(
+                ErrorCode.AI_SERVICE_UNAVAILABLE,
+                "本次请求未获得完整回答，"
+                        + "已尝试模型数量："
+                        + attemptSequence
+                        + "，最终原因："
+                        + reason
+        );
+    }
+    /**
+     * 执行一次同步模型调用。
+     *
+     * 本方法只负责单个模型，不包含重试或备用模型循环。
+     */
+    private ChatResponse executeSyncCall(
+            ResolvedModelClient resolvedClient,
+            String systemPrompt,
+            String userPrompt,
+            ChatOptions.Builder<?> optionsBuilder) {
+
+        ChatResponse response = resolvedClient
+                .chatClient()
+                .prompt()
+                .options(
+                        buildModelOptions(
+                                resolvedClient,
+                                optionsBuilder
+                        )
+                )
+                .system(safePrompt(systemPrompt))
+                .user(safePrompt(userPrompt))
+                .call()
+                .chatResponse();
+
+        if (response == null
+                || response.getResult() == null
+                || response.getResult().getOutput() == null) {
+            throw new IllegalStateException(
+                    "模型没有返回有效响应"
+            );
+        }
+
+        String content = response.getResult()
+                .getOutput()
+                .getText();
+
+        if (!StringUtils.hasText(content)) {
+            throw new IllegalStateException(
+                    "模型返回内容为空"
+            );
+        }
+
+        return response;
     }
 
+    private RuntimeException propagate(Exception exception) {
+
+        if (exception instanceof RuntimeException runtimeException) {
+            return runtimeException;
+        }
+
+        return new IllegalStateException(
+                "模型调用失败",
+                exception
+        );
+    }
+    private void recordFailureSafely(
+            ModelCallContext context,
+            String providerCode,
+            String modelName,
+            TokenUsageData usage,
+            long durationMs,
+            String errorMessage) {
+
+        recordFailureSafely(
+                context,
+                providerCode,
+                modelName,
+                usage,
+                durationMs,
+                null,
+                errorMessage
+        );
+    }
+    /**
+     * 保存包含失败分类的模型调用记录。
+     */
+    private void recordFailureSafely(
+            ModelCallContext context,
+            String providerCode,
+            String modelName,
+            TokenUsageData usage,
+            long durationMs,
+            String errorCategory,
+            String errorMessage) {
+
+        try {
+            modelUsageService.recordFailure(
+                    context,
+                    safeProvider(providerCode),
+                    modelName,
+                    usage,
+                    durationMs,
+                    errorCategory,
+                    errorMessage
+            );
+        } catch (Exception exception) {
+            /*
+             * 使用量记录属于辅助功能，
+             * 写入失败不能覆盖原始模型异常。
+             */
+            log.error(
+                    "保存模型失败调用记录异常，runId={}，错误={}",
+                    context == null
+                            ? null
+                            : context.getRunId(),
+                    exception.getMessage(),
+                    exception
+            );
+        }
+    }
     /**
      * 流式 Usage 不能直接累加。
      *
@@ -291,6 +489,7 @@ public class DefaultTrackedChatClientService implements TrackedChatClientService
 
     private void recordSuccessSafely(
             ModelCallContext context,
+            String providerCode,
             String modelName,
             String requestId,
             TokenUsageData usage,
@@ -299,44 +498,23 @@ public class DefaultTrackedChatClientService implements TrackedChatClientService
         try {
             modelUsageService.recordSuccess(
                     context,
-                    PROVIDER_NAME,
+                    safeProvider(providerCode),
                     modelName,
                     requestId,
                     usage,
                     durationMs,
-                    finishReason );
+                    finishReason
+            );
         } catch (Exception exception) {
             /*
-             * Token 统计属于辅助功能。
-             * 统计写入失败不能影响用户正常获得模型回答。
+             * Token统计属于辅助功能，
+             * 写入失败不能影响用户获得回答。
              */
             log.error(
-                    "保存模型 Token 使用量失败，runId={}，错误={}",
-                    context == null ? null : context.getRunId(),
-                    exception.getMessage(),
-                    exception
-            );
-        }
-    }
-
-    private void recordFailureSafely(
-            ModelCallContext context,
-            String modelName,
-            TokenUsageData usage,
-            long durationMs,
-            String errorMessage) {
-        try {
-            modelUsageService.recordFailure(
-                    context,
-                    PROVIDER_NAME,
-                    modelName,
-                    usage,
-                    durationMs,
-                    errorMessage);
-        } catch (Exception exception) {
-            log.error(
-                    "保存模型失败调用记录异常，runId={}，错误={}",
-                    context == null ? null : context.getRunId(),
+                    "保存模型Token使用量失败，runId={}，错误={}",
+                    context == null
+                            ? null
+                            : context.getRunId(),
                     exception.getMessage(),
                     exception
             );
@@ -352,26 +530,74 @@ public class DefaultTrackedChatClientService implements TrackedChatClientService
     private String safePrompt(String prompt) {
         return prompt == null ? "" : prompt;
     }
+
     /**
-     *  构建当前调用使用的聊天模型参数。
+     * 合并业务调用参数和实际模型名称。
      *
-     * 只覆盖 model，不修改 temperature、topK 等已有参数。
+     * Planner传入的temperature、topP等参数继续保留，
+     * 最终model由注册表解析后的客户端配置决定。
      */
     private ChatOptions.Builder<?> buildModelOptions(
-            ModelCallContext context,
+            ResolvedModelClient resolvedClient,
             ChatOptions.Builder<?> optionsBuilder) {
 
-        String modelCode = context == null ? null : context.getModelCode();
-        String modelName = modelProperties.resolve(modelCode).getModelName();
-
-        if (!StringUtils.hasText(modelName)) {
-            throw new IllegalStateException("聊天模型的 modelName 未配置");
+        if (resolvedClient == null
+                || !StringUtils.hasText(
+                resolvedClient.modelName())) {
+            throw new IllegalStateException(
+                    "聊天模型的modelName未配置"
+            );
         }
 
-        ChatOptions.Builder<?> builder = optionsBuilder == null
-                ? ChatOptions.builder()
-                : optionsBuilder.clone();
+        ChatOptions.Builder<?> builder =
+                optionsBuilder == null
+                        ? ChatOptions.builder()
+                        : optionsBuilder.clone();
 
-        return builder.model(modelName);
+        return builder.model(
+                resolvedClient.modelName()
+        );
+    }
+    /**
+     * 使用实际模型编码创建本次统计上下文。
+     *
+     * 不直接修改原上下文，避免同一个上下文被并发调用时互相污染。
+     */
+    private ModelCallContext copyResolvedContext(
+            ModelCallContext source,
+            String resolvedModelCode,
+            int attemptSequence) {
+
+        if (source == null) {
+            return ModelCallContext.builder()
+                    .modelCode(resolvedModelCode)
+                    .callSequence(1)
+                    .attemptSequence(
+                            Math.max(attemptSequence, 1)
+                    )
+                    .build();
+        }
+
+        return ModelCallContext.builder()
+                .runId(source.getRunId())
+                .conversationId(
+                        source.getConversationId()
+                )
+                .userId(source.getUserId())
+                .callType(source.getCallType())
+                .modelCode(resolvedModelCode)
+                .callSequence(
+                        source.getCallSequence()
+                )
+                .attemptSequence(
+                        Math.max(attemptSequence, 1)
+                )
+                .build();
+    }
+
+    private String safeProvider(String providerCode) {
+        return StringUtils.hasText(providerCode)
+                ? providerCode
+                : "unknown";
     }
 }

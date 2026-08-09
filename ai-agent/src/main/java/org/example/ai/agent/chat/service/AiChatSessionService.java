@@ -10,9 +10,9 @@ import java.util.List;
 public interface AiChatSessionService {
 
     /**
-     *  返回 yml 中启用的模型列表。
+     * 返回当前用户实际允许选择的模型。
      */
-    List<ChatModelVO> listModels();
+    List<ChatModelVO> listModels(String userId);
 
     /**
      *  查询当前用户的会话列表。
@@ -79,6 +79,7 @@ public interface AiChatSessionService {
             String sessionId,
             String runId,
             String content,
+            String modelCode,
             String payloadJson
     );
 }

@@ -120,6 +120,9 @@ app:
       v2-allow-users: ""
       # 强制回退v1的用户
       v2-deny-users: ""
+    # 模型API Key使用独立主密钥加密，不能和SSO会话密钥共用。
+    model-security:
+      encryption-key: ${MODEL_CONFIG_ENCRYPTION_KEY:U8VV8dewaSRFVly/bQHuEwtxlBvb2JJFap2xn0RWWDM=}
     answer:
       # 标准事实模型开关，紧急回滚时可设为false
       structured-enabled: true

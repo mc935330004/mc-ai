@@ -344,3 +344,83 @@ CREATE TABLE ai_result_artifact_chunk
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4
   COMMENT = '工作流安全结果快照分块';
+
+CREATE TABLE ai_model_config
+(
+    id                          BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键ID',
+    model_code                  VARCHAR(64)  NOT NULL COMMENT '模型唯一编码',
+    display_name                VARCHAR(128) NOT NULL COMMENT '后台和聊天页面展示名称',
+    provider_code               VARCHAR(64)  NOT NULL COMMENT '供应商编码',
+    api_type                    VARCHAR(32)  NOT NULL DEFAULT 'OPENAI_COMPATIBLE'
+        COMMENT '接口类型，当前支持OPENAI_COMPATIBLE',
+    base_url                    VARCHAR(512) NOT NULL COMMENT '模型API基础地址',
+    api_key_ciphertext          TEXT         NOT NULL COMMENT 'AES-GCM加密后的API Key',
+    model_name                  VARCHAR(128) NOT NULL COMMENT '供应商实际模型名称',
+
+    temperature                 DECIMAL(4, 3) NOT NULL DEFAULT 0.200 COMMENT '默认温度',
+    max_tokens                  INT           NOT NULL DEFAULT 2048 COMMENT '默认最大输出Token',
+    timeout_seconds             INT           NOT NULL DEFAULT 30 COMMENT '请求超时秒数',
+
+    streaming_supported         TINYINT NOT NULL DEFAULT 1 COMMENT '是否支持流式输出',
+    structured_output_supported TINYINT NOT NULL DEFAULT 0 COMMENT '是否支持结构化输出',
+    tool_calling_supported      TINYINT NOT NULL DEFAULT 0 COMMENT '是否支持工具调用',
+    context_window              INT     NOT NULL DEFAULT 8192 COMMENT '上下文窗口大小',
+
+    default_model               TINYINT NOT NULL DEFAULT 0 COMMENT '是否为系统默认模型',
+    enabled                     TINYINT NOT NULL DEFAULT 0 COMMENT '是否允许业务请求使用',
+    sort_order                  INT     NOT NULL DEFAULT 0 COMMENT '展示顺序',
+    remark                      VARCHAR(500) NULL COMMENT '备注',
+
+    last_test_success           TINYINT NULL COMMENT '最近一次测试是否成功',
+    last_test_message           VARCHAR(255) NULL COMMENT '最近一次测试结果',
+    last_test_duration_ms       BIGINT NULL COMMENT '最近一次测试耗时',
+    last_test_at                DATETIME NULL COMMENT '最近一次测试时间',
+
+    created_by                  VARCHAR(64) NOT NULL COMMENT '创建人',
+    updated_by                  VARCHAR(64) NOT NULL COMMENT '修改人',
+    created_at                  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    updated_at                  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ON UPDATE CURRENT_TIMESTAMP COMMENT '修改时间',
+
+    UNIQUE KEY uk_model_config_code (model_code),
+    INDEX idx_model_config_enabled_sort (enabled, sort_order),
+    INDEX idx_model_config_default (default_model)
+) COMMENT = '大模型运行配置';
+
+CREATE TABLE ai_model_assignment
+(
+    id                BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键ID',
+    subject_type      VARCHAR(16) NOT NULL COMMENT '配置对象类型：SYSTEM、USER',
+    subject_id        VARCHAR(64) NOT NULL COMMENT '配置对象ID，系统配置固定为SYSTEM',
+    model_code        VARCHAR(64) NOT NULL COMMENT '模型编码',
+    default_model     TINYINT NOT NULL DEFAULT 0 COMMENT '是否为当前范围默认模型',
+    fallback_priority INT NOT NULL DEFAULT 1 COMMENT '模型使用和故障转移优先级',
+    created_by        VARCHAR(64) NOT NULL COMMENT '创建人',
+    updated_by        VARCHAR(64) NOT NULL COMMENT '修改人',
+    created_at        DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+    updated_at        DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+        ON UPDATE CURRENT_TIMESTAMP COMMENT '修改时间',
+
+    UNIQUE KEY uk_model_assignment_scope_model
+        (subject_type, subject_id, model_code),
+
+    UNIQUE KEY uk_model_assignment_scope_priority
+        (subject_type, subject_id, fallback_priority),
+
+    INDEX idx_model_assignment_subject
+        (subject_type, subject_id)
+) COMMENT = '系统和人员模型授权配置';
+
+ALTER TABLE ai_model_usage
+    ADD COLUMN model_code VARCHAR(64) NULL
+        COMMENT '稳定模型配置编码'
+        AFTER call_sequence,
+    ADD COLUMN attempt_sequence INT NOT NULL DEFAULT 1
+        COMMENT '同一次模型调用中的实际尝试序号'
+        AFTER model_code,
+    ADD COLUMN error_category VARCHAR(64) NULL
+        COMMENT '模型调用失败分类'
+        AFTER success;
+
+CREATE INDEX idx_model_usage_model_time
+    ON ai_model_usage (model_code, created_at);

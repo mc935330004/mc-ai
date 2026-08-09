@@ -2,6 +2,7 @@ package org.example.ai.agent.modelusage.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import lombok.RequiredArgsConstructor;
+import org.example.ai.agent.common.enums.ModelCallType;
 import org.example.ai.agent.common.enums.TokenMeasureType;
 import org.example.ai.agent.common.modelusage.ModelCallContext;
 import org.example.ai.agent.modelusage.entity.ModelUsageRecord;
@@ -16,6 +17,7 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
+import java.util.Arrays;
 import java.util.List;
 
 /**
@@ -28,6 +30,14 @@ public class ModelUsageServiceImpl implements ModelUsageService {
     private final ModelUsageMapper modelUsageMapper;
     private final RunTraceMapper runTraceMapper;
     private final AgentMetrics agentMetrics;
+    /**
+     * 只有真正生成用户可见回答的调用，才能决定助手消息使用的模型。
+     */
+    private static final List<String> USER_VISIBLE_CALL_TYPES =
+            Arrays.stream(ModelCallType.values())
+                    .filter(ModelCallType::usesUserSelectedModel)
+                    .map(Enum::name)
+                    .toList();
     /**
      * 使用独立事务保存 Token。
      *
@@ -78,12 +88,14 @@ public class ModelUsageServiceImpl implements ModelUsageService {
      */
     @Override
     @Transactional(propagation = Propagation.REQUIRES_NEW)
-    public void recordFailure( ModelCallContext context,
-                               String provider,
-                               String modelName,
-                               TokenUsageData usage,
-                               long durationMs,
-                               String errorMessage) {
+    public void recordFailure(
+            ModelCallContext context,
+            String provider,
+            String modelName,
+            TokenUsageData usage,
+            long durationMs,
+            String errorCategory,
+            String errorMessage) {
         TokenUsageData safeUsage = usage == null
                 ? TokenUsageData.unknown()
                 : usage;
@@ -99,6 +111,9 @@ public class ModelUsageServiceImpl implements ModelUsageService {
 
         record.setDurationMs(Math.max(durationMs, 0));
         record.setSuccess(0);
+        record.setErrorCategory(
+                limit(errorCategory, 64)
+        );
         record.setErrorMessage(limit(errorMessage, 512));
 
         modelUsageMapper.insert(record);
@@ -131,6 +146,49 @@ public class ModelUsageServiceImpl implements ModelUsageService {
                         .orderByAsc(ModelUsageRecord::getId));
     }
 
+    @Override
+    public String findLatestSuccessfulAnswerModelCode(
+            String runId,
+            String userId) {
+
+        if (!StringUtils.hasText(runId)
+                || !StringUtils.hasText(userId)) {
+            return null;
+        }
+
+        ModelUsageRecord record =
+                modelUsageMapper.selectOne(
+                        new LambdaQueryWrapper<ModelUsageRecord>()
+                                .eq(
+                                        ModelUsageRecord::getRunId,
+                                        runId
+                                )
+                                .eq(
+                                        ModelUsageRecord::getUserId,
+                                        userId
+                                )
+                                .eq(
+                                        ModelUsageRecord::getSuccess,
+                                        1
+                                )
+                                .in(
+                                        ModelUsageRecord::getCallType,
+                                        USER_VISIBLE_CALL_TYPES
+                                )
+                                .isNotNull(
+                                        ModelUsageRecord::getModelCode
+                                )
+                                .orderByDesc(
+                                        ModelUsageRecord::getId
+                                )
+                                .last("LIMIT 1")
+                );
+
+        return record == null
+                ? null
+                : record.getModelCode();
+    }
+
     /**
      * 构建公共字段。
      */
@@ -142,9 +200,14 @@ public class ModelUsageServiceImpl implements ModelUsageService {
             record.setUserId(context.getUserId());
             record.setCallType(context.getCallType() == null ? "UNKNOWN" : context.getCallType().name());
             record.setCallSequence(Math.max(context.getCallSequence(), 1));
+            record.setModelCode(context.getModelCode());
+            record.setAttemptSequence(
+                    Math.max(context.getAttemptSequence(), 1)
+            );
         } else {
             record.setCallType("UNKNOWN");
             record.setCallSequence(1);
+            record.setAttemptSequence(1);
         }
         record.setCreatedAt(LocalDateTime.now());
         return record;

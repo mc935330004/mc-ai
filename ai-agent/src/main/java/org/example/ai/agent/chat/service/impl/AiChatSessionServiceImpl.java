@@ -12,9 +12,9 @@ import org.example.ai.agent.chat.service.AiChatSessionService;
 import org.example.ai.agent.chat.vo.ChatMessageVO;
 import org.example.ai.agent.chat.vo.ChatModelVO;
 import org.example.ai.agent.chat.vo.ChatSessionVO;
-import org.example.ai.agent.common.config.AgentModelProperties;
 import org.example.ai.agent.common.exception.BusinessException;
 import org.example.ai.agent.common.exception.ErrorCode;
+import org.example.ai.agent.modelconfig.service.ChatModelPolicyService;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
@@ -35,23 +35,19 @@ public class AiChatSessionServiceImpl implements AiChatSessionService {
 
     private final AiChatSessionMapper sessionMapper;
     private final AiChatMessageMapper messageMapper;
-    private final AgentModelProperties modelProperties;
+    /**
+     * 统一处理人员授权、默认模型和会话选模。
+     */
+    private final ChatModelPolicyService chatModelPolicyService;
     /**
      *  管理聊天会话对应的结构化业务状态。
      */
     private final ConversationStateService conversationStateService;
     private static final String MESSAGE_TYPE_TEXT = "TEXT";
+
     @Override
-    public List<ChatModelVO> listModels() {
-        return modelProperties.getModels().stream()
-                .filter(AgentModelProperties.ModelItem::isEnabled)
-                .map(item -> ChatModelVO.builder()
-                        .code(item.getCode())
-                        .name(item.getName())
-                        .provider(item.getProvider())
-                        .defaultModel(item.getCode().equals(modelProperties.getDefaultCode()))
-                        .build())
-                .toList();
+    public List<ChatModelVO> listModels(String userId) {
+        return chatModelPolicyService.listSelectableModels(userId);
     }
 
     @Override
@@ -68,7 +64,7 @@ public class AiChatSessionServiceImpl implements AiChatSessionService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public ChatSessionVO createSession(String userId, ChatSessionCreateDTO dto) {
-        String modelCode = modelProperties.resolve(dto == null ? null : dto.getModelCode()).getCode();
+        String modelCode = chatModelPolicyService.resolveModelCode(userId,dto == null ? null : dto.getModelCode(),null);
 
         AiChatSession session = new AiChatSession();
         session.setId(UUID.randomUUID().toString().replace("-", ""));
@@ -88,7 +84,11 @@ public class AiChatSessionServiceImpl implements AiChatSessionService {
     public void updateSessionModel(String userId, String sessionId, String modelCode) {
         //  所有会话操作必须先验证当前用户的会话归属。
         requireSession(userId, sessionId);
-        String resolvedModelCode = modelProperties.resolve(modelCode).getCode();
+        String resolvedModelCode =chatModelPolicyService.resolveModelCode(
+                        userId,
+                        modelCode,
+                        null
+                );
 
         sessionMapper.update(null, new LambdaUpdateWrapper<AiChatSession>()
                 .eq(AiChatSession::getId, sessionId)
@@ -141,14 +141,23 @@ public class AiChatSessionServiceImpl implements AiChatSessionService {
     }
 
     @Override
-    public String resolveModelCode(String userId, String sessionId, String modelCode) {
-        //  必须先验证会话归属，不能因为前端传了模型就跳过。
-        AiChatSession session = requireSession(userId, sessionId);
+    public String resolveModelCode(
+            String userId,
+            String sessionId,
+            String modelCode) {
 
-        return modelProperties.resolve(
-                StringUtils.hasText(modelCode)
-                        ? modelCode
-                        : session.getModelCode()).getCode();
+        /*
+         * 必须先验证会话归属，
+         * 前端传入模型不能绕过会话权限检查。
+         */
+        AiChatSession session =
+                requireSession(userId, sessionId);
+
+        return chatModelPolicyService.resolveModelCode(
+                userId,
+                modelCode,
+                session.getModelCode()
+        );
     }
 
     @Override
@@ -203,8 +212,12 @@ public class AiChatSessionServiceImpl implements AiChatSessionService {
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public void updateAssistantReportMessage(String userId,String sessionId,String runId,
-            String content,String payloadJson) {
+    public void updateAssistantReportMessage(String userId,
+                                             String sessionId,
+                                             String runId,
+                                             String content,
+                                             String modelCode,
+                                             String payloadJson) {
 
         if (!StringUtils.hasText(sessionId) || !StringUtils.hasText(runId)) {
             return;
@@ -220,8 +233,19 @@ public class AiChatSessionServiceImpl implements AiChatSessionService {
                         .eq(AiChatMessage::getRole, "ASSISTANT")
                         .eq(AiChatMessage::getMessageType, MESSAGE_TYPE_TEXT)
                         .eq(AiChatMessage::getRunId, runId)
-                        .set(AiChatMessage::getContent, visibleContent)
-                        .set(AiChatMessage::getPayloadJson, payloadJson)
+                        .set(
+                                StringUtils.hasText(modelCode),
+                                AiChatMessage::getModelCode,
+                                modelCode
+                        )
+                        .set(
+                                AiChatMessage::getContent,
+                                visibleContent
+                        )
+                        .set(
+                                AiChatMessage::getPayloadJson,
+                                payloadJson
+                        )
         );
         if (messageUpdated != 1) {
             throw new BusinessException(

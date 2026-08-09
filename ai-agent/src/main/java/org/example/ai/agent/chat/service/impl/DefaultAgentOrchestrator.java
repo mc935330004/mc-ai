@@ -11,6 +11,7 @@ import org.example.ai.agent.chat.memory.service.ReportFollowUpService;
 import org.example.ai.agent.chat.service.AgentOrchestrator;
 import org.example.ai.agent.chat.vo.ChatTextPayloadVO;
 import org.example.ai.agent.common.enums.ReportQueryType;
+import org.example.ai.agent.modelusage.service.ModelUsageService;
 import org.example.ai.agent.vo.ActionFormVO;
 import org.example.ai.agent.chat.support.AgentStreamSession;
 import org.example.ai.agent.chat.support.AgentStreamSessionFactory;
@@ -67,6 +68,10 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
 
     private final Executor agentChatExecutor;
     private final WorkflowExecutionFacade workflowExecutionFacade;
+    /**
+     * 查询本次运行实际成功的用户可见模型。
+     */
+    private final ModelUsageService modelUsageService;
     /**
      *  基于上一轮安全结果快照回答追问。
      */
@@ -152,7 +157,8 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
             AiChatSessionService aiChatSessionService,
             ResultArtifactAnalysisService resultArtifactAnalysisService,
             ReportFollowUpService reportFollowUpService,
-            ReportSchemaBuilder reportSchemaBuilder
+            ReportSchemaBuilder reportSchemaBuilder,
+            ModelUsageService modelUsageService
     ) {
         this.streamSessionFactory = streamSessionFactory;
         this.knowledgeDocumentQueryService = knowledgeDocumentQueryService;
@@ -169,6 +175,7 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
         this.conversationStateRecorder = conversationStateRecorder;
         this.conversationContextResolver = conversationContextResolver;
         this.aiChatSessionService = aiChatSessionService;
+        this.modelUsageService = modelUsageService;
         this.resultArtifactAnalysisService = resultArtifactAnalysisService;
         this.reportFollowUpService = reportFollowUpService;
         this.reportSchemaBuilder = reportSchemaBuilder;
@@ -1442,24 +1449,35 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
         if (!StringUtils.hasText(visibleAnswer)) {
             visibleAnswer ="本次分析没有生成可展示内容，请明确统计字段和统计方式后重新提问。";
         }
+        String effectiveModelCode =
+                resolveEffectiveModelCode(request, runId);
         aiChatSessionService.saveAssistantMessage(
                 request.getUserId(),
                 request.getConversationId(),
                 visibleAnswer,
                 runId,
-                request.getModelCode(),
+                effectiveModelCode,
                 "TEXT",
-                payload == null ? null : objectMapper.writeValueAsString(payload)
+                payload == null
+                        ? null
+                        : objectMapper.writeValueAsString(payload)
         );
 
         /*
-         *  
-         * 实时SSE与历史消息使用同一份展示协议。
+         * 在完成事件中同时返回首选模型和实际成功模型。
          */
-        stream.publishAnswer(visibleAnswer,
-                payload == null ? "MARKDOWN"
+        stream.setAnswerModelResult(
+                request.getModelCode(),
+                effectiveModelCode
+        );
+
+        stream.publishAnswer(
+                visibleAnswer,
+                payload == null
+                        ? "MARKDOWN"
                         : payload.getPresentationType(),
-                payload == null ? null
+                payload == null
+                        ? null
                         : payload.getPresentationTitle()
         );
     }
@@ -1473,20 +1491,33 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
             String answer,
             ChatTextPayloadVO payload) throws Exception {
         String visibleAnswer = sanitizeUserVisibleAnswer(answer);
+        String effectiveModelCode =
+                resolveEffectiveModelCode(request, runId);
+
         aiChatSessionService.updateAssistantReportMessage(
                 request.getUserId(),
                 request.getConversationId(),
                 runId,
                 visibleAnswer,
+                effectiveModelCode,
                 payload == null
                         ? null
                         : objectMapper.writeValueAsString(payload)
         );
 
+        stream.setAnswerModelResult(
+                request.getModelCode(),
+                effectiveModelCode
+        );
+
         stream.publishAnswer(
                 visibleAnswer,
-                payload == null ? "MARKDOWN" : payload.getPresentationType(),
-                payload == null ? null : payload.getPresentationTitle()
+                payload == null
+                        ? "MARKDOWN"
+                        : payload.getPresentationType(),
+                payload == null
+                        ? null
+                        : payload.getPresentationTitle()
         );
     }
     /**
@@ -1544,6 +1575,37 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
         return result.toString()
                 .replaceAll("\\n{3,}", "\n\n")
                 .trim();
+    }
+    /**
+     * 获取最终生成用户可见回答的实际模型。
+     *
+     * 使用记录属于辅助链路，查询失败不能影响已经生成成功的回答。
+     */
+    private String resolveEffectiveModelCode(
+            AgentRequest request,
+            String runId) {
+
+        String requestedModelCode = request.getModelCode();
+
+        try {
+            String effectiveModelCode =
+                    modelUsageService
+                            .findLatestSuccessfulAnswerModelCode(
+                                    runId,
+                                    request.getUserId()
+                            );
+
+            return StringUtils.hasText(effectiveModelCode)
+                    ? effectiveModelCode
+                    : requestedModelCode;
+        } catch (Exception exception) {
+            log.warn(
+                    "查询回答实际模型失败，runId={}，errorType={}",
+                    runId,
+                    exception.getClass().getSimpleName()
+            );
+            return requestedModelCode;
+        }
     }
     /**
      *  普通文本回答不携带额外结构化展示数据。
