@@ -22,7 +22,7 @@ import java.util.Map;
 @Component
 public class ProjectSettlementReportTemplate implements ReportTemplate {
 
-    private static final String WORKFLOW_CODE = "project_settlements_list";
+    private static final String WORKFLOW_CODE = "project_settlement_list";
     private static final DateTimeFormatter TIME_FORMAT =
             DateTimeFormatter.ofPattern("HH:mm");
 
@@ -58,25 +58,24 @@ public class ProjectSettlementReportTemplate implements ReportTemplate {
     }
 
     /**
-     * 从两层 FOREACH 安全结果中提取项目、单位、结算记录和附件。
+     * 从工作流结果中提取项目明细。
+     *
+     * 兼容两种结果结构：
+     * 1. result.items
+     * 2. result.workflowData.items
      */
     private SettlementData extractData(JsonNode safeResult) {
         List<Map<String, Object>> detailRows = new ArrayList<>();
         List<Map<String, Object>> attachmentRows = new ArrayList<>();
-        JsonNode outerItems = safeResult == null
-                ? null
-                : safeResult.path("workflowData").path("items");
-
+        JsonNode outerItems = resolveOuterItems(safeResult);
         if (outerItems == null || !outerItems.isArray()) {
             return new SettlementData(detailRows, attachmentRows);
         }
-
         for (int outerIndex = 0; outerIndex < outerItems.size(); outerIndex++) {
             JsonNode outerItem = outerItems.get(outerIndex);
             if (!outerItem.path("success").asBoolean(false)) {
                 continue;
             }
-
             collectProjectRows(
                     outerItem.path("data").path("items"),
                     outerIndex,
@@ -89,27 +88,63 @@ public class ProjectSettlementReportTemplate implements ReportTemplate {
     }
 
     /**
-     * 提取当前外层查询命中的项目记录。
+     * 兼容当前工作流结果和历史工作流结果的数据路径。
+     */
+    private JsonNode resolveOuterItems(JsonNode safeResult) {
+        if (safeResult == null || safeResult.isNull()) {
+            return null;
+        }
+        // 当前工作流实际返回：{ "items": [] }
+        JsonNode rootItems = safeResult.path("items");
+        if (rootItems.isArray()) {
+            return rootItems;
+        }
+        // 兼容历史结构：{ "workflowData": { "items": [] } }
+        JsonNode workflowItems = safeResult
+                .path("workflowData")
+                .path("items");
+
+        return workflowItems.isArray() ? workflowItems : null;
+    }
+
+    /**
+     * 提取项目列表和项目结算详情。
      */
     private void collectProjectRows(JsonNode projectItems,int outerIndex,List<Map<String, Object>> detailRows,
                                     List<Map<String, Object>> attachmentRows) {
-        if (!projectItems.isArray()) {
+
+        if (projectItems == null || !projectItems.isArray()) {
             return;
         }
-        for (int projectIndex = 0;projectIndex < projectItems.size();projectIndex++) {
+        for (int projectIndex = 0; projectIndex < projectItems.size();projectIndex++) {
             JsonNode projectResult = projectItems.get(projectIndex);
+            JsonNode project = projectResult.path("item");
+
+            /*
+             * 明细查询失败或被跳过时，
+             * 仍然保留项目基础信息，避免整个项目从报告中消失。
+             */
             if (!projectResult.path("success").asBoolean(false)) {
+                if (project.isObject()) {
+                    ProjectContext context = new ProjectContext(
+                            resolveProjectKey(project, outerIndex, projectIndex),
+                            LocalTime.now().format(TIME_FORMAT),
+                            readDecimal(project, "contractAmount"),
+                            readDecimal(project, "settlementAmount"),
+                            readDecimal(project, "outputAmount"),
+                            0,
+                            0
+                    );
+                    Map<String, Object> row =buildProjectFields(project, context);
+                    row.put("unitPresent", false);
+                    row.put("recordPresent", false);
+                    String errorMessage =readText(projectResult, "errorMessage");
+                    row.put("recordAttention",errorMessage == null? "结算明细未查询" : errorMessage);detailRows.add(row);
+                }
                 continue;
             }
-
-            collectSettlementRows(
-                    projectResult.path("item"),
-                    projectResult.path("data").path("settlementInfos"),
-                    outerIndex,
-                    projectIndex,
-                    detailRows,
-                    attachmentRows
-            );
+            collectSettlementRows(project, projectResult.path("data").path("settlementInfos"),
+                    outerIndex, projectIndex, detailRows, attachmentRows);
         }
     }
 
@@ -290,10 +325,15 @@ public class ProjectSettlementReportTemplate implements ReportTemplate {
         row.put("projectCode", readScalar(project, "projectCode"));
         row.put("deptName", readScalar(project, "deptName"));
         row.put("generatedAt", context.generatedAt());
-        row.put("auditStatusName", readScalar(
-                project,
-                "auditStatusName"
-        ) == null ? "审批中" : readScalar(project,"auditStatusName"));
+        // 中文注释：当前接口使用settlementStatusName，兼容旧接口的auditStatusName字段。
+        String auditStatusName = readText(project,"auditStatusName");
+        if (auditStatusName == null) {
+            auditStatusName = readText(project,"settlementStatusName");
+        }
+        row.put("auditStatusName",auditStatusName == null
+                        ? "审批中"
+                        : auditStatusName
+        );
         row.put("projectContractAmountText", formatWanAmount(
                 context.projectContractAmount()
         ));

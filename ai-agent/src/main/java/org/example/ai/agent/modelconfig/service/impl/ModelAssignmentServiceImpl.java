@@ -62,15 +62,11 @@ public class ModelAssignmentServiceImpl
     }
 
     @Override
-    public ModelAssignmentVO getUserAssignment(
-            String userId) {
+    public ModelAssignmentVO getUserAssignment( String userId) {
 
         validateUserId(userId);
 
-        return buildVO(
-                ModelAssignmentSubjectType.USER.name(),
-                userId
-        );
+        return buildVO(ModelAssignmentSubjectType.USER.name(),userId);
     }
 
     @Override
@@ -347,7 +343,6 @@ public class ModelAssignmentServiceImpl
                     "用户编码不能为空"
             );
         }
-
         if (userId.length() > 64) {
             throw new BusinessException(
                     ErrorCode.BAD_REQUEST,

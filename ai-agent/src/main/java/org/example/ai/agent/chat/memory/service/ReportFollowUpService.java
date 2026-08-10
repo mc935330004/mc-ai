@@ -87,29 +87,20 @@ public class ReportFollowUpService {
              * 没有配置追问属于正常情况，
              * 不能记录为追问准备失败。
              */
-            ReportDefinitionSpec reportDefinition = loadReportDefinition(
-                            outcome.workflowCode(),
-                            outcome.versionId()
-                    );
+            ReportDefinitionSpec reportDefinition = loadReportDefinition(outcome.workflowCode(),outcome.versionId());
 
-            ReportFollowUpSpec followUp =
-                    reportDefinition.followUp();
-
+            // 固定结算模板不依赖报告定义；未配置报告追问时直接结束。
+            if (reportDefinition == null) {
+                return Optional.empty();
+            }
+            ReportFollowUpSpec followUp =reportDefinition.followUp();
             if (followUp == null || !followUp.enabled()) {
                 return Optional.empty();
             }
-
             validateTarget(followUp);
-
             JsonNode resultNode = loadResultNode(request, artifactId, outcome.workflowCode(), outcome.versionId());
-
-            Map<String, Object> inheritedInput =resolveKnownInput(
-                            followUp,
-                            resultNode
-                    );
-
+            Map<String, Object> inheritedInput =resolveKnownInput(followUp,resultNode);
             PendingReportFollowUp pending =new PendingReportFollowUp();
-
             pending.setSourceReportType(
                     reportDefinition.reportType() == null
                             ? null
@@ -258,16 +249,9 @@ public class ReportFollowUpService {
             AgentRequest request,
             PendingReportFollowUp pending) {
 
-        ReportFollowUpSpec followUp =
-                loadFollowUpSpec(
-                        pending.getSourceWorkflowCode(),
-                        pending.getSourceWorkflowVersionId()
-                );
+        ReportFollowUpSpec followUp =loadFollowUpSpec(pending.getSourceWorkflowCode(),pending.getSourceWorkflowVersionId());
 
-        validatePendingTarget(
-                pending,
-                followUp
-        );
+        validatePendingTarget(pending,followUp );
 
         JsonNode resultNode = loadResultNode(
                 request,
@@ -318,19 +302,14 @@ public class ReportFollowUpService {
     /**
      * 读取来源工作流发布版本中的追问配置。
      */
-    private ReportFollowUpSpec loadFollowUpSpec(
-            String workflowCode,
-            Long workflowVersionId) {
+    private ReportFollowUpSpec loadFollowUpSpec(String workflowCode,Long workflowVersionId) {
 
-        ReportDefinitionSpec definition =
-                loadReportDefinition(
-                        workflowCode,
-                        workflowVersionId
-                );
-
-        ReportFollowUpSpec followUp =
-                definition.followUp();
-
+        ReportDefinitionSpec definition =loadReportDefinition(workflowCode,workflowVersionId);
+        // 只有已经进入追问解析流程时，来源报告定义才是必需的。
+        if (definition == null) {
+            throw new IllegalStateException("来源工作流没有报告定义");
+        }
+        ReportFollowUpSpec followUp =definition.followUp();
         if (followUp == null || !followUp.enabled()) {
             throw new IllegalStateException(
                     "来源报告没有启用追问配置"
@@ -340,29 +319,10 @@ public class ReportFollowUpService {
         return followUp;
     }
 
-    /**
-     * 读取来源工作流实际发布版本中的报告定义。
-     */
-    private ReportDefinitionSpec loadReportDefinition(
-            String workflowCode,
-            Long workflowVersionId) {
-
-        PublishedWorkflow workflow =
-                snapshotResolver.resolveExactVersion(
-                        workflowCode,
-                        workflowVersionId
-                );
-
-        GraphSpec graph = graphSpecParser.parse(
-                workflow.version().getSnapshotJson()
-        );
-
-        if (graph.getReportDefinition() == null) {
-            throw new IllegalStateException(
-                    "来源工作流没有报告定义"
-            );
-        }
-
+    private ReportDefinitionSpec loadReportDefinition(String workflowCode,Long workflowVersionId) {
+        PublishedWorkflow workflow = snapshotResolver.resolveExactVersion(workflowCode,workflowVersionId);
+        GraphSpec graph = graphSpecParser.parse(workflow.version().getSnapshotJson());
+        //报告定义是可选配置，固定报告模板允许不配置。
         return graph.getReportDefinition();
     }
 

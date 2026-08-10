@@ -50,30 +50,15 @@ public class ModelAssignmentController {
     }
 
     @GetMapping("/users/{userId}")
-    public Result<ModelAssignmentVO> getUser(
-            @PathVariable String userId) {
-
-        return Result.success(
-                assignmentService.getUserAssignment(userId)
-        );
+    public Result<ModelAssignmentVO> getUser( @PathVariable String userId) {
+        return Result.success(assignmentService.getUserAssignment(userId));
     }
 
     @PutMapping("/users/{userId}")
-    public Result<ModelAssignmentVO> saveUser(
-            @PathVariable String userId,
-            @Valid @RequestBody
-            ModelAssignmentSaveDTO dto) {
-
-        String operator =
-                currentUserProvider.getRequiredUserId();
-
-        return Result.success(
-                assignmentService.saveUserAssignment(
-                        userId,
-                        dto,
-                        operator
-                )
-        );
+    public Result<ModelAssignmentVO> saveUser(@PathVariable String userId,
+                                              @Valid @RequestBody ModelAssignmentSaveDTO dto) {
+        String operator =currentUserProvider.getRequiredUserId();
+        return Result.success(assignmentService.saveUserAssignment(userId,dto,operator));
     }
 
     /**

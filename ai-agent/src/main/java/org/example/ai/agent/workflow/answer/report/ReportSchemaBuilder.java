@@ -102,8 +102,7 @@ public class ReportSchemaBuilder {
                     .reportType()
                     .name();
         } else {
-            reportType =
-                    ReportType.GENERIC_WORKFLOW_REPORT.name();
+            reportType =ReportType.GENERIC_WORKFLOW_REPORT.name();
         }
 
         String title = configuredReport != null

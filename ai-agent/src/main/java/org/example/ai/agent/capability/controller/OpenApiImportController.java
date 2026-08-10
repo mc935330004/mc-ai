@@ -1,6 +1,5 @@
 package org.example.ai.agent.capability.controller;
 
-import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.example.ai.agent.capability.dto.OpenApiImportRequest;
@@ -12,6 +11,7 @@ import org.example.ai.agent.capability.service.OpenApiPreviewService;
 import org.example.ai.agent.capability.service.OpenApiSyncService;
 import org.example.ai.agent.capability.vo.*;
 import org.example.ai.agent.common.result.Result;
+import org.example.ai.agent.security.CurrentUserProvider;
 import org.springframework.web.bind.annotation.*;
 
 /**
@@ -23,9 +23,9 @@ import org.springframework.web.bind.annotation.*;
 public class OpenApiImportController {
 
     private final OpenApiPreviewService openApiPreviewService;
-    private final HttpServletRequest httpServletRequest;
     private final OpenApiImportService openApiImportService;
     private final OpenApiSyncService openApiSyncService;
+    private final CurrentUserProvider currentUserProvider;
     /**
      * 扫描 OpenAPI 文档并返回能力候选项。
      *
@@ -33,7 +33,7 @@ public class OpenApiImportController {
      */
     @PostMapping("/preview")
     public Result<OpenApiPreviewVO> preview(@RequestBody OpenApiPreviewRequest request) {
-        String authorization = httpServletRequest.getHeader("Authorization");
+        String authorization = currentUserProvider.getRequiredAuthorization();
         return Result.success(openApiPreviewService.preview(request,authorization));
     }
 
@@ -44,7 +44,7 @@ public class OpenApiImportController {
      */
     @PostMapping("/operationDetail")
     public Result<OpenApiOperationDetailVO> operationDetail( @RequestBody OpenApiOperationDetailRequest request) {
-        String authorization = httpServletRequest.getHeader("Authorization" );
+        String authorization = currentUserProvider.getRequiredAuthorization();
         return Result.success(openApiPreviewService.operationDetail(request,authorization) );
     }
 
@@ -55,7 +55,7 @@ public class OpenApiImportController {
      */
     @PostMapping("/import")
     public Result<OpenApiImportResultVO> importCapabilities(@RequestBody OpenApiImportRequest request) {
-        String authorization = httpServletRequest.getHeader("Authorization");
+        String authorization = currentUserProvider.getRequiredAuthorization();
         return Result.success(openApiImportService.importCapabilities(request,authorization));
     }
 
@@ -66,7 +66,7 @@ public class OpenApiImportController {
      */
     @PostMapping("/sync-preview")
     public Result<OpenApiSyncPreviewVO> syncPreview( @RequestBody OpenApiSyncRequest request ) {
-        String authorization = httpServletRequest.getHeader("Authorization");
+        String authorization = currentUserProvider.getRequiredAuthorization();
         return Result.success(openApiSyncService.preview(request,authorization));
     }
 
@@ -75,7 +75,7 @@ public class OpenApiImportController {
      */
     @PostMapping("/sync")
     public Result<OpenApiSyncApplyResultVO> sync(@RequestBody OpenApiSyncRequest request) {
-        String authorization =httpServletRequest.getHeader("Authorization");
+        String authorization = currentUserProvider.getRequiredAuthorization();
         return Result.success(openApiSyncService.apply(request,authorization));
     }
 }
