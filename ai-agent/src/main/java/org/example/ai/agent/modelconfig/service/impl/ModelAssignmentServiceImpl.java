@@ -18,6 +18,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
+import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -47,25 +48,14 @@ public class ModelAssignmentServiceImpl
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public ModelAssignmentVO saveSystemAssignment(
-            ModelAssignmentSaveDTO dto,
-            String operator) {
-
-        replaceAssignments(
-                ModelAssignmentSubjectType.SYSTEM.name(),
-                SYSTEM_SUBJECT_ID,
-                dto,
-                operator
-        );
-
+    public ModelAssignmentVO saveSystemAssignment(ModelAssignmentSaveDTO dto,String operator) {
+        replaceAssignments(ModelAssignmentSubjectType.SYSTEM.name(),SYSTEM_SUBJECT_ID,dto,operator);
         return getSystemAssignment();
     }
 
     @Override
     public ModelAssignmentVO getUserAssignment( String userId) {
-
         validateUserId(userId);
-
         return buildVO(ModelAssignmentSubjectType.USER.name(),userId);
     }
 
@@ -107,62 +97,34 @@ public class ModelAssignmentServiceImpl
     }
 
     @Override
-    public List<ModelAssignment> listRows(
-            String subjectType,
-            String subjectId) {
-
+    public List<ModelAssignment> listRows(String subjectType,String subjectId) {
         ModelAssignmentSubjectType.from(subjectType);
-
         if (!StringUtils.hasText(subjectId)) {
             return List.of();
         }
-
         return assignmentMapper.selectList(
                 new LambdaQueryWrapper<ModelAssignment>()
-                        .eq(
-                                ModelAssignment::getSubjectType,
-                                subjectType
-                        )
-                        .eq(
-                                ModelAssignment::getSubjectId,
-                                subjectId
-                        )
-                        .orderByAsc(
-                                ModelAssignment::getFallbackPriority
-                        )
+                        .eq(ModelAssignment::getSubjectType,subjectType)
+                        .eq(ModelAssignment::getSubjectId,subjectId)
+                        .orderByAsc(ModelAssignment::getFallbackPriority)
                         .orderByAsc(ModelAssignment::getId)
         );
     }
 
-    private void replaceAssignments(
-            String subjectType,
-            String subjectId,
-            ModelAssignmentSaveDTO dto,
-            String operator) {
-
+    private void replaceAssignments(String subjectType,String subjectId,ModelAssignmentSaveDTO dto,String operator) {
         validateAssignment(dto);
-
         assignmentMapper.delete(
                 new LambdaQueryWrapper<ModelAssignment>()
-                        .eq(
-                                ModelAssignment::getSubjectType,
-                                subjectType
-                        )
-                        .eq(
-                                ModelAssignment::getSubjectId,
-                                subjectId
-                        )
+                        .eq(ModelAssignment::getSubjectType,subjectType)
+                        .eq(ModelAssignment::getSubjectId,subjectId)
         );
 
         for (ModelAssignmentItemDTO item : dto.getModels()) {
-            ModelAssignment assignment =
-                    new ModelAssignment();
+            ModelAssignment assignment =new ModelAssignment();
 
             assignment.setSubjectType(subjectType);
             assignment.setSubjectId(subjectId);
-            assignment.setModelCode(
-                    item.getModelCode().trim()
-            );
+            assignment.setModelCode(item.getModelCode().trim());
             assignment.setDefaultModel(
                     Boolean.TRUE.equals(item.getDefaultModel())
                             ? 1 : 0
@@ -172,7 +134,7 @@ public class ModelAssignmentServiceImpl
             );
             assignment.setCreatedBy(operator);
             assignment.setUpdatedBy(operator);
-
+            assignment.setCreatedAt(LocalDateTime.now());
             assignmentMapper.insert(assignment);
         }
     }
@@ -276,22 +238,11 @@ public class ModelAssignmentServiceImpl
         }
     }
 
-    private ModelAssignmentVO buildVO(
-            String subjectType,
-            String subjectId) {
-
-        List<ModelAssignment> rows =
-                listRows(subjectType, subjectId);
-
-        Map<String, ModelOption> enabledModels =
-                new HashMap<>();
-
-        for (ModelOption option
-                : modelConfigService.listEnabledOptions()) {
-            enabledModels.put(
-                    option.modelCode(),
-                    option
-            );
+    private ModelAssignmentVO buildVO(String subjectType,String subjectId) {
+        List<ModelAssignment> rows =listRows(subjectType, subjectId);
+        Map<String, ModelOption> enabledModels =new HashMap<>();
+        for (ModelOption option : modelConfigService.listEnabledOptions()) {
+            enabledModels.put(option.modelCode(),option );
         }
 
         List<ModelAssignmentItemVO> items = rows.stream()
@@ -338,16 +289,10 @@ public class ModelAssignmentServiceImpl
 
     private void validateUserId(String userId) {
         if (!StringUtils.hasText(userId)) {
-            throw new BusinessException(
-                    ErrorCode.BAD_REQUEST,
-                    "用户编码不能为空"
-            );
+            throw new BusinessException(ErrorCode.BAD_REQUEST,"用户编码不能为空");
         }
         if (userId.length() > 64) {
-            throw new BusinessException(
-                    ErrorCode.BAD_REQUEST,
-                    "用户编码不能超过64个字符"
-            );
+            throw new BusinessException(ErrorCode.BAD_REQUEST,"用户编码不能超过64个字符");
         }
     }
 }

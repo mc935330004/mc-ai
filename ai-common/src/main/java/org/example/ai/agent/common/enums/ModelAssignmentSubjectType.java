@@ -7,10 +7,8 @@ import org.example.ai.agent.common.exception.ErrorCode;
  * 模型授权对象类型。
  */
 public enum ModelAssignmentSubjectType {
-
     SYSTEM,
     USER;
-
     public static ModelAssignmentSubjectType from(
             String value) {
 

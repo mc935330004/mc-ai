@@ -143,18 +143,11 @@ public class ModelClientRegistry {
     /**
      * 配置事务提交成功后只清理对应模型。
      */
-    @TransactionalEventListener(
-            phase = TransactionPhase.AFTER_COMMIT,
-            fallbackExecution = true
-    )
-    public void handleModelConfigChanged(
-            ModelConfigChangedEvent event) {
-
-        if (event == null
-                || !StringUtils.hasText(event.modelCode())) {
+    @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT,fallbackExecution = true)
+    public void handleModelConfigChanged(ModelConfigChangedEvent event) {
+        if (event == null || !StringUtils.hasText(event.modelCode())) {
             return;
         }
-
         invalidate(event.modelCode());
     }
 
@@ -162,7 +155,6 @@ public class ModelClientRegistry {
         if (StringUtils.hasText(modelCode)) {
             clientCache.remove(modelCode.trim());
         }
-
         /*
          * 默认模型可能发生切换，
          * 只清理默认引用，不清理其他模型客户端。
@@ -170,44 +162,27 @@ public class ModelClientRegistry {
         defaultClientCache = null;
     }
 
-    private ResolvedModelClient resolveDatabaseClient(
-            ModelRuntimeConfig config,
-            long now) {
-
+    private ResolvedModelClient resolveDatabaseClient(ModelRuntimeConfig config, long now) {
         requireEnabled(config);
-
-        CacheEntry entry = clientCache.compute(
-                config.modelCode(),
-                (modelCode, current) -> {
+        CacheEntry entry = clientCache.compute( config.modelCode(),(modelCode, current) -> {
                     if (isValid(current, now)) {
                         return current;
                     }
-
-                    ResolvedModelClient client =
-                            new ResolvedModelClient(
+                    ResolvedModelClient client =new ResolvedModelClient(
                                     config.modelCode(),
                                     config.providerCode(),
                                     config.modelName(),
                                     modelClientFactory.create(config)
                             );
-
-                    return new CacheEntry(
-                            client,
-                            now + CACHE_TTL_MS
-                    );
+                    return new CacheEntry(client,now + CACHE_TTL_MS);
                 }
         );
-
         return entry.client();
     }
 
-    private ResolvedModelClient resolveYamlClient(
-            String modelCode) {
-
+    private ResolvedModelClient resolveYamlClient(String modelCode) {
         try {
-            AgentModelProperties.ModelItem model =
-                    yamlModelProperties.resolve(modelCode);
-
+            AgentModelProperties.ModelItem model =yamlModelProperties.resolve(modelCode);
             return toYamlClient(model);
         } catch (IllegalArgumentException exception) {
             throw new BusinessException(

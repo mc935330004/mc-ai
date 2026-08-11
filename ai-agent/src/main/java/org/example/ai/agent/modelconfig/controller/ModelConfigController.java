@@ -42,15 +42,9 @@ public class ModelConfigController {
     }
 
     @PostMapping
-    public Result<ModelConfigVO> create(
-            @Valid @RequestBody ModelConfigSaveDTO dto) {
-
-        String operator =
-                currentUserProvider.getRequiredUserId();
-
-        return Result.success(
-                modelConfigService.create(dto, operator)
-        );
+    public Result<ModelConfigVO> create( @Valid @RequestBody ModelConfigSaveDTO dto) {
+        String operator =currentUserProvider.getRequiredUserId();
+        return Result.success(modelConfigService.create(dto, operator));
     }
 
     @PutMapping("/{modelCode}")
@@ -91,14 +85,8 @@ public class ModelConfigController {
      * 只测试指定模型，不进入自动故障转移链。
      */
     @PostMapping("/{modelCode}/test")
-    public Result<ModelTestResultVO> test(
-            @PathVariable String modelCode) {
-
-        String operator =
-                currentUserProvider.getRequiredUserId();
-
-        return Result.success(
-                testService.test(modelCode, operator)
-        );
+    public Result<ModelTestResultVO> test(@PathVariable String modelCode) {
+        String operator =currentUserProvider.getRequiredUserId();
+        return Result.success(testService.test(modelCode, operator));
     }
 }

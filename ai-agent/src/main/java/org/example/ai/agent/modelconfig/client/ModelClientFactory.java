@@ -25,10 +25,7 @@ public class ModelClientFactory {
     private final ObservationRegistry observationRegistry;
 
     public ChatClient create(ModelRuntimeConfig config) {
-        ModelApiType apiType = ModelApiType.from(
-                config.apiType()
-        );
-
+        ModelApiType apiType = ModelApiType.from(config.apiType());
         if (apiType != ModelApiType.OPENAI_COMPATIBLE) {
             throw new BusinessException(
                     400,

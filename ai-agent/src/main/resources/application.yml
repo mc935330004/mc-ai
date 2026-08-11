@@ -136,11 +136,6 @@ app:
           provider: dashscope
           model-name: deepseek-v4-flash
           enabled: true
-        - code: qwen-plus
-          name: 通义千问 Plus
-          provider: dashscope
-          model-name: qwen-plus
-          enabled: true
 mybatis-plus:
   # MyBatis Plus XML Mapper 扫描路径
   mapper-locations: classpath*:mapper/**/*.xml

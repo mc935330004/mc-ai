@@ -55,20 +55,9 @@ public class ModelConfigServiceImpl implements ModelConfigService {
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public ModelConfigVO create(
-            ModelConfigSaveDTO dto,
-            String operator) {
-
+    public ModelConfigVO create( ModelConfigSaveDTO dto,String operator) {
         validateDto(dto);
-
-        Long count = modelConfigMapper.selectCount(
-                new LambdaQueryWrapper<ModelConfig>()
-                        .eq(
-                                ModelConfig::getModelCode,
-                                dto.getModelCode()
-                        )
-        );
-
+        Long count = modelConfigMapper.selectCount(new LambdaQueryWrapper<ModelConfig>().eq(ModelConfig::getModelCode,dto.getModelCode()));
         if (count != null && count > 0) {
             throw new BusinessException(
                     ErrorCode.PROVIDER_ALREADY_EXISTS,
@@ -90,18 +79,17 @@ public class ModelConfigServiceImpl implements ModelConfigService {
         );
         config.setCreatedBy(operator);
         config.setUpdatedBy(operator);
+        config.setCreatedAt(LocalDateTime.now());
 
         if (Boolean.TRUE.equals(dto.getDefaultModel())) {
             clearCurrentDefault(operator);
         }
-
         modelConfigMapper.insert(config);
         /*
          * 事务提交成功后只清理当前模型客户端，
          * 不影响其他已经缓存的模型。
          */
         publishConfigChanged(config.getModelCode());
-
         return toVO(requireByCode(dto.getModelCode()));
     }
 
@@ -185,8 +173,7 @@ public class ModelConfigServiceImpl implements ModelConfigService {
     }
 
     @Override
-    public ModelRuntimeConfig loadRuntimeConfig(
-            String modelCode) {
+    public ModelRuntimeConfig loadRuntimeConfig(String modelCode) {
 
         if (!StringUtils.hasText(modelCode)) {
             throw new BusinessException(
@@ -204,15 +191,11 @@ public class ModelConfigServiceImpl implements ModelConfigService {
 
     @Override
     public List<ModelOption> listEnabledOptions() {
-        return modelConfigMapper.selectList(
-                        new LambdaQueryWrapper<ModelConfig>()
+        return modelConfigMapper.selectList(new LambdaQueryWrapper<ModelConfig>()
                                 .eq(ModelConfig::getEnabled, 1)
-                                .orderByDesc(
-                                        ModelConfig::getDefaultModel
-                                )
+                                .orderByDesc(ModelConfig::getDefaultModel)
                                 .orderByAsc(ModelConfig::getSortOrder)
-                                .orderByAsc(ModelConfig::getId)
-                )
+                                .orderByAsc(ModelConfig::getId))
                 .stream()
                 .map(config -> new ModelOption(
                 config.getModelCode(),
@@ -221,8 +204,7 @@ public class ModelConfigServiceImpl implements ModelConfigService {
                 isTrue(config.getDefaultModel()),
                 isTrue(config.getStreamingSupported()),
                 isTrue(config.getStructuredOutputSupported()),
-                isTrue(config.getToolCallingSupported())
-        )).toList();
+                isTrue(config.getToolCallingSupported()))).toList();
     }
 
     @Override
@@ -382,12 +364,8 @@ public class ModelConfigServiceImpl implements ModelConfigService {
 
         ModelConfig config = modelConfigMapper.selectOne(
                 new LambdaQueryWrapper<ModelConfig>()
-                        .eq(
-                                ModelConfig::getModelCode,
-                                modelCode
-                        )
-                        .last("LIMIT 1")
-        );
+                        .eq( ModelConfig::getModelCode,modelCode)
+                        .last("LIMIT 1"));
 
         if (config == null) {
             throw new BusinessException(

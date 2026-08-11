@@ -45,30 +45,22 @@ public class ModelConnectivityTestService {
     /**
      * 只测试指定模型，不执行备用模型切换。
      */
-    public ModelTestResultVO test(
-            String modelCode,
-            String operator) {
+    public ModelTestResultVO test(String modelCode,String operator) {
 
         long startTime = System.currentTimeMillis();
         ModelRuntimeConfig config = null;
 
         ModelCallContext context = ModelCallContext.builder()
                 .userId(operator)
-                .callType(
-                        ModelCallType.MODEL_CONNECTIVITY_TEST
-                )
+                .callType(ModelCallType.MODEL_CONNECTIVITY_TEST)
                 .modelCode(modelCode)
                 .callSequence(1)
                 .build();
 
         try {
-            config = modelConfigService.loadRuntimeConfig(
-                    modelCode
-            );
+            config = modelConfigService.loadRuntimeConfig(modelCode);
 
-            ChatClient chatClient = modelClientFactory.create(
-                    config
-            );
+            ChatClient chatClient = modelClientFactory.create(config);
 
             ChatResponse response = chatClient.prompt()
                     .options(
@@ -88,14 +80,12 @@ public class ModelConnectivityTestService {
                 );
             }
 
-            long durationMs =
-                    System.currentTimeMillis() - startTime;
+            long durationMs =System.currentTimeMillis() - startTime;
 
             String actualModelName = extractModelName(
                     response,
                     config.modelName()
             );
-
             recordSuccessSafely(
                     context,
                     config,

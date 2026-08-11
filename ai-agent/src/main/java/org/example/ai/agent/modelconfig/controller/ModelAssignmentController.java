@@ -34,19 +34,9 @@ public class ModelAssignmentController {
     }
 
     @PutMapping("/system")
-    public Result<ModelAssignmentVO> saveSystem(
-            @Valid @RequestBody
-            ModelAssignmentSaveDTO dto) {
-
-        String operator =
-                currentUserProvider.getRequiredUserId();
-
-        return Result.success(
-                assignmentService.saveSystemAssignment(
-                        dto,
-                        operator
-                )
-        );
+    public Result<ModelAssignmentVO> saveSystem( @Valid @RequestBody ModelAssignmentSaveDTO dto) {
+        String operator =currentUserProvider.getRequiredUserId();
+        return Result.success(assignmentService.saveSystemAssignment(dto,operator));
     }
 
     @GetMapping("/users/{userId}")

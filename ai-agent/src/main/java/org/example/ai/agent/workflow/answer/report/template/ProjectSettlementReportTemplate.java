@@ -271,22 +271,14 @@ public class ProjectSettlementReportTemplate implements ReportTemplate {
     /**
      * 构建只包含标量值的结算明细行。
      */
-    private Map<String, Object> buildDetailRow(
-            JsonNode project,
-            JsonNode settlementInfo,
-            JsonNode settlement,
-            ProjectContext context,
-            String unitKey,
-            BigDecimal unitSettlementAmount,
-            String rowKey,
-            boolean recordPresent) {
-
+    private Map<String, Object> buildDetailRow(JsonNode project,JsonNode settlementInfo,JsonNode settlement,
+            ProjectContext context,String unitKey, BigDecimal unitSettlementAmount,String rowKey,boolean recordPresent) {
         Map<String, Object> row = buildProjectFields(project, context);
         row.put("unitPresent", true);
         row.put("unitKey", unitKey);
         row.put("unitName", readScalar(
                 settlementInfo,
-                "printingCompany"
+                "unitName"
         ));
         row.put("unitContractAmountText", formatWanAmount(
                 readDecimal(settlementInfo, "contract")

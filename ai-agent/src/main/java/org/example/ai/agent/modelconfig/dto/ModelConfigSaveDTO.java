@@ -19,10 +19,7 @@ import java.math.BigDecimal;
 public class ModelConfigSaveDTO {
 
     @NotBlank(message = "模型编码不能为空")
-    @Pattern(
-            regexp = "^[a-z][a-z0-9_-]{1,63}$",
-            message = "模型编码只能包含小写字母、数字、下划线和短横线"
-    )
+    @Pattern(regexp = "^[a-z][a-z0-9._-]{1,63}$",message = "模型编码只能包含小写字母、数字、下划线和短横线")
     private String modelCode;
 
     @NotBlank(message = "模型名称不能为空")
@@ -31,7 +28,7 @@ public class ModelConfigSaveDTO {
 
     @NotBlank(message = "供应商编码不能为空")
     @Pattern(
-            regexp = "^[a-z][a-z0-9_-]{1,63}$",
+            regexp = "^[a-z][a-z0-9._-]{1,63}$",
             message = "供应商编码格式不正确"
     )
     private String providerCode;
