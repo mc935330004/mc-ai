@@ -16,6 +16,12 @@ import java.time.LocalDateTime;
 public class ModelConfigVO {
 
     private Long id;
+    /**
+     * 当前模型配置版本。
+     *
+     * 前端修改或启停模型时必须原样传回。
+     */
+    private Integer version;
 
     private String modelCode;
 

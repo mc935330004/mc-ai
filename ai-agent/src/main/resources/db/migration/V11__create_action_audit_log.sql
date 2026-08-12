@@ -424,3 +424,47 @@ ALTER TABLE ai_model_usage
 
 CREATE INDEX idx_model_usage_model_time
     ON ai_model_usage (model_code, created_at);
+
+-- ============================================================
+-- 模型配置乐观锁与变更审计。
+--
+-- 设计说明：
+-- 1. version 防止多个管理员并发覆盖模型配置；
+-- 2. 审计表只记录操作身份和安全摘要；
+-- 3. 禁止保存 API Key 原文、密文和完整配置。
+-- ============================================================
+
+ALTER TABLE ai_model_config
+    ADD COLUMN version INT NOT NULL DEFAULT 0
+    COMMENT '乐观锁版本号'
+        AFTER last_test_at;
+
+CREATE TABLE ai_model_config_audit_log
+(
+    id           BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '审计ID',
+    operator_id  VARCHAR(64)  NOT NULL COMMENT '操作人业务用户ID',
+    action_type  VARCHAR(32)  NOT NULL COMMENT '操作类型',
+    target_type  VARCHAR(32)  NOT NULL COMMENT '对象类型',
+    target_key   VARCHAR(128) NOT NULL COMMENT '模型编码或授权对象编码',
+    event_detail VARCHAR(500) NULL COMMENT '服务端生成的安全摘要',
+    created_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '操作时间',
+
+    KEY idx_model_config_audit_time (
+        created_at
+    ),
+    KEY idx_model_config_audit_operator_time (
+        operator_id,
+        created_at
+    ),
+    KEY idx_model_config_audit_target_time (
+        target_type,
+        target_key,
+        created_at
+    ),
+    KEY idx_model_config_audit_action_time (
+        action_type,
+        created_at
+    )
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4
+  COMMENT = '模型配置和授权变更审计日志';

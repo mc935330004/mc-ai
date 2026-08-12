@@ -67,6 +67,15 @@ public class ModelConfig {
     private Long lastTestDurationMs;
 
     private LocalDateTime lastTestAt;
+    /**
+     * 乐观锁版本号。
+     *
+     * 防止多个管理员同时修改模型配置时发生数据覆盖。
+     */
+    @Version
+    private Integer version;
+
+
     @TableField(fill = FieldFill.INSERT)
     private String createdBy;
     @TableField(fill = FieldFill.INSERT_UPDATE)

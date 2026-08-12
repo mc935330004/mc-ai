@@ -21,6 +21,13 @@ public class ModelConfigSaveDTO {
     @NotBlank(message = "模型编码不能为空")
     @Pattern(regexp = "^[a-z][a-z0-9._-]{1,63}$",message = "模型编码只能包含小写字母、数字、下划线和短横线")
     private String modelCode;
+    /**
+     * 当前模型配置版本。
+     *
+     * 新增模型时可以为空；
+     * 修改模型时必须传递列表接口返回的版本。
+     */
+    private Integer version;
 
     @NotBlank(message = "模型名称不能为空")
     @Size(max = 128, message = "模型名称不能超过128个字符")

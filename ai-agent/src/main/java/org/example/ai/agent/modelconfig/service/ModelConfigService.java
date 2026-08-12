@@ -29,6 +29,7 @@ public interface ModelConfigService {
     void updateStatus(
             String modelCode,
             boolean enabled,
+            Integer version,
             String operator
     );
 

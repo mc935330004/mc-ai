@@ -5,6 +5,7 @@ import lombok.RequiredArgsConstructor;
 import org.example.ai.agent.common.enums.ModelAssignmentSubjectType;
 import org.example.ai.agent.common.exception.BusinessException;
 import org.example.ai.agent.common.exception.ErrorCode;
+import org.example.ai.agent.modelconfig.audit.ModelConfigAuditRecorder;
 import org.example.ai.agent.modelconfig.dto.ModelAssignmentItemDTO;
 import org.example.ai.agent.modelconfig.dto.ModelAssignmentSaveDTO;
 import org.example.ai.agent.modelconfig.entity.ModelAssignment;
@@ -37,7 +38,7 @@ public class ModelAssignmentServiceImpl
 
     private final ModelAssignmentMapper assignmentMapper;
     private final ModelConfigService modelConfigService;
-
+    private final ModelConfigAuditRecorder auditRecorder;
     @Override
     public ModelAssignmentVO getSystemAssignment() {
         return buildVO(
@@ -49,7 +50,20 @@ public class ModelAssignmentServiceImpl
     @Override
     @Transactional(rollbackFor = Exception.class)
     public ModelAssignmentVO saveSystemAssignment(ModelAssignmentSaveDTO dto,String operator) {
-        replaceAssignments(ModelAssignmentSubjectType.SYSTEM.name(),SYSTEM_SUBJECT_ID,dto,operator);
+        replaceAssignments(
+                ModelAssignmentSubjectType.SYSTEM.name(),
+                SYSTEM_SUBJECT_ID,
+                dto,
+                operator
+        );
+        // 授权保存成功后，在同一事务中记录审计日志。
+        auditRecorder.record(
+                operator,
+                ModelConfigAuditRecorder.SYSTEM_ASSIGNMENT_SAVE,
+                ModelConfigAuditRecorder.SYSTEM_ASSIGNMENT,
+                SYSTEM_SUBJECT_ID,
+                "保存系统模型授权"
+        );
         return getSystemAssignment();
     }
 
@@ -65,35 +79,48 @@ public class ModelAssignmentServiceImpl
             String userId,
             ModelAssignmentSaveDTO dto,
             String operator) {
-
         validateUserId(userId);
-
         replaceAssignments(
                 ModelAssignmentSubjectType.USER.name(),
                 userId,
                 dto,
                 operator
         );
-
+        // 只记录服务端生成的固定摘要，不保存请求DTO和模型密钥。
+        auditRecorder.record(
+                operator,
+                ModelConfigAuditRecorder.USER_ASSIGNMENT_SAVE,
+                ModelConfigAuditRecorder.USER_ASSIGNMENT,
+                userId,
+                "保存人员模型授权"
+        );
         return getUserAssignment(userId);
     }
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public void deleteUserAssignment(String userId) {
+    public void deleteUserAssignment(
+            String userId,
+            String operator) {
+
         validateUserId(userId);
 
-        assignmentMapper.delete(
+        int deletedRows = assignmentMapper.delete(
                 new LambdaQueryWrapper<ModelAssignment>()
-                        .eq(
-                                ModelAssignment::getSubjectType,
-                                ModelAssignmentSubjectType.USER.name()
-                        )
-                        .eq(
-                                ModelAssignment::getSubjectId,
-                                userId
-                        )
+                        .eq(ModelAssignment::getSubjectType, ModelAssignmentSubjectType.USER.name())
+                        .eq(ModelAssignment::getSubjectId,userId)
         );
+
+        // 没有删除任何授权时不记录审计，避免产生虚假的状态变更记录。
+        if (deletedRows > 0) {
+            auditRecorder.record(
+                    operator,
+                    ModelConfigAuditRecorder.USER_ASSIGNMENT_DELETE,
+                    ModelConfigAuditRecorder.USER_ASSIGNMENT,
+                    userId,
+                    "删除人员模型授权"
+            );
+        }
     }
 
     @Override

@@ -13,9 +13,10 @@ spring:
     # 默认启用开发环境配置；生产部署时应通过启动参数或环境变量切换为 prod
     active: @spring.profiles.active@
   ai:
-    # Spring AI 模型类型声明：对话和向量模型都走 OpenAI 兼容协议
     model:
-      chat: openai
+      # 聊天模型由数据库配置动态创建，不使用Spring AI默认聊天模型。
+      chat: none
+      # Embedding仍然使用OpenAI兼容协议。
       embedding: openai
       image: none
       audio:
@@ -23,20 +24,6 @@ spring:
         transcription: none
       moderation: none
     openai:
-      chat:
-        # DeepSeek 对话模型地址和 API Key；API Key 必须从环境变量读取
-#        base-url: https://api.deepseek.com
-        base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
-#        api-key: ${DEEPSEEK_API_KEY}
-        api-key: ${AL_API_KEY}
-        model: deepseek-v4-flash
-#        model: glm-5.2
-        temperature: 0.2 # 企业数据回答强调稳定性，降低随机性和无关扩写
-        max-tokens: 2048 # 最大生成 tokens 数
-        top-p: 0.8 # 适度保留候选词范围
-        # 要求 OpenAI 兼容供应商在流式响应结束时返回 Token Usage。
-        stream-options:
-          include-usage: true
       embedding:
         # 百炼 DashScope Embedding，维度必须与 PGVector 配置保持一致
         base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
@@ -122,20 +109,19 @@ app:
       v2-deny-users: ""
     # 模型API Key使用独立主密钥加密，不能和SSO会话密钥共用。
     model-security:
-      encryption-key: ${MODEL_CONFIG_ENCRYPTION_KEY:U8VV8dewaSRFVly/bQHuEwtxlBvb2JJFap2xn0RWWDM=}
+      # 当前AES-256主密钥，只允许通过环境变量提供，禁止设置代码默认值。
+      encryption-key: ${MODEL_CONFIG_ENCRYPTION_KEY:}
+      # 密钥轮换期间用于解密旧密文；轮换完成后必须删除该环境变量。
+      previous-encryption-key: ${MODEL_CONFIG_PREVIOUS_ENCRYPTION_KEY:}
+    model-config:
+      # Redis模型缓存失效频道，只广播modelCode
+      cache-invalidation-channel: ${MODEL_CONFIG_CACHE_INVALIDATION_CHANNEL:mc-ai:model-config:changed}
     answer:
       # 标准事实模型开关，紧急回滚时可设为false
       structured-enabled: true
       # Java确定性Markdown开关
       deterministic-markdown-enabled: true
-    model:
-      default-code: deepseek-v4-flash
-      models:
-        - code: deepseek-v4-flash
-          name: DeepSeek V4 Flash
-          provider: dashscope
-          model-name: deepseek-v4-flash
-          enabled: true
+
 mybatis-plus:
   # MyBatis Plus XML Mapper 扫描路径
   mapper-locations: classpath*:mapper/**/*.xml

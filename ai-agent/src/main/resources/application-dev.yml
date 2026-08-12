@@ -42,6 +42,11 @@ app:
       username: postgres
       password: ${PGVECTOR_PASSWORD}
 #      password: pgvector
+  agent:
+    # 开发环境模型缓存失效频道，只广播modelCode，不包含敏感信息。
+    model-config:
+      cache-invalidation-channel: mc-ai:dev:model-config:changed
+
 
 # Agent 调用真实 PM 业务系统的配置
 agent:
@@ -50,9 +55,9 @@ agent:
     base-url: http://pm.s-ic.cn/pm
 #    base-url: http://192.168.8.251:9999/pm
     # 连接超时时间
-    connect-timeout-ms: 10000
+    connect-timeout-ms: 86400
     # 读取超时时间
-    read-timeout-ms: 10000
+    read-timeout-ms: 86400
   pending-action:
     # 写操作预览的确认有效期
     confirm-timeout-minutes: 10

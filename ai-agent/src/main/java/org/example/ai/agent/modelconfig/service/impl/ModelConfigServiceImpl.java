@@ -6,6 +6,7 @@ import lombok.RequiredArgsConstructor;
 import org.example.ai.agent.common.enums.ModelApiType;
 import org.example.ai.agent.common.exception.BusinessException;
 import org.example.ai.agent.common.exception.ErrorCode;
+import org.example.ai.agent.modelconfig.audit.ModelConfigAuditRecorder;
 import org.example.ai.agent.modelconfig.dto.ModelConfigSaveDTO;
 import org.example.ai.agent.modelconfig.entity.ModelConfig;
 import org.example.ai.agent.modelconfig.event.ModelConfigChangedEvent;
@@ -40,6 +41,7 @@ public class ModelConfigServiceImpl implements ModelConfigService {
     private final ModelConfigMapper modelConfigMapper;
     private final ModelSecretCipher modelSecretCipher;
     private final ApplicationEventPublisher eventPublisher;
+    private final ModelConfigAuditRecorder auditRecorder;
     @Override
     public List<ModelConfigVO> list() {
         return modelConfigMapper.selectList(
@@ -73,10 +75,10 @@ public class ModelConfigServiceImpl implements ModelConfigService {
         }
 
         ModelConfig config = new ModelConfig();
+        //新增模型从版本0开始。
+        config.setVersion(0);
         applyEditableFields(config, dto);
-        config.setApiKeyCiphertext(
-                modelSecretCipher.encrypt(dto.getApiKey())
-        );
+        config.setApiKeyCiphertext(modelSecretCipher.encrypt(dto.getApiKey()));
         config.setCreatedBy(operator);
         config.setUpdatedBy(operator);
         config.setCreatedAt(LocalDateTime.now());
@@ -85,6 +87,12 @@ public class ModelConfigServiceImpl implements ModelConfigService {
             clearCurrentDefault(operator);
         }
         modelConfigMapper.insert(config);
+        //审计和模型新增处于同一事务。
+        auditRecorder.record(operator,
+                ModelConfigAuditRecorder.MODEL_CREATE,
+                ModelConfigAuditRecorder.MODEL_CONFIG,
+                config.getModelCode(),
+                "新增模型配置");
         /*
          * 事务提交成功后只清理当前模型客户端，
          * 不影响其他已经缓存的模型。
@@ -101,18 +109,17 @@ public class ModelConfigServiceImpl implements ModelConfigService {
             String operator) {
 
         validateDto(dto);
-
+        requireVersion(dto.getVersion());
         if (!modelCode.equals(dto.getModelCode())) {
             throw new BusinessException(
                     ErrorCode.BAD_REQUEST,
                     "模型编码保存后不允许修改"
             );
         }
-
         ModelConfig current = requireByCode(modelCode);
-
-        if (isTrue(current.getDefaultModel())
-                && !Boolean.TRUE.equals(dto.getDefaultModel())) {
+        // 防止更新已有默认模型时错误清除自身默认状态。
+        boolean wasDefault = isTrue( current.getDefaultModel());
+        if (wasDefault && !Boolean.TRUE.equals(dto.getDefaultModel())) {
             throw new BusinessException(
                     ErrorCode.BAD_REQUEST,
                     "默认模型不能直接取消，请先将其他模型设为默认模型"
@@ -120,20 +127,27 @@ public class ModelConfigServiceImpl implements ModelConfigService {
         }
 
         applyEditableFields(current, dto);
-
+        //必须使用前端读取时获得的版本参与更新。
+        current.setVersion(dto.getVersion());
         if (StringUtils.hasText(dto.getApiKey())) {
             current.setApiKeyCiphertext(
                     modelSecretCipher.encrypt(dto.getApiKey())
             );
         }
-
         current.setUpdatedBy(operator);
-
-        if (Boolean.TRUE.equals(dto.getDefaultModel())) {
+        if (Boolean.TRUE.equals(dto.getDefaultModel()) && !wasDefault) {
             clearCurrentDefault(operator);
         }
-
-        modelConfigMapper.updateById(current);
+        int updatedRows = modelConfigMapper.updateById(current);
+        requireUpdated(updatedRows);
+        // 只有乐观锁更新成功后才记录审计。
+        auditRecorder.record(
+                operator,
+                ModelConfigAuditRecorder.MODEL_UPDATE,
+                ModelConfigAuditRecorder.MODEL_CONFIG,
+                modelCode,
+                "修改模型配置"
+        );
         /*
          * 地址、密钥、模型名称或生成参数变化后，
          * 下次调用重新创建该模型客户端。
@@ -144,31 +158,33 @@ public class ModelConfigServiceImpl implements ModelConfigService {
 
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public void updateStatus(
-            String modelCode,
-            boolean enabled,
-            String operator) {
-
-        ModelConfig current = requireByCode(modelCode);
-
+    public void updateStatus( String modelCode,boolean enabled,Integer version,String operator) {
+        requireVersion(version);
+        ModelConfig current =requireByCode(modelCode);
         if (!enabled && isTrue(current.getDefaultModel())) {
-            throw new BusinessException(
-                    ErrorCode.BAD_REQUEST,
-                    "系统默认模型不能停用，请先设置其他默认模型"
-            );
+            throw new BusinessException(ErrorCode.BAD_REQUEST,"系统默认模型不能停用，请先设置其他默认模型");
         }
-
-        modelConfigMapper.update(
+        int updatedRows = modelConfigMapper.update(
                 null,
                 new LambdaUpdateWrapper<ModelConfig>()
                         .eq(ModelConfig::getId, current.getId())
+                        //只有版本一致时才允许修改状态。
+                        .eq( ModelConfig::getVersion,version)
                         .set(ModelConfig::getEnabled, enabled ? 1 : 0)
                         .set(ModelConfig::getUpdatedBy, operator)
+                        .set(ModelConfig::getVersion, version + 1)
         );
-        /*
-         * 停用模型后立即清理旧客户端，
-         * 防止后续请求继续使用已经停用的模型。
-         */
+
+        requireUpdated(updatedRows);
+        auditRecorder.record(
+                operator,
+                ModelConfigAuditRecorder.MODEL_STATUS_CHANGE,
+                ModelConfigAuditRecorder.MODEL_CONFIG,
+                modelCode,
+                enabled
+                        ? "启用模型配置"
+                        : "停用模型配置"
+        );
         publishConfigChanged(modelCode);
     }
 
@@ -345,15 +361,37 @@ public class ModelConfigServiceImpl implements ModelConfigService {
     }
 
     private void clearCurrentDefault(String operator) {
-        modelConfigMapper.update(
-                null,
-                new LambdaUpdateWrapper<ModelConfig>()
-                        .eq(ModelConfig::getDefaultModel, 1)
-                        .set(ModelConfig::getDefaultModel, 0)
-                        .set(ModelConfig::getUpdatedBy, operator)
+        modelConfigMapper.update(null,new LambdaUpdateWrapper<ModelConfig>()
+                        .eq(ModelConfig::getDefaultModel,1)
+                        .set(ModelConfig::getDefaultModel,0)
+                        .set(ModelConfig::getUpdatedBy,operator)
+                        // 中文注释：默认模型被切换后，旧页面保存时必须产生版本冲突。
+                        .setSql("version = version + 1")
         );
     }
+    /**
+     * 修改模型时必须携带当前版本。
+     */
+    private void requireVersion(Integer version) {
+        if (version == null) {
+            throw new BusinessException(
+                    ErrorCode.BAD_REQUEST,
+                    "配置版本不能为空"
+            );
+        }
+    }
 
+    /**
+     * 统一处理乐观锁更新冲突。
+     */
+    private void requireUpdated(int updatedRows) {
+        if (updatedRows == 0) {
+            throw new BusinessException(
+                    409,
+                    "配置已被其他管理员修改，请刷新后重试"
+            );
+        }
+    }
     private ModelConfig requireByCode(String modelCode) {
         if (!StringUtils.hasText(modelCode)) {
             throw new BusinessException(
@@ -384,6 +422,9 @@ public class ModelConfigServiceImpl implements ModelConfigService {
 
         return ModelConfigVO.builder()
                 .id(config.getId())
+                // 中文注释：前端后续修改时必须携带当前版本。
+                .version(config.getVersion())
+                .modelCode(config.getModelCode())
                 .modelCode(config.getModelCode())
                 .displayName(config.getDisplayName())
                 .providerCode(config.getProviderCode())

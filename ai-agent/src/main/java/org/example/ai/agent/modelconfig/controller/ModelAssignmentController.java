@@ -55,10 +55,9 @@ public class ModelAssignmentController {
      * 删除专属配置后恢复继承系统模型配置。
      */
     @DeleteMapping("/users/{userId}")
-    public Result<Void> deleteUser(
-            @PathVariable String userId) {
-
-        assignmentService.deleteUserAssignment(userId);
+    public Result<Void> deleteUser(@PathVariable String userId) {
+        String operator = currentUserProvider.getRequiredUserId();
+        assignmentService.deleteUserAssignment(userId, operator);
         return Result.success();
     }
 }

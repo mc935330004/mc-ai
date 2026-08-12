@@ -2,7 +2,6 @@ package org.example.ai.agent.modelconfig.service;
 
 import lombok.RequiredArgsConstructor;
 import org.example.ai.agent.chat.vo.ChatModelVO;
-import org.example.ai.agent.common.config.AgentModelProperties;
 import org.example.ai.agent.common.enums.ModelAssignmentSubjectType;
 import org.example.ai.agent.common.exception.BusinessException;
 import org.example.ai.agent.common.exception.ErrorCode;
@@ -19,7 +18,7 @@ import java.util.Map;
  * 当前用户聊天模型解析服务。
  *
  * 只负责授权、默认模型和会话选模，
- * 不执行自动故障转移。
+ * 不负责创建模型客户端或执行故障转移。
  */
 @Service
 @RequiredArgsConstructor
@@ -29,34 +28,41 @@ public class ChatModelPolicyService {
 
     private final ModelAssignmentService assignmentService;
     private final ModelConfigService modelConfigService;
-    private final AgentModelProperties yamlModelProperties;
 
     /**
-     * 查询当前用户实际允许选择的模型。
+     * 查询当前用户实际允许选择的数据库模型。
      */
-    public List<ChatModelVO> listSelectableModels(
-            String userId) {
-
+    public List<ChatModelVO> listSelectableModels(String userId) {
+        List<ModelOption> enabledModels = requireEnabledModels();
         List<ModelAssignment> assignments =
                 findEffectiveAssignments(userId);
 
+        /*
+         * 没有人员或系统授权配置时，
+         * 默认允许使用数据库中全部已启用模型。
+         */
         if (assignments.isEmpty()) {
-            return listYamlModels();
+            String defaultModelCode =
+                    resolveDatabaseDefault(enabledModels);
+
+            return enabledModels.stream()
+                    .map(option -> toChatModelVO(
+                            option,
+                            defaultModelCode
+                    ))
+                    .toList();
         }
 
-        Map<String, ModelOption> enabledModels =
-                enabledModelMap();
+        Map<String, ModelOption> enabledModelMap =
+                toEnabledModelMap(enabledModels);
 
         List<ModelAssignment> availableAssignments =
                 filterAvailableAssignments(
                         assignments,
-                        enabledModels
+                        enabledModelMap
                 );
 
-        requireAvailableModels(
-                assignments,
-                availableAssignments
-        );
+        requireAvailableAssignments(availableAssignments);
 
         String defaultModelCode =
                 resolveConfiguredDefault(
@@ -64,24 +70,12 @@ public class ChatModelPolicyService {
                 );
 
         return availableAssignments.stream()
-                .map(assignment -> {
-                    ModelOption option = enabledModels.get(
-                            assignment.getModelCode()
-                    );
-
-                    return ChatModelVO.builder()
-                            .code(option.modelCode())
-                            .name(option.displayName())
-                            .provider(
-                                    option.providerCode()
-                            )
-                            .defaultModel(
-                                    option.modelCode().equals(
-                                            defaultModelCode
-                                    )
-                            )
-                            .build();
-                })
+                .map(assignment -> toChatModelVO(
+                        enabledModelMap.get(
+                                assignment.getModelCode()
+                        ),
+                        defaultModelCode
+                ))
                 .toList();
     }
 
@@ -89,39 +83,44 @@ public class ChatModelPolicyService {
      * 解析当前会话最终使用的模型编码。
      *
      * explicitModelCode表示用户本次明确选择；
-     * sessionModelCode表示历史会话保存值。
+     * sessionModelCode表示历史会话保存的模型。
      */
     public String resolveModelCode(
             String userId,
             String explicitModelCode,
             String sessionModelCode) {
 
+        List<ModelOption> enabledModels =
+                requireEnabledModels();
+
         List<ModelAssignment> assignments =
                 findEffectiveAssignments(userId);
 
+        /*
+         * 没有授权配置时使用数据库启用模型，
+         * 不再回退application.yml中的聊天模型。
+         */
         if (assignments.isEmpty()) {
-            return resolveYamlModel(
+            return resolveUnassignedModel(
+                    enabledModels,
                     explicitModelCode,
                     sessionModelCode
             );
         }
 
-        Map<String, ModelOption> enabledModels =
-                enabledModelMap();
+        Map<String, ModelOption> enabledModelMap =
+                toEnabledModelMap(enabledModels);
 
         List<ModelAssignment> availableAssignments =
                 filterAvailableAssignments(
                         assignments,
-                        enabledModels
+                        enabledModelMap
                 );
 
-        requireAvailableModels(
-                assignments,
-                availableAssignments
-        );
+        requireAvailableAssignments(availableAssignments);
 
         if (StringUtils.hasText(explicitModelCode)) {
-            if (containsModel(
+            if (containsAssignment(
                     availableAssignments,
                     explicitModelCode)) {
                 return explicitModelCode;
@@ -129,16 +128,17 @@ public class ChatModelPolicyService {
 
             throw new BusinessException(
                     ErrorCode.FORBIDDEN,
-                    "当前用户无权使用模型：" + explicitModelCode
+                    "当前用户无权使用模型："
+                            + explicitModelCode
             );
         }
 
         /*
          * 历史会话模型被停用或取消授权时，
-         * 回落到当前有效默认模型，而不是让整个会话失效。
+         * 回落到当前授权范围内的默认模型。
          */
         if (StringUtils.hasText(sessionModelCode)
-                && containsModel(
+                && containsAssignment(
                 availableAssignments,
                 sessionModelCode)) {
             return sessionModelCode;
@@ -149,6 +149,9 @@ public class ChatModelPolicyService {
         );
     }
 
+    /**
+     * 优先使用人员授权，没有人员授权时继承系统授权。
+     */
     private List<ModelAssignment> findEffectiveAssignments(
             String userId) {
 
@@ -168,12 +171,32 @@ public class ChatModelPolicyService {
         );
     }
 
-    private Map<String, ModelOption> enabledModelMap() {
-        Map<String, ModelOption> result =
-                new HashMap<>();
+    /**
+     * 查询数据库启用模型。
+     *
+     * 数据库未配置模型时不阻止应用启动，
+     * 只在实际查询或使用聊天模型时返回业务错误。
+     */
+    private List<ModelOption> requireEnabledModels() {
+        List<ModelOption> enabledModels =
+                modelConfigService.listEnabledOptions();
 
-        for (ModelOption option
-                : modelConfigService.listEnabledOptions()) {
+        if (enabledModels.isEmpty()) {
+            throw new BusinessException(
+                    ErrorCode.AI_SERVICE_UNAVAILABLE,
+                    "当前没有已启用的聊天模型，请联系管理员配置"
+            );
+        }
+
+        return enabledModels;
+    }
+
+    private Map<String, ModelOption> toEnabledModelMap(
+            List<ModelOption> enabledModels) {
+
+        Map<String, ModelOption> result = new HashMap<>();
+
+        for (ModelOption option : enabledModels) {
             result.put(option.modelCode(), option);
         }
 
@@ -192,17 +215,65 @@ public class ChatModelPolicyService {
                 .toList();
     }
 
-    private void requireAvailableModels(
-            List<ModelAssignment> configuredAssignments,
+    private void requireAvailableAssignments(
             List<ModelAssignment> availableAssignments) {
 
-        if (!configuredAssignments.isEmpty()
-                && availableAssignments.isEmpty()) {
+        if (availableAssignments.isEmpty()) {
             throw new BusinessException(
                     ErrorCode.AI_SERVICE_UNAVAILABLE,
-                    "当前配置的模型均已停用，请联系管理员"
+                    "当前授权的模型均不存在或已经停用，请联系管理员"
             );
         }
+    }
+
+    /**
+     * 解析没有人员和系统授权时使用的数据库模型。
+     */
+    private String resolveUnassignedModel(
+            List<ModelOption> enabledModels,
+            String explicitModelCode,
+            String sessionModelCode) {
+
+        if (StringUtils.hasText(explicitModelCode)) {
+            if (containsModel(
+                    enabledModels,
+                    explicitModelCode)) {
+                return explicitModelCode;
+            }
+
+            throw new BusinessException(
+                    ErrorCode.BAD_REQUEST,
+                    "模型不存在或已经停用："
+                            + explicitModelCode
+            );
+        }
+
+        /*
+         * 历史会话模型被停用时，
+         * 回落到数据库当前默认模型。
+         */
+        if (StringUtils.hasText(sessionModelCode)
+                && containsModel(
+                enabledModels,
+                sessionModelCode)) {
+            return sessionModelCode;
+        }
+
+        return resolveDatabaseDefault(enabledModels);
+    }
+
+    /**
+     * 数据库默认模型不存在时，
+     * 使用排序后的第一个启用模型。
+     */
+    private String resolveDatabaseDefault(
+            List<ModelOption> enabledModels) {
+
+        return enabledModels.stream()
+                .filter(ModelOption::defaultModel)
+                .map(ModelOption::modelCode)
+                .findFirst()
+                .orElse(enabledModels.get(0).modelCode());
     }
 
     private String resolveConfiguredDefault(
@@ -214,16 +285,10 @@ public class ChatModelPolicyService {
                                 && assignment.getDefaultModel() == 1)
                 .map(ModelAssignment::getModelCode)
                 .findFirst()
-                /*
-                 * 默认模型被临时停用时，
-                 * 使用当前优先级最高的可用模型。
-                 */
-                .orElseGet(() ->
-                        assignments.get(0).getModelCode()
-                );
+                .orElse(assignments.get(0).getModelCode());
     }
 
-    private boolean containsModel(
+    private boolean containsAssignment(
             List<ModelAssignment> assignments,
             String modelCode) {
 
@@ -234,50 +299,28 @@ public class ChatModelPolicyService {
                         ));
     }
 
-    private List<ChatModelVO> listYamlModels() {
-        return yamlModelProperties.getModels()
-                .stream()
-                .filter(
-                        AgentModelProperties.ModelItem::isEnabled
-                )
-                .map(item -> ChatModelVO.builder()
-                        .code(item.getCode())
-                        .name(item.getName())
-                        .provider(item.getProvider())
-                        .defaultModel(
-                                item.getCode().equals(
-                                        yamlModelProperties
-                                                .getDefaultCode()
-                                )
-                        )
-                        .build())
-                .toList();
+    private boolean containsModel(
+            List<ModelOption> enabledModels,
+            String modelCode) {
+
+        return enabledModels.stream()
+                .anyMatch(option ->
+                        option.modelCode().equals(modelCode));
     }
 
-    private String resolveYamlModel(
-            String explicitModelCode,
-            String sessionModelCode) {
+    private ChatModelVO toChatModelVO(
+            ModelOption option,
+            String defaultModelCode) {
 
-        if (StringUtils.hasText(explicitModelCode)) {
-            return yamlModelProperties
-                    .resolve(explicitModelCode)
-                    .getCode();
-        }
-
-        if (StringUtils.hasText(sessionModelCode)) {
-            try {
-                return yamlModelProperties
-                        .resolve(sessionModelCode)
-                        .getCode();
-            } catch (IllegalArgumentException exception) {
-                /*
-                 * YAML模型被移除时，历史会话回落默认模型。
-                 */
-            }
-        }
-
-        return yamlModelProperties
-                .defaultModel()
-                .getCode();
+        return ChatModelVO.builder()
+                .code(option.modelCode())
+                .name(option.displayName())
+                .provider(option.providerCode())
+                .defaultModel(
+                        option.modelCode().equals(
+                                defaultModelCode
+                        )
+                )
+                .build();
     }
 }

@@ -69,15 +69,11 @@ public class ModelConfigController {
             @PathVariable String modelCode,
             @Valid @RequestBody ModelStatusDTO dto) {
 
-        String operator =
-                currentUserProvider.getRequiredUserId();
-
-        modelConfigService.updateStatus(
-                modelCode,
+        String operator =currentUserProvider.getRequiredUserId();
+        modelConfigService.updateStatus(modelCode,
                 dto.getEnabled(),
-                operator
-        );
-
+                dto.getVersion(),
+                operator );
         return Result.success();
     }
 

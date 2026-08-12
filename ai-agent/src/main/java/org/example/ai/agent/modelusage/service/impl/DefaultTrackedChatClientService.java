@@ -217,11 +217,7 @@ public class DefaultTrackedChatClientService implements TrackedChatClientService
             String userPrompt,
             ChatOptions.Builder<?> optionsBuilder) {
 
-        List<String> candidates =
-                modelCandidateResolver.resolveCandidates(
-                        context,
-                        false
-                );
+        List<String> candidates = modelCandidateResolver.resolveCandidates(context,false);
 
         ModelFailureCategory lastCategory = null;
         int attemptSequence = 0;
@@ -237,10 +233,7 @@ public class DefaultTrackedChatClientService implements TrackedChatClientService
 
             attemptSequence++;
 
-            ResolvedModelClient resolvedClient =
-                    modelClientRegistry.resolveByCode(
-                            modelCode
-                    );
+            ResolvedModelClient resolvedClient =modelClientRegistry.resolveByCode(modelCode);
 
             ModelCallContext usageContext =
                     copyResolvedContext(
@@ -306,12 +299,7 @@ public class DefaultTrackedChatClientService implements TrackedChatClientService
                 if (!category.failoverAllowed()) {
                     throw propagate(exception);
                 }
-
-                modelFailureTracker.recordFailure(
-                        resolvedClient.modelCode(),
-                        category
-                );
-
+                modelFailureTracker.recordFailure(resolvedClient.modelCode(),category);
                 lastCategory = category;
             }
         }
