@@ -132,6 +132,8 @@ public class OpenApiImportServiceImpl
 
         // 草稿能力双重禁用，审核发布后再启用。
         entity.setEnabled(0);
+        // 新导入能力默认允许所有已登录人员访问。
+        entity.setAccessScope("PUBLIC");
         entity.setCreatedAt(LocalDateTime.now());
         entity.setUpdatedAt(LocalDateTime.now());
         capabilityDefinitionService.save(entity);

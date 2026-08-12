@@ -1,6 +1,8 @@
 package org.example.ai.agent.capability.routing;
 
 import lombok.RequiredArgsConstructor;
+import org.example.ai.agent.access.model.ExecutableResourceType;
+import org.example.ai.agent.access.service.AgentResourceAccessService;
 import org.example.ai.agent.capability.entity.CapabilityDefinition;
 import org.example.ai.agent.capability.service.CapabilityDefinitionService;
 import org.springframework.stereotype.Component;
@@ -42,15 +44,23 @@ public class DefaultCapabilityCandidateRetriever implements CapabilityCandidateR
 
     private final CapabilityDefinitionService capabilityDefinitionService;
     private final CapabilityRoutingProperties routingProperties;
+    private final AgentResourceAccessService resourceAccessService;
 
     @Override
-    public List<CapabilityCandidate> retrieve(String userQuestion) {
+    public List<CapabilityCandidate> retrieve(
+            String userQuestion,
+            String userId) {
         if (!StringUtils.hasText(userQuestion)) {
             return List.of();
         }
 
         List<CapabilityDefinition> capabilities =
                 capabilityDefinitionService.listAgentCallableCapabilities();
+
+        capabilities = filterAccessibleCapabilities(
+                capabilities,
+                userId
+        );
 
         if (capabilities.isEmpty()) {
             return List.of();
@@ -78,6 +88,29 @@ public class DefaultCapabilityCandidateRetriever implements CapabilityCandidateR
                                                 .getCapabilityCode())
                 )
                 .limit(routingProperties.getKeywordTopK())
+                .toList();
+    }
+
+    /**
+     * 在关键词计算和模型选择前移除当前人员无权运行的能力。
+     */
+    private List<CapabilityDefinition> filterAccessibleCapabilities(
+            List<CapabilityDefinition> capabilities,
+            String userId) {
+
+        Set<Long> accessibleIds =
+                resourceAccessService.filterAccessibleResourceIds(
+                        ExecutableResourceType.CAPABILITY,
+                        capabilities.stream()
+                                .map(CapabilityDefinition::getId)
+                                .toList(),
+                        userId
+                );
+
+        return capabilities.stream()
+                .filter(capability ->
+                        accessibleIds.contains(capability.getId())
+                )
                 .toList();
     }
 

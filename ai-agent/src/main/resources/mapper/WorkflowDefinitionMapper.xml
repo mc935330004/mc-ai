@@ -4,24 +4,32 @@
 
     <select id="pageWorkflows"
             resultType="org.example.ai.agent.workflow.entity.WorkflowDefinition">
-        SELECT * FROM ai_workflow_definition
+        <!-- 列表直接返回授权人数，前端无需逐行请求权限详情。 -->
+        SELECT workflow.*,
+               (
+                   SELECT COUNT(1)
+                   FROM ai_agent_resource_user_grant grant_record
+                   WHERE grant_record.resource_type = 'WORKFLOW'
+                     AND grant_record.resource_id = workflow.id
+               ) AS access_user_count
+        FROM ai_workflow_definition workflow
         <where>
             <if test="keyword != null and keyword != ''">
                 AND (
-                workflow_code LIKE CONCAT('%', #{keyword}, '%')
-                OR workflow_name LIKE CONCAT('%', #{keyword}, '%')
-                OR description LIKE CONCAT('%', #{keyword}, '%')
+                workflow.workflow_code LIKE CONCAT('%', #{keyword}, '%')
+                OR workflow.workflow_name LIKE CONCAT('%', #{keyword}, '%')
+                OR workflow.description LIKE CONCAT('%', #{keyword}, '%')
                 )
             </if>
             <if test="publishStatus != null and publishStatus != ''">
-                AND publish_status = #{publishStatus}
+                AND workflow.publish_status = #{publishStatus}
             </if>
 
             <if test="enabled != null">
-                AND enabled = #{enabled}
+                AND workflow.enabled = #{enabled}
             </if>
         </where>
-        ORDER BY updated_at DESC
+        ORDER BY workflow.updated_at DESC
     </select>
 
     <select id="selectByIdForUpdate"

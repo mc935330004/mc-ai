@@ -84,6 +84,19 @@ public class CapabilityDefinition {
     private Integer enabled;
 
     /**
+     * 运行访问范围：PUBLIC、RESTRICTED。
+     *
+     * 该字段属于当前运行策略，不进入能力发布快照。
+     */
+    private String accessScope;
+
+    /**
+     * 列表页展示的指定人员数量，不写入能力定义表。
+     */
+    @TableField(exist = false)
+    private Integer accessUserCount;
+
+    /**
      * 入参 JSON Schema。
      */
     private String inputSchemaJson;

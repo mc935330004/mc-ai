@@ -4,6 +4,8 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
+import org.example.ai.agent.access.model.ExecutableResourceType;
+import org.example.ai.agent.access.service.AgentResourceAccessService;
 import org.example.ai.agent.capability.parameter.CapabilityInputSchemaValidator;
 import org.example.ai.agent.capability.parameter.CapabilityInputValidationResult;
 import org.example.ai.agent.common.enums.ModelCallType;
@@ -32,6 +34,7 @@ import org.example.ai.agent.capability.ui.CapabilityOptionService;
 import org.example.ai.agent.capability.vo.CapabilityOptionResolution;
 import org.example.ai.agent.capability.parameter.UserFriendlyClarifyQuestionBuilder;
 import java.util.Optional;
+import java.util.Set;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -77,6 +80,7 @@ public class WorkflowPlanner {
      * 解析远程下拉中文名称和真实ID。
      */
     private final CapabilityOptionService capabilityOptionService;
+    private final AgentResourceAccessService resourceAccessService;
     /**
      * 非聊天入口不携带会话参数和业务关键词。
      */
@@ -99,7 +103,12 @@ public class WorkflowPlanner {
                              Map<String, Object> inheritedInput,
                              List<String> workflowKeywords) {
         //  从这里开始保留原 plan 方法的全部业务代码。
-        List<WorkflowDefinition> candidates =workflowService.listAgentCallableDefinitions();
+        List<WorkflowDefinition> candidates = filterAccessibleWorkflows(
+                workflowService.listAgentCallableDefinitions(),
+                sourceContext == null
+                        ? null
+                        : sourceContext.getUserId()
+        );
         if (candidates.isEmpty()) {
             return notMatched("当前没有已发布工作流");
         }
@@ -158,6 +167,17 @@ public class WorkflowPlanner {
                                         "模型选择了候选列表之外的工作流"
                                 )
                         );
+
+        /*
+         * 工作流选定后再次读取当前授权，防止候选过滤后权限被撤销。
+         */
+        resourceAccessService.requireAccess(
+                ExecutableResourceType.WORKFLOW,
+                selected.getId(),
+                sourceContext == null
+                        ? null
+                        : sourceContext.getUserId()
+        );
 
         double confidence = decision.confidence() == null
                         ? 0D
@@ -379,8 +399,12 @@ public class WorkflowPlanner {
                 );
 
         WorkflowDefinition selected =
-                workflowService
-                        .listAgentCallableDefinitions()
+                filterAccessibleWorkflows(
+                        workflowService.listAgentCallableDefinitions(),
+                        sourceContext == null
+                                ? null
+                                : sourceContext.getUserId()
+                )
                         .stream()
                         .filter(item ->
                                 workflowCode.equals(
@@ -395,6 +419,17 @@ public class WorkflowPlanner {
                                                 + workflowCode
                                 )
                         );
+
+        /*
+         * WRITE表单提交不重新选路，但必须使用当前人员权限重新校验。
+         */
+        resourceAccessService.requireAccess(
+                ExecutableResourceType.WORKFLOW,
+                selected.getId(),
+                sourceContext == null
+                        ? null
+                        : sourceContext.getUserId()
+        );
 
         PublishedWorkflow published =
                 snapshotResolver.resolveByCode(
@@ -572,6 +607,33 @@ public class WorkflowPlanner {
                         resolution.getDisplayInput()
                 )
                 .build();
+    }
+
+    /**
+     * 在工作流上下文复用和模型选择前批量移除未授权候选。
+     */
+    private List<WorkflowDefinition> filterAccessibleWorkflows(
+            List<WorkflowDefinition> workflows,
+            String userId) {
+
+        if (workflows == null || workflows.isEmpty()) {
+            return List.of();
+        }
+
+        Set<Long> accessibleIds =
+                resourceAccessService.filterAccessibleResourceIds(
+                        ExecutableResourceType.WORKFLOW,
+                        workflows.stream()
+                                .map(WorkflowDefinition::getId)
+                                .toList(),
+                        userId
+                );
+
+        return workflows.stream()
+                .filter(workflow ->
+                        accessibleIds.contains(workflow.getId())
+                )
+                .toList();
     }
     /**
      * 业务关键词全部命中且只对应一个工作流时，返回确定性结果。

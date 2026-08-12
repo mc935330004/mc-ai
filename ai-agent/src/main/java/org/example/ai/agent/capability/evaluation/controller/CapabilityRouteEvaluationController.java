@@ -59,6 +59,11 @@ public class CapabilityRouteEvaluationController {
     public Result<CapabilityRouteEvalResultVO> runEvaluation(
             @RequestBody(required = false)CapabilityRouteEvalRequest request) {
 
-        return Result.success( evaluationService.run(request));
+        return Result.success(
+                evaluationService.run(
+                        request,
+                        currentUserProvider.getRequiredUserId()
+                )
+        );
     }
 }

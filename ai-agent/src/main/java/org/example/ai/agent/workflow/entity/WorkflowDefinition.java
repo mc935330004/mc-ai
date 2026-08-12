@@ -66,6 +66,19 @@ public class WorkflowDefinition {
     private Integer enabled;
 
     /**
+     * 运行访问范围：PUBLIC、RESTRICTED。
+     *
+     * 该字段属于当前运行策略，不进入工作流发布快照。
+     */
+    private String accessScope;
+
+    /**
+     * 列表页展示的指定人员数量，不写入工作流定义表。
+     */
+    @TableField(exist = false)
+    private Integer accessUserCount;
+
+    /**
      * 1表示草稿与发布版本不同。
      */
     private Integer draftDirty;

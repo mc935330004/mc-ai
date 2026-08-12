@@ -38,7 +38,9 @@ public class CapabilityRouteEvaluationServiceImpl
     private final ObjectMapper objectMapper;
 
     @Override
-    public CapabilityRouteEvalResultVO run( CapabilityRouteEvalRequest request) {
+    public CapabilityRouteEvalResultVO run(
+            CapabilityRouteEvalRequest request,
+            String userId) {
 
         int limit =
                 request == null
@@ -78,7 +80,11 @@ public class CapabilityRouteEvaluationServiceImpl
         int passedCount = 0;
         try {
             for (CapabilityRouteCase routeCase : cases) {
-                boolean passed =evaluateCase(evalRunId,routeCase);
+                boolean passed = evaluateCase(
+                        evalRunId,
+                        routeCase,
+                        userId
+                );
                 if (passed) {
                     passedCount++;
                 }
@@ -117,14 +123,18 @@ public class CapabilityRouteEvaluationServiceImpl
         }
     }
 
-    private boolean evaluateCase(String evalRunId,CapabilityRouteCase routeCase) {
+    private boolean evaluateCase(
+            String evalRunId,
+            CapabilityRouteCase routeCase,
+            String userId) {
 
         long startTime =System.currentTimeMillis();
 
         AgentRequest request =new AgentRequest();
 
         request.setConversationId(evalRunId);
-        request.setUserId("ROUTE_EVALUATOR");
+        // 路由评测也使用服务端当前人员，不能用固定身份绕过候选权限。
+        request.setUserId(userId);
         request.setUserQuestion(routeCase.getUserQuestion());
 
         String caseRunId =evalRunId + "-case-" + routeCase.getId();

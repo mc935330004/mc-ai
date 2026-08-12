@@ -2,6 +2,8 @@ package org.example.ai.agent.capability.routing;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.example.ai.agent.access.model.ExecutableResourceType;
+import org.example.ai.agent.access.service.AgentResourceAccessService;
 import org.example.ai.agent.capability.entity.CapabilityDefinition;
 import org.example.ai.agent.capability.service.CapabilityDefinitionService;
 import org.springframework.beans.factory.ObjectProvider;
@@ -14,6 +16,7 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.Collectors;
 
@@ -49,13 +52,15 @@ public class HybridCapabilityCandidateRetriever
     private final CapabilityDefinitionService capabilityDefinitionService;
     private final CapabilityRoutingPolicy routingPolicy;
     private final CapabilityRoutingProperties properties;
+    private final AgentResourceAccessService resourceAccessService;
 
     @Override
     public List<CapabilityCandidate> retrieve(
-            String userQuestion) {
+            String userQuestion,
+            String userId) {
 
         List<CapabilityCandidate> keywordCandidates =
-                keywordRetriever.retrieve(userQuestion);
+                keywordRetriever.retrieve(userQuestion, userId);
 
         List<CapabilityVectorHit> vectorHits =
                 retrieveVectorCandidates(userQuestion);
@@ -66,10 +71,25 @@ public class HybridCapabilityCandidateRetriever
          * 即使 PGVector 中残留了旧向量，
          * 这里也不会把已停用能力交给 LLM。
          */
-        Map<String, CapabilityDefinition> callableMap =
+        List<CapabilityDefinition> callableCapabilities =
                 capabilityDefinitionService
-                        .listAgentCallableCapabilities()
+                        .listAgentCallableCapabilities();
+        Set<Long> accessibleIds =
+                resourceAccessService.filterAccessibleResourceIds(
+                        ExecutableResourceType.CAPABILITY,
+                        callableCapabilities.stream()
+                                .map(CapabilityDefinition::getId)
+                                .toList(),
+                        userId
+                );
+        Map<String, CapabilityDefinition> callableMap =
+                callableCapabilities
                         .stream()
+                        .filter(capability ->
+                                accessibleIds.contains(
+                                        capability.getId()
+                                )
+                        )
                         .filter(capability ->
                                 routingPolicy.isAllowed(
                                         userQuestion,

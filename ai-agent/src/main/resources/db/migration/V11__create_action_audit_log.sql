@@ -468,3 +468,51 @@ CREATE TABLE ai_model_config_audit_log
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4
   COMMENT = '模型配置和授权变更审计日志';
+
+-- ============================================================
+-- 能力与工作流人员访问控制。
+--
+-- 设计说明：
+-- 1. PUBLIC 表示所有已登录人员可以运行；
+-- 2. RESTRICTED 表示只有授权名单中的人员可以运行；
+-- 3. 权限绑定定义ID，不绑定发布版本；
+-- 4. 授权名单为空不能代替资源停用；
+-- 5. 当前关闭Flyway时，需要手工执行本区块SQL。
+-- ============================================================
+
+ALTER TABLE ai_capability_definition
+    ADD COLUMN access_scope VARCHAR(16) NOT NULL DEFAULT 'PUBLIC'
+        COMMENT '运行访问范围：PUBLIC、RESTRICTED'
+        AFTER enabled;
+
+ALTER TABLE ai_workflow_definition
+    ADD COLUMN access_scope VARCHAR(16) NOT NULL DEFAULT 'PUBLIC'
+        COMMENT '运行访问范围：PUBLIC、RESTRICTED'
+        AFTER enabled;
+
+CREATE TABLE ai_agent_resource_user_grant
+(
+    id            BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '主键ID',
+    resource_type VARCHAR(16) NOT NULL COMMENT '资源类型：CAPABILITY、WORKFLOW',
+    resource_id   BIGINT      NOT NULL COMMENT '能力或工作流定义ID',
+    user_id       VARCHAR(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin
+                              NOT NULL COMMENT 'PM系统用户编码，区分大小写',
+    created_by    VARCHAR(64) NOT NULL COMMENT '配置操作人',
+    created_at    DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
+
+    UNIQUE KEY uk_resource_user_grant (
+        resource_type,
+        resource_id,
+        user_id
+    ),
+    KEY idx_resource_user_grant_user (
+        user_id,
+        resource_type
+    ),
+    KEY idx_resource_user_grant_resource (
+        resource_type,
+        resource_id
+    )
+) ENGINE = InnoDB
+  DEFAULT CHARSET = utf8mb4
+  COMMENT = '能力与工作流人员运行授权';

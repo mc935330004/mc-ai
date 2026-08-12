@@ -119,6 +119,8 @@ public class WorkflowDefinitionServiceImpl extends ServiceImpl< WorkflowDefiniti
             definition.setConfigRevision(1);
             definition.setPublishStatus("DRAFT");
             definition.setEnabled(0);
+            // 新建工作流默认允许所有已登录人员访问。
+            definition.setAccessScope("PUBLIC");
             definition.setActiveVersionId(null);
             definition.setConfigChecksum(null);
             definition.setDraftDirty(1);

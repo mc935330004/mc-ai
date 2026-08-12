@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.example.ai.agent.access.service.AgentResourceAccessService;
 import org.example.ai.agent.capability.entity.CapabilityDefinition;
 import org.example.ai.agent.capability.invocation.runtime.SimpleJsonPathReader;
 import org.example.ai.agent.capability.service.CapabilityDefinitionService;
@@ -50,6 +51,8 @@ public class CapabilityOptionService {
 
     private final CapabilityUiSchemaParser uiSchemaParser;
 
+    private final AgentResourceAccessService resourceAccessService;
+
     /**
      * 查询某个WRITE字段的远程选项。
      */
@@ -69,6 +72,14 @@ public class CapabilityOptionService {
                 "当前请求缺少Authorization");
 
         CapabilityDefinition writeCapability =getRequiredCapability( writeCapabilityCode);
+
+        /*
+         * 远程选项属于WRITE表单继续操作，必须先校验父能力当前授权。
+         */
+        resourceAccessService.requireCapabilityAccess(
+                writeCapabilityCode,
+                userId
+        );
 
         if (!"WRITE".equalsIgnoreCase(writeCapability.getSideEffect())) {
             throw badRequest(

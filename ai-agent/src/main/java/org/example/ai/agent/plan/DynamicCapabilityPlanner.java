@@ -2,6 +2,7 @@ package org.example.ai.agent.plan;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
+import org.example.ai.agent.access.service.AgentResourceAccessService;
 import org.example.ai.agent.capability.entity.CapabilityDefinition;
 import org.example.ai.agent.capability.evaluation.service.CapabilityRouteAuditService;
 import org.example.ai.agent.capability.parameter.CapabilityInputSchemaValidator;
@@ -51,6 +52,7 @@ public class DynamicCapabilityPlanner {
     private final ObjectMapper objectMapper;
     private final TrackedChatClientService trackedChatClientService;
     private final CapabilityRouteAuditService routeAuditService;
+    private final AgentResourceAccessService resourceAccessService;
     /**
      *  隐藏能力参数名、JSON Path 和 Schema 校验细节。
      */
@@ -93,7 +95,12 @@ public class DynamicCapabilityPlanner {
          *
          * 不再把数据库中全部能力直接交给大模型。
          */
-         candidates = candidateRetriever.retrieve(userQuestion);
+         candidates = candidateRetriever.retrieve(
+                 userQuestion,
+                 callContext == null
+                         ? null
+                         : callContext.getUserId()
+         );
 
         if (candidates.isEmpty()) {
             DynamicCapabilityPlan result = unmatched("没有召回到相关业务能力",
@@ -167,7 +174,10 @@ public class DynamicCapabilityPlanner {
             CapabilityDefinition selectedCapability =
                     validateSelectedCapability(
                             plan,
-                            candidates
+                            candidates,
+                            callContext == null
+                                    ? null
+                                    : callContext.getUserId()
                     );
             /*
              * 执行置信度和分差闸门。
@@ -397,7 +407,8 @@ public class DynamicCapabilityPlanner {
      */
     private CapabilityDefinition  validateSelectedCapability(
             DynamicCapabilityPlan plan,
-            List<CapabilityCandidate> candidates) {
+            List<CapabilityCandidate> candidates,
+            String userId) {
 
         if (!StringUtils.hasText(plan.getCapabilityCode())) {
             throw new BusinessException( 400,
@@ -421,6 +432,14 @@ public class DynamicCapabilityPlanner {
             throw new BusinessException( 400,
                     "动态能力规划失败：能力不存在、未启用或未发布："+ plan.getCapabilityCode() );
         }
+
+        /*
+         * 模型选择完成后再次读取当前权限，防止召回后权限被撤销。
+         */
+        resourceAccessService.requireCapabilityAccess(
+                plan.getCapabilityCode(),
+                userId
+        );
 
         /*
          * 安全属性只能信任数据库。

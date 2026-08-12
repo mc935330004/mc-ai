@@ -3,21 +3,29 @@
 <mapper namespace="org.example.ai.agent.capability.mapper.CapabilityDefinitionMapper">
 
     <select id="pageCapabilities" resultType="org.example.ai.agent.capability.entity.CapabilityDefinition">
-        select * from ai_capability_definition
+        <!-- 列表直接返回授权人数，前端无需逐行请求权限详情。 -->
+        SELECT capability.*,
+               (
+                   SELECT COUNT(1)
+                   FROM ai_agent_resource_user_grant grant_record
+                   WHERE grant_record.resource_type = 'CAPABILITY'
+                     AND grant_record.resource_id = capability.id
+               ) AS access_user_count
+        FROM ai_capability_definition capability
         <where>
             <if test="keyword != null and keyword != ''">
-               and (capability_name like CONCAT('%', #{keyword}, '%') or
-                capability_code like CONCAT('%', #{keyword}, '%') or
-                description like CONCAT('%', #{keyword}, '%'))
+               and (capability.capability_name like CONCAT('%', #{keyword}, '%') or
+                capability.capability_code like CONCAT('%', #{keyword}, '%') or
+                capability.description like CONCAT('%', #{keyword}, '%'))
             </if>
             <if test="domain != null and domain != ''">
-                and `domain` = #{domain}
+                and capability.`domain` = #{domain}
             </if>
             <if test="enabled != null">
-                and enabled = #{enabled}
+                and capability.enabled = #{enabled}
             </if>
         </where>
-        order by updated_at desc
+        order by capability.updated_at desc
     </select>
     <select id="selectByIdForUpdate"
             resultType="org.example.ai.agent.capability.entity.CapabilityDefinition">

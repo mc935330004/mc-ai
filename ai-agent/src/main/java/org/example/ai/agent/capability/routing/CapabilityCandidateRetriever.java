@@ -15,7 +15,10 @@ public interface CapabilityCandidateRetriever {
      * 根据用户问题召回最相关的业务能力。
      *
      * @param userQuestion 用户原始问题
+     * @param userId 服务端当前人员编码
      * @return 已按召回分数从高到低排序的候选能力
      */
-    List<CapabilityCandidate> retrieve(String userQuestion);
+    List<CapabilityCandidate> retrieve(
+            String userQuestion,
+            String userId);
 }

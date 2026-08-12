@@ -5,6 +5,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
+import org.example.ai.agent.access.service.AgentResourceAccessService;
 import org.example.ai.agent.common.config.PendingActionProperties;
 import org.example.ai.agent.common.enums.PendingActionStatus;
 import org.example.ai.agent.common.exception.BusinessException;
@@ -36,6 +37,7 @@ public class PendingActionServiceImpl extends ServiceImpl<PendingActionMapper, P
     private final ObjectMapper objectMapper;
     private final PendingActionProperties properties;
     private final ActionAuditRecorder actionAuditRecorder;
+    private final AgentResourceAccessService resourceAccessService;
     @Override
     @Transactional(rollbackFor = Exception.class)
     public PendingAction createPendingAction( String runId, String userId,DynamicCapabilityPlan plan ) {
@@ -265,6 +267,16 @@ public class PendingActionServiceImpl extends ServiceImpl<PendingActionMapper, P
         if (!PendingActionStatus.CONFIRMED.getCode().equals(action.getStatus())) {
             throw new BusinessException(400,"当前操作状态为 " + action.getStatus() + "，不能执行");
         }
+
+        /*
+         * 抢占执行状态前重新校验当前能力授权。
+         * 无权限时保持CONFIRMED，且不会调用真实业务接口。
+         */
+        resourceAccessService.requireCapabilityAccess(
+                action.getCapabilityCode(),
+                userId
+        );
+
         // 原子抢占执行权，防止两个请求同时调用业务系统
         boolean claimed = lambdaUpdate()
                 .eq(PendingAction::getId, action.getId())

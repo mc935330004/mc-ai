@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
+import org.example.ai.agent.access.service.AgentResourceAccessService;
 import org.example.ai.agent.capability.entity.CapabilityDefinition;
 import org.example.ai.agent.capability.invocation.runtime.CapabilityHttpInvoker;
 import org.example.ai.agent.capability.invocation.runtime.CapabilityHttpRequest;
@@ -48,6 +49,8 @@ public class CapabilityFileUploadService {
 
     private final CapabilityDefinitionService capabilityDefinitionService;
 
+    private final AgentResourceAccessService resourceAccessService;
+
     private final CapabilityUiSchemaParser uiSchemaParser;
 
     private final CapabilityInvocationContextFactory invocationContextFactory;
@@ -85,6 +88,14 @@ public class CapabilityFileUploadService {
         }
 
         CapabilityDefinition writeCapability =getRequiredCapability(writeCapabilityCode);
+
+        /*
+         * 文件上传属于WRITE表单继续操作，必须校验父能力当前授权。
+         */
+        resourceAccessService.requireCapabilityAccess(
+                writeCapabilityCode,
+                userId
+        );
 
         if (!"WRITE".equalsIgnoreCase(writeCapability.getSideEffect())) {
             throw badRequest(
@@ -137,6 +148,14 @@ public class CapabilityFileUploadService {
                 );
 
         validateUploadCapability(uploadCapability);
+
+        /*
+         * 上传能力直接调用HTTP执行器，因此在此处独立校验当前授权。
+         */
+        resourceAccessService.requireCapabilityAccess(
+                uploadCapability.getCapabilityCode(),
+                userId
+        );
 
         /*
          *  

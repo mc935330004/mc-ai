@@ -2,6 +2,7 @@ package org.example.ai.agent.tool.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import lombok.RequiredArgsConstructor;
+import org.example.ai.agent.access.service.AgentResourceAccessService;
 import org.example.ai.agent.answer.extractor.DictionaryFactExtractor;
 import org.example.ai.agent.answer.model.AnswerFact;
 import org.example.ai.agent.capability.entity.CapabilityDefinition;
@@ -16,6 +17,7 @@ import org.example.ai.agent.capability.invocation.runtime.CapabilityResponseInte
 import org.example.ai.agent.capability.invocation.runtime.ResponseInterpretationResult;
 import org.example.ai.agent.capability.mapper.FieldDictionaryMapper;
 import org.example.ai.agent.capability.service.CapabilityDefinitionService;
+import org.example.ai.agent.common.exception.BusinessException;
 import org.example.ai.agent.plan.PlanStep;
 import org.example.ai.agent.security.PmCapabilityPermissionVerifier;
 import org.example.ai.agent.tool.BusinessCapabilityExecutor;
@@ -52,6 +54,7 @@ import java.util.Map;
 public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecutor {
 
     private final CapabilityDefinitionService capabilityDefinitionService;
+    private final AgentResourceAccessService resourceAccessService;
 
     private final FieldDictionaryMapper fieldDictionaryMapper;
 
@@ -160,6 +163,22 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
                         "能力不存在或未启用："
                                 + capabilityCode
                 );
+            }
+
+            /*
+             * 正式执行必须再次读取当前权限。
+             * 管理端草稿测试继续由现有管理员边界控制。
+             */
+            if (!adminReadTest) {
+                ToolResult accessFailure = validateResourceAccess(
+                        capabilityCode,
+                        context,
+                        step
+                );
+
+                if (accessFailure != null) {
+                    return accessFailure;
+                }
             }
 
             ToolResult sideEffectFailure =validateSideEffect(
@@ -331,6 +350,32 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
                     safePublicInput(step),
                     "BUSINESS_API_ERROR",
                     "业务能力调用失败"
+            );
+        }
+    }
+
+    /**
+     * 将权限业务异常转换为统一工具失败结果，不误判其他业务异常。
+     */
+    private ToolResult validateResourceAccess(
+            String capabilityCode,
+            ToolExecutionContext context,
+            PlanStep step) {
+
+        try {
+            resourceAccessService.requireCapabilityAccess(
+                    capabilityCode,
+                    context == null
+                            ? null
+                            : context.getUserId()
+            );
+            return null;
+        } catch (BusinessException exception) {
+            return fail(
+                    step,
+                    safePublicInput(step),
+                    "RESOURCE_ACCESS_DENIED",
+                    exception.getMessage()
             );
         }
     }

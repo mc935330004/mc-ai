@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.example.ai.agent.access.service.AgentResourceAccessService;
 import org.example.ai.agent.capability.parameter.CapabilityInputSchemaValidator;
 import org.example.ai.agent.capability.parameter.CapabilityInputValidationResult;
 import org.example.ai.agent.common.enums.WorkflowRunOrigin;
@@ -53,6 +54,7 @@ public class WorkflowExecutionFacade {
     private final ObjectMapper objectMapper;
 
     private final RunTraceService runTraceService;
+    private final AgentResourceAccessService resourceAccessService;
 
     /**
      * 执行正式发布的工作流。
@@ -73,6 +75,15 @@ public class WorkflowExecutionFacade {
          */
         PublishedWorkflow workflow =
                 resolveWorkflow(command);
+
+        /*
+         * 正常聊天和历史版本重试都按当前工作流定义权限校验。
+         * 校验位于运行记录创建前，无权限时不会产生新运行记录。
+         */
+        resourceAccessService.requireWorkflowAccess(
+                command.getWorkflowCode(),
+                command.getUserId()
+        );
 
         /*
          * 将工作流输入 Schema 转换成校验器需要的 JSON 字符串。

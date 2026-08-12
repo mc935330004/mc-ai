@@ -205,6 +205,17 @@ public class CapabilityDefinitionServiceImpl extends ServiceImpl<CapabilityDefin
 
         BeanUtils.copyProperties(dto, entity);
 
+        /*
+         * 访问范围由独立权限接口维护。
+         * 新建能力默认公开；修改能力时保留原访问策略，
+         * 避免普通草稿保存清空人员权限。
+         */
+        entity.setAccessScope(
+                existing == null
+                        ? "PUBLIC"
+                        : existing.getAccessScope()
+        );
+
         entity.setUpdatedAt(LocalDateTime.now());
 
         if (StringUtils.hasText(entity.getSystemCode())) {
