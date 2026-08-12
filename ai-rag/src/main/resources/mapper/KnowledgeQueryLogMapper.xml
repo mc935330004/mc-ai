@@ -1,34 +1,70 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
 <mapper namespace="org.example.ai.agent.modules.KnowledgeLog.mapper.KnowledgeQueryLogMapper">
 
+    <!-- 查询当前租户的知识问答日志。 -->
     <select id="findKnowledgeQueryLogList"
             resultType="org.example.ai.agent.modules.KnowledgeLog.entity.KnowledgeQueryLog">
-        select kl.question,kl.answer,kr.reference_count,kl.duration_ms,kl.error_message,kl.status
-        from knowledge_query_log kl
-        left join (
-            select count(*) as reference_count, query_log_id from knowledge_query_reference
-            group by query_log_id
-        )kr on kl.id = kr.query_log_id
-        <where>
-            <if test="status != null and status != ''">
-                and kl.status = #{status}
-            </if>
-            <if test="answer != null and answer != ''">
-               and  kl.answer like CONCAT('%', #{answer}, '%')
-            </if>
-        </where>
-        order by kl.created_at desc
+        SELECT
+        kl.id,
+        kl.tenant_id AS tenantId,
+        kl.user_id AS userId,
+        kl.question,
+        kl.answer,
+        kl.top_k AS topK,
+        kl.min_score AS minScore,
+        kl.duration_ms AS durationMs,
+        kl.error_message AS errorMessage,
+        kl.status,
+        kl.created_at AS createdAt,
+        COALESCE(kr.reference_count, 0) AS referenceCount
+        FROM knowledge_query_log kl
+        LEFT JOIN (
+        SELECT
+        query_log_id,
+        COUNT(*) AS reference_count
+        FROM knowledge_query_reference
+        GROUP BY query_log_id
+        ) kr ON kl.id = kr.query_log_id
+        WHERE kl.tenant_id = #{tenantId}
+
+        <if test="status != null and status != ''">
+            AND kl.status = #{status}
+        </if>
+
+        <if test="answer != null and answer != ''">
+            AND kl.answer LIKE CONCAT('%', #{answer}, '%')
+        </if>
+
+        ORDER BY kl.created_at DESC
     </select>
+
+    <!-- 统计当前租户的知识问答情况。 -->
     <select id="getEnterpriseQuestionStatistics"
             resultType="org.example.ai.agent.modules.KnowledgeLog.dto.KnowledgeQueryStatsDTO">
-        select
-            id,
-            sum(if(status='SUCCESS',1,0))as successCount,
-            sum(if(status='NO_RESULT',1,0))as noResultCount,
-            sum(if(status='FAILED',1,0))as failedCount,
-            avg(duration_ms) as avgDurationMs
-        from knowledge_query_log
-        where 1=1
+        SELECT
+            COUNT(*) AS totalCount,
+            COALESCE(
+                    SUM(CASE WHEN status = 'SUCCESS' THEN 1 ELSE 0 END),
+                    0
+            ) AS successCount,
+            COALESCE(
+                    SUM(CASE WHEN status = 'NO_RESULT' THEN 1 ELSE 0 END),
+                    0
+            ) AS noResultCount,
+            COALESCE(
+                    SUM(CASE WHEN status = 'FAILED' THEN 1 ELSE 0 END),
+                    0
+            ) AS failedCount,
+            CAST(
+                    COALESCE(AVG(duration_ms), 0)
+                AS UNSIGNED
+            ) AS avgDurationMs
+        FROM knowledge_query_log
+        WHERE tenant_id = #{tenantId}
     </select>
+
 </mapper>

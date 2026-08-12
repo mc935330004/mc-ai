@@ -516,3 +516,63 @@ CREATE TABLE ai_agent_resource_user_grant
 ) ENGINE = InnoDB
   DEFAULT CHARSET = utf8mb4
   COMMENT = '能力与工作流人员运行授权';
+-- ============================================================
+-- 知识库文档租户与部门访问控制
+--
+-- 说明：
+-- 1. PUBLIC表示当前租户内公开，不表示全系统公开；
+-- 2. DEPARTMENT表示当前租户内仅归属部门可检索；
+-- 3. owner_dept继续作为展示名称，不参与权限判断；
+-- 4. tenant_id和owner_dept_id必须来自服务端登录上下文。
+-- ============================================================
+
+ALTER TABLE knowledge_document
+    ADD COLUMN tenant_id BIGINT NULL
+        COMMENT 'PM租户ID，由服务端登录身份写入'
+        AFTER id,
+    ADD COLUMN access_scope VARCHAR(16) NOT NULL DEFAULT 'PUBLIC'
+        COMMENT '文档访问范围：PUBLIC、DEPARTMENT'
+        AFTER owner_dept,
+    ADD COLUMN owner_dept_id BIGINT NULL
+        COMMENT 'PM归属部门ID，仅DEPARTMENT范围参与权限判断'
+        AFTER owner_dept;
+
+CREATE INDEX idx_knowledge_document_tenant_scope
+    ON knowledge_document (
+                           tenant_id,
+                           access_scope,
+                           owner_dept_id,
+                           status,
+                           del_flag
+        );
+
+-- ============================================================
+-- 知识库问答日志租户隔离
+--
+-- 说明：
+-- 1. tenant_id用于管理端日志、详情、统计和引用记录隔离；
+-- 2. user_id记录实际提问人；
+-- 3. 历史日志无法可靠推断租户和人员，不自动填写虚假值；
+-- 4. 新产生的日志必须由服务端认证上下文写入。
+-- ============================================================
+
+ALTER TABLE knowledge_query_log
+    ADD COLUMN tenant_id BIGINT NULL
+        COMMENT 'PM租户ID'
+        AFTER id,
+    ADD COLUMN user_id VARCHAR(64) NULL
+        COMMENT 'PM提问人员编码'
+        AFTER tenant_id;
+
+CREATE INDEX idx_knowledge_query_log_tenant_time
+    ON knowledge_query_log (
+                            tenant_id,
+                            created_at
+        );
+
+CREATE INDEX idx_knowledge_query_log_tenant_user_time
+    ON knowledge_query_log (
+                            tenant_id,
+                            user_id,
+                            created_at
+        );

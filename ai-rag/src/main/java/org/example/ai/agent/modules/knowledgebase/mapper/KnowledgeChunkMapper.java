@@ -15,5 +15,6 @@ public interface KnowledgeChunkMapper extends BaseMapper<KnowledgeChunk> {
      * 用于管理端查看某个版本实际参与 RAG 检索的文本片段。
      */
     Page<KnowledgeChunk> findChunksByDocumentVersionId(Page<KnowledgeChunk>page,
-                                                       @Param("keyword") String keyword);
+                                                       @Param("keyword") String keyword,
+                                                       @Param("tenantId") Long tenantId);
 }

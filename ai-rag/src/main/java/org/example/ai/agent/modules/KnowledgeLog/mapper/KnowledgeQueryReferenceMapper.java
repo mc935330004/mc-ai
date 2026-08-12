@@ -10,8 +10,11 @@ import org.example.ai.agent.modules.KnowledgeLog.entity.KnowledgeQueryReference;
 public interface KnowledgeQueryReferenceMapper extends BaseMapper<KnowledgeQueryReference> {
 
     /**
-     * 根据日志ID获取引用来源列表。
+     * 查询当前租户指定问答日志的引用来源。
      */
-    Page<KnowledgeQueryReference> getReferences(Page<KnowledgeQueryReference>page,
-                                                @Param("logId") Long logId);
+    Page<KnowledgeQueryReference> getReferences(
+            Page<KnowledgeQueryReference> page,
+            @Param("logId") Long logId,
+            @Param("tenantId") Long tenantId
+    );
 }

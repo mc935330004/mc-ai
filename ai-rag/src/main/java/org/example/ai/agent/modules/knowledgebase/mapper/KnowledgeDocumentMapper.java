@@ -13,14 +13,14 @@ import org.example.ai.agent.modules.knowledgebase.vo.KnowledgeDocumentListItemVO
 public interface KnowledgeDocumentMapper extends BaseMapper<KnowledgeDocument> {
 
     /**
-     * 查询知识文档列表
+     * 查询当前租户的知识文档列表。
      */
     Page<KnowledgeDocumentListItemVO> findPageList(Page<KnowledgeDocumentListItemVO> page,
-                                                   @Param("query") KnowledgeDocumentDTO query);
+            @Param("query") KnowledgeDocumentDTO query, @Param("tenantId") Long tenantId);
 
     /**
-     * 向量任务监控列表（分页）
+     * 查询当前租户的向量任务列表。
      */
     Page<KnowledgeBaseVectorTask> findVectorTaskList(Page<KnowledgeBaseVectorTask> page,
-                                                     @Param("query") KnowledgeDocumentDTO query);
+            @Param("query") KnowledgeDocumentDTO query,@Param("tenantId") Long tenantId);
 }

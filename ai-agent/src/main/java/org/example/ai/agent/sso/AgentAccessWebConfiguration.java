@@ -6,7 +6,7 @@ import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 
 /**
- * 注册Agent接口访问边界。
+ * 注册AI助手接口的统一访问边界。
  */
 @Configuration
 @RequiredArgsConstructor
@@ -15,13 +15,13 @@ public class AgentAccessWebConfiguration implements WebMvcConfigurer {
     private final AgentAccessInterceptor interceptor;
 
     @Override
-    public void addInterceptors( InterceptorRegistry registry) {
-
+    public void addInterceptors(InterceptorRegistry registry) {
         /*
-         *  
-         * auth接口同样需要进行Origin校验，
-         * 但AgentAccessInterceptor不会要求首次Ticket交换已有会话。
+         * Agent接口、知识库接口和旧版AI接口统一进入身份校验。
+         *
+         * 首次SSO Ticket交换仍由拦截器内部放行，
+         * 不会提前要求用户已经建立Agent会话。
          */
-        registry.addInterceptor(interceptor).addPathPatterns("/api/agent/**");
+        registry.addInterceptor(interceptor).addPathPatterns("/api/agent/**","/api/knowledge/**","/api/aiAgent/**");
     }
 }

@@ -41,13 +41,19 @@ public class KnowledgeCategoryController {
     }
 
     /**
-     * 批量删除
-     * @param ids
-     * @return
+     * 批量删除知识分类。
      */
-    @GetMapping("/batch")
-    public Result<Boolean> deleteBatch(@RequestParam(value = "ids") String ids) {
+    @DeleteMapping("/batch")
+    public Result<Boolean> deleteBatch(@RequestParam("ids") String ids) {
         return Result.success(categoryService.removeKnowledgeCategoryByIds(ids));
+    }
+
+    /**
+     * 删除单个知识分类。
+     */
+    @DeleteMapping("/{id}")
+    public Result<Boolean> delete(@PathVariable Long id) {
+        return Result.success(categoryService.removeKnowledgeCategoryByIds(String.valueOf(id)));
     }
 
     /**

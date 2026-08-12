@@ -25,6 +25,13 @@ public class KnowledgeDocument implements Serializable {
     private Long id;
 
     /**
+     * PM租户ID。
+     *
+     * 由服务端登录身份写入，禁止接收前端传值。
+     */
+    private Long tenantId;
+
+    /**
      * 所属分类ID
      */
     private Long categoryId;
@@ -43,6 +50,18 @@ public class KnowledgeDocument implements Serializable {
      * 归属部门，例如人力资源部、财务部
      */
     private String ownerDept;
+
+    /**
+     * 文档访问范围：PUBLIC、DEPARTMENT。
+     */
+    private String accessScope;
+
+    /**
+     * PM归属部门ID。
+     *
+     * 仅在访问范围为DEPARTMENT时参与权限判断。
+     */
+    private Long ownerDeptId;
 
     /**
      * 状态：DRAFT-草稿，PUBLISHED-已发布，DEPRECATED-已废止，ARCHIVED-已归档

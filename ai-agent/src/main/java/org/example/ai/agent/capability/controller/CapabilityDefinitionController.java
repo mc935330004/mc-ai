@@ -148,7 +148,14 @@ public class CapabilityDefinitionController {
                         .secureContext(new LinkedHashMap<>())
                         .build();
 
-        ToolResult result = businessCapabilityExecutor.execute(context, step);
+        /*
+         * 管理端测试由管理员接口边界保护，不属于业务人员运行授权。
+         * 使用专用测试入口，避免受限能力要求管理员先把自己加入运行名单。
+         */
+        ToolResult result = businessCapabilityExecutor.executeReadTest(
+                context,
+                step
+        );
         fieldDictionaryService.generateFromJson(FieldDictionaryGenerateDTO.builder()
                 .capabilityCode(result.getCapabilityCode())
                 .json(objectMapper.writeValueAsString(result.getData()))

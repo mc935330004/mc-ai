@@ -5,8 +5,9 @@ import lombok.RequiredArgsConstructor;
 import org.example.ai.agent.common.enums.ModelCallType;
 import org.example.ai.agent.common.modelusage.ModelCallContext;
 import org.example.ai.agent.common.modelusage.TrackedChatClientService;
-import org.springframework.util.StringUtils;
 import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.springframework.util.StringUtils;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -14,14 +15,22 @@ import org.springframework.web.bind.annotation.RestController;
 import reactor.core.publisher.Flux;
 
 /**
- * AI代理控制器
+ * 旧版模型直连接口。
+ *
+ * 默认不注册该控制器，仅在紧急兼容旧调用方时临时开启。
  */
 @RestController
 @RequiredArgsConstructor
 @RequestMapping("/api/aiAgent")
+@ConditionalOnProperty(
+        prefix = "app.agent.legacy-direct-chat",
+        name = "enabled",
+        havingValue = "true"
+)
 public class AiAgentController {
 
     private final TrackedChatClientService trackedChatClientService;
+
     /**
      * ChatClient 流式调用
      */

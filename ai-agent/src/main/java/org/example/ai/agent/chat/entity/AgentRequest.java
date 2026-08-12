@@ -3,6 +3,7 @@ package org.example.ai.agent.chat.entity;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import jakarta.validation.constraints.NotBlank;
 import lombok.Data;
+import org.example.ai.agent.modules.knowledgebase.security.KnowledgeAccessPrincipal;
 import java.util.LinkedHashMap;
 
 import java.util.List;
@@ -62,6 +63,15 @@ public class AgentRequest {
      */
     @JsonIgnore
     private String authorization;
+
+    /**
+     * 请求线程中解析出的可信知识库身份。
+     *
+     * Agent主体在异步线程执行，不能延迟读取HttpServletRequest，
+     * 因此该字段只能由后端Controller注入。
+     */
+    @JsonIgnore
+    private KnowledgeAccessPrincipal knowledgeAccessPrincipal;
 
     /**
      * SSE 协议版本。

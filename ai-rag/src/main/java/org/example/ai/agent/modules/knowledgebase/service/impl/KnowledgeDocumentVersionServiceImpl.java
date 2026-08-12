@@ -26,6 +26,8 @@ import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
+import org.example.ai.agent.modules.knowledgebase.security.KnowledgeAccessContext;
+import org.example.ai.agent.modules.knowledgebase.security.KnowledgeAccessPrincipal;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -48,6 +50,10 @@ public class KnowledgeDocumentVersionServiceImpl extends ServiceImpl<KnowledgeDo
     private final ObjectProvider<VectorStore> vectorStoreProvider;
     private final VectorRepository vectorRepository;
     private final KnowledgeBaseVectorTaskService vectorTaskService;
+    /**
+     * 管理端发布和重新向量化时使用当前租户身份。
+     */
+    private final KnowledgeAccessContext knowledgeAccessContext;
     /**
      * TokenTextSplitter 是 Spring AI 提供的切片器。
      * 后续如果你要按标题、段落、页码做企业级切片，可以在这里替换为自定义切片策略。
@@ -100,9 +106,7 @@ public class KnowledgeDocumentVersionServiceImpl extends ServiceImpl<KnowledgeDo
         if (documentId == null || versionId == null) {
             throw new BusinessException(ErrorCode.BAD_REQUEST, "文档ID和版本ID不能为空");
         }
-        KnowledgeDocument document = documentService.lambdaQuery()
-                .eq(KnowledgeDocument::getId, documentId)
-                .eq(KnowledgeDocument::getDelFlag,0).one();
+        KnowledgeDocument document =getManagedDocument(documentId);
         if (document == null) {
             throw new BusinessException(ErrorCode.NOT_FOUND, "文档不存在");
         }
@@ -145,9 +149,7 @@ public class KnowledgeDocumentVersionServiceImpl extends ServiceImpl<KnowledgeDo
         if (documentId == null || versionId == null) {
             throw new BusinessException(ErrorCode.BAD_REQUEST, "文档ID和版本ID不能为空");
         }
-        KnowledgeDocument document = documentService.lambdaQuery()
-                .eq(KnowledgeDocument::getId, documentId)
-                .eq(KnowledgeDocument::getDelFlag,0).one();
+        KnowledgeDocument document =getManagedDocument(documentId);
         if (document == null) {
             throw new BusinessException(ErrorCode.NOT_FOUND, "文档不存在");
         }
@@ -207,6 +209,26 @@ public class KnowledgeDocumentVersionServiceImpl extends ServiceImpl<KnowledgeDo
                 version.getOriginalFilename()
         );
     }
+
+    /**
+     * 查询当前管理员所属租户的文档。
+     */
+    private KnowledgeDocument getManagedDocument(Long documentId) {
+        if (documentId == null || documentId <= 0) {
+            throw new BusinessException(ErrorCode.BAD_REQUEST, "文档ID必须大于0");
+        }
+        KnowledgeAccessPrincipal principal =knowledgeAccessContext.getRequiredPrincipal();
+        return Optional.ofNullable(documentService.lambdaQuery()
+                        .eq(KnowledgeDocument::getId, documentId)
+                        .eq(KnowledgeDocument::getTenantId, principal.tenantId())
+                        .eq(KnowledgeDocument::getDelFlag, 0)
+                        .one()
+        ).orElseThrow(() -> new BusinessException(
+                ErrorCode.NOT_FOUND,
+                "文档不存在"
+        ));
+    }
+
     /**
      * 切分文档内容
      * @param content

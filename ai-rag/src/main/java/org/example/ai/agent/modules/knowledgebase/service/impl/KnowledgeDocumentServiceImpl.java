@@ -22,7 +22,8 @@ import org.example.ai.agent.modules.knowledgebase.vo.KnowledgeDocumentListItemVO
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Service;
-
+import org.example.ai.agent.modules.knowledgebase.security.KnowledgeAccessContext;
+import org.example.ai.agent.modules.knowledgebase.security.KnowledgeAccessPrincipal;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Optional;
@@ -35,13 +36,13 @@ public class KnowledgeDocumentServiceImpl extends ServiceImpl<KnowledgeDocumentM
     private final KnowledgeDocumentVersionService versionService;
     private final KnowledgeChunkService chunkService;
     private final KnowledgeBaseVectorTaskService vectorTaskService;
+    private final KnowledgeAccessContext knowledgeAccessContext;
 
     @Override
     public KnowledgeDocumentOverviewDTO overview(Long id) {
-        KnowledgeDocument document = Optional.ofNullable(this.lambdaQuery()
-                .eq(KnowledgeDocument::getId, id)
-                .eq(KnowledgeDocument::getDelFlag, 0)
-                .one()).orElseThrow(() -> new BusinessException(ErrorCode.NOT_FOUND, "文档不存在"));
+        KnowledgeAccessPrincipal principal =knowledgeAccessContext.getRequiredPrincipal();
+
+        KnowledgeDocument document = getTenantDocument(id,principal.tenantId());
 
         KnowledgeDocumentVersion currentVersion = null;
         if (document.getCurrentVersionId() != null) {
@@ -92,8 +93,9 @@ public class KnowledgeDocumentServiceImpl extends ServiceImpl<KnowledgeDocumentM
     }
 
     @Override
-    public Page<KnowledgeDocumentListItemVO> findPageList(Page<KnowledgeDocumentListItemVO> page, KnowledgeDocumentDTO query) {
-        return baseMapper.findPageList(page, query);
+    public Page<KnowledgeDocumentListItemVO> findPageList(Page<KnowledgeDocumentListItemVO> page,KnowledgeDocumentDTO query) {
+        KnowledgeAccessPrincipal principal =knowledgeAccessContext.getRequiredPrincipal();
+        return baseMapper.findPageList(page, query, principal.tenantId());
     }
 
 
@@ -110,54 +112,92 @@ public class KnowledgeDocumentServiceImpl extends ServiceImpl<KnowledgeDocumentM
 
     @Override
     public void restorePublished(Long documentId) {
-        if (documentId == null) {
-            throw new BusinessException(ErrorCode.BAD_REQUEST, "文档ID不能为空");
-        }
-        KnowledgeDocument document = Optional.ofNullable(lambdaQuery()
-                .eq(KnowledgeDocument::getId, documentId)
-                .eq(KnowledgeDocument::getDelFlag, 0)
-                .one()).orElseThrow(() -> new BusinessException(ErrorCode.NOT_FOUND, "文档不存在"));
-        if (document.getCurrentVersionId() == null) {
-            throw new BusinessException(ErrorCode.BAD_REQUEST, "文档没有当前版本，不能恢复发布");
-        }
-        KnowledgeDocumentVersion currentVersion = Optional.ofNullable(versionService.lambdaQuery()
-                .eq(KnowledgeDocumentVersion::getId,document.getCurrentVersionId())
-                .eq(KnowledgeDocumentVersion::getDelFlag, 0).one())
-                .orElseThrow(() -> new BusinessException(ErrorCode.BAD_REQUEST, "当前版本不存在，不能恢复发布"));
+        KnowledgeAccessPrincipal principal =
+                knowledgeAccessContext.getRequiredPrincipal();
 
-        if (!"COMPLETED".equals(currentVersion.getParseStatus())
-                || !"COMPLETED".equals(currentVersion.getVectorStatus())) {
-            throw new BusinessException(ErrorCode.BAD_REQUEST, "当前版本未完成解析和向量化，不能恢复发布");
+        KnowledgeDocument document = getTenantDocument(
+                documentId,
+                principal.tenantId()
+        );
+
+        if (document.getCurrentVersionId() == null) {
+            throw new BusinessException(
+                    ErrorCode.BAD_REQUEST,
+                    "文档没有当前版本，不能恢复发布"
+            );
         }
+
+        KnowledgeDocumentVersion currentVersion =
+                Optional.ofNullable(
+                        versionService.lambdaQuery()
+                                .eq(KnowledgeDocumentVersion::getId, document.getCurrentVersionId()
+                                )
+                                .eq(KnowledgeDocumentVersion::getDocumentId, document.getId()
+                                )
+                                .eq(KnowledgeDocumentVersion::getDelFlag, 0
+                                )
+                                .one()
+                ).orElseThrow(() -> new BusinessException(
+                        ErrorCode.BAD_REQUEST,
+                        "当前文档版本不存在，不能恢复发布"
+                ));
+
+        if (!"COMPLETED".equals(currentVersion.getParseStatus())|| !"COMPLETED".equals(currentVersion.getVectorStatus())) {
+
+            throw new BusinessException(
+                    ErrorCode.BAD_REQUEST,
+                    "当前版本未完成解析和向量化，不能恢复发布"
+            );
+        }
+
         document.setStatus("PUBLISHED");
         document.setUpdatedAt(LocalDateTime.now());
         updateById(document);
     }
 
     @Override
-    public Page<KnowledgeBaseVectorTask> findVectorTaskList(Page<KnowledgeBaseVectorTask> page, KnowledgeDocumentDTO query) {
-        return baseMapper.findVectorTaskList(page, query);
+    public Page<KnowledgeBaseVectorTask> findVectorTaskList(
+            Page<KnowledgeBaseVectorTask> page,
+            KnowledgeDocumentDTO query) {
+        KnowledgeAccessPrincipal principal = knowledgeAccessContext.getRequiredPrincipal();
+        return baseMapper.findVectorTaskList(page, query, principal.tenantId());
     }
 
     /**
-     * 更新文档状态。
-     *
-     * 文档状态不是 PUBLISHED 后，就不会被企业文档问答服务检索。
-     * 这里不删除切片和向量，方便后续恢复、审计和历史追溯。
+     * 更新当前租户内的文档状态。
      */
-    private void updateDocumentStatus(Long documentId, String status) {
-        if (documentId == null) {
-            throw new BusinessException(ErrorCode.BAD_REQUEST, "文档ID不能为空");
-        }
-        KnowledgeDocument document = lambdaQuery()
-                .eq(KnowledgeDocument::getId, documentId)
-                .eq(KnowledgeDocument::getDelFlag, 0)
-                .one();
-        if (document == null) {
-            throw new BusinessException(ErrorCode.NOT_FOUND, "文档不存在");
-        }
+    private void updateDocumentStatus(
+            Long documentId,
+            String status) {
+
+        KnowledgeAccessPrincipal principal =knowledgeAccessContext.getRequiredPrincipal();
+        KnowledgeDocument document = getTenantDocument(
+                documentId,
+                principal.tenantId()
+        );
         document.setStatus(status);
         document.setUpdatedAt(LocalDateTime.now());
-        this.updateById(document);
+        updateById(document);
+    }
+
+    /**
+     * 查询当前租户内的文档。
+     *
+     * 无权访问其他租户文档时统一返回文档不存在，
+     * 避免通过错误信息探测其他租户的文档ID。
+     */
+    private KnowledgeDocument getTenantDocument(Long documentId,Long tenantId) {
+        if (documentId == null || documentId <= 0) {
+            throw new BusinessException(
+                    ErrorCode.BAD_REQUEST,
+                    "文档ID必须大于0"
+            );
+        }
+        return Optional.ofNullable(
+                lambdaQuery().eq(KnowledgeDocument::getId, documentId)
+                        .eq(KnowledgeDocument::getTenantId, tenantId)
+                        .eq(KnowledgeDocument::getDelFlag, 0)
+                        .one()
+        ).orElseThrow(() -> new BusinessException(ErrorCode.NOT_FOUND,"文档不存在"));
     }
 }

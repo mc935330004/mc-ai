@@ -12,6 +12,7 @@ import org.example.ai.agent.chat.vo.ChatMessageVO;
 import org.example.ai.agent.chat.vo.ChatModelVO;
 import org.example.ai.agent.chat.vo.ChatSessionVO;
 import org.example.ai.agent.common.result.Result;
+import org.example.ai.agent.modules.knowledgebase.security.KnowledgeAccessContext;
 import org.example.ai.agent.security.CurrentUserProvider;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
@@ -28,6 +29,7 @@ public class AgentChatController {
     private final CurrentUserProvider currentUserProvider;
     private final AgentStreamVersionResolver streamVersionResolver;
     private final AiChatSessionService aiChatSessionService;
+    private final KnowledgeAccessContext knowledgeAccessContext;
     /**
      * 流式聊天入口。
      * 1：兼容旧前端。
@@ -42,6 +44,13 @@ public class AgentChatController {
         request.setUserId(userId);
         // 用户身份与认证信息只能由服务端从请求头读取
         request.setAuthorization(currentUserProvider.getRequiredAuthorization());
+        /*
+         * Agent主体会在线程池中异步执行，
+         * 必须在当前请求线程提前捕获可信租户和部门身份。
+         */
+        request.setKnowledgeAccessPrincipal(
+                knowledgeAccessContext.getCurrentPrincipal()
+        );
        //  模型编码由后端严格校验，未配置或已停用时拒绝请求。
         String modelCode = aiChatSessionService.resolveModelCode(
                 userId,

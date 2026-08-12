@@ -132,18 +132,17 @@ public class AgentAccessInterceptor
                 || "OPTIONS".equalsIgnoreCase(method);
     }
 
+    /**
+     * 判断当前接口是否允许普通已登录用户访问。
+     *
+     * 普通用户只允许使用聊天、待确认操作、动态表单以及知识库问答接口。
+     * 知识库文档、分类、版本、切片和查询日志管理接口继续要求管理员权限。
+     */
     private boolean isChatUserPath(String path) {
-        return PATH_MATCHER.match(
-                "/api/agent/chat/**",
-                path)
-                || PATH_MATCHER.match(
-                "/api/agent/actions/**",
-                path)
-                /*
-                 * 动态表单远程选项和文件上传属于聊天能力。
-                 */
-                || PATH_MATCHER.match(
-                "/api/agent/capabilities/*/fields/**",
-                path);
+        return PATH_MATCHER.match("/api/agent/chat/**",path)
+                || PATH_MATCHER.match("/api/agent/actions/**",path )
+                || PATH_MATCHER.match("/api/agent/capabilities/*/fields/**",path)
+                || "/api/knowledge/documents/query".equals(path)
+                || "/api/knowledge/documents/query/stream".equals(path);
     }
 }

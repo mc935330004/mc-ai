@@ -11,6 +11,8 @@
         d.document_code AS documentCode,
         d.owner_dept AS ownerDept,
         d.status,
+        d.access_scope AS accessScope,
+        d.owner_dept_id AS ownerDeptId,
         d.current_version_id AS currentVersionId,
         d.summary,
         v.version_no AS currentVersionNo,
@@ -23,6 +25,7 @@
         LEFT JOIN knowledge_document_version v ON d.current_version_id = v.id AND v.del_flag = 0
         LEFT JOIN knowledge_category kc on d.category_id = kc.id AND kc.del_flag = 0
         WHERE d.del_flag = 0
+        AND d.tenant_id = #{tenantId}
         <if test="query.keyword != null and query.keyword != ''">
             AND (
             d.title LIKE CONCAT('%', #{query.keyword}, '%')
@@ -62,10 +65,11 @@
         left join knowledge_document kd on kd.id = kt.document_id
         left join knowledge_document_version kv on kv.id = kt.version_id
         <where>
-             kd.del_flag=0
-        <if test="query.keyword != null and query.keyword != ''">
-            AND kd.title LIKE CONCAT('%', #{query.keyword}, '%')
-        </if>
+            kd.del_flag = 0
+            AND kd.tenant_id = #{tenantId}
+            <if test="query.keyword != null and query.keyword != ''">
+                AND kd.title LIKE CONCAT('%', #{query.keyword}, '%')
+            </if>
         </where>
     </select>
 </mapper>

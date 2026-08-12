@@ -47,6 +47,14 @@ public class KnowledgeDocumentUploadRequest {
     private String ownerDept;
 
     /**
+     * 文档访问范围。
+     *
+     * PUBLIC表示当前租户公开；
+     * DEPARTMENT表示仅当前部门可检索。
+     */
+    private String accessScope = "PUBLIC";
+
+    /**
      * 版本号，例如：v1.0、v1.1。
      */
     @NotBlank(message = "版本号不能为空")

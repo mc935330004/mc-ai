@@ -22,6 +22,22 @@ public class KnowledgeQueryLog {
     private Long id;
 
     /**
+     * PM租户ID。
+     *
+     * 该字段由服务端认证上下文写入，
+     * 禁止从前端请求中获取。
+     */
+    @TableField("tenant_id")
+    private Long tenantId;
+
+    /**
+     * PM提问人员编码。
+     */
+    @TableField("user_id")
+    private String userId;
+
+
+    /**
      * 用户问题
      */
     @TableField("question")

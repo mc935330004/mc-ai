@@ -740,7 +740,8 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
         return knowledgeDocumentQueryService.query(
                 ragRequest,
                 ragContext,
-                request.getConversationMemory()
+                request.getConversationMemory(),
+                request.getKnowledgeAccessPrincipal()
         );
     }
 

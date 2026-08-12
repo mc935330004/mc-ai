@@ -25,16 +25,11 @@ public class KnowledgeChunkController {
         return Result.success(chunkService.findChunksByDocumentVersionId(page, keyword));
     }
 
-
     /**
-     * 启用或禁用切片。
-     *
-     * enabled=false 后，该切片后续不应参与正式检索。
-     * 注意：当前只改 MySQL 状态，下一步再让查询服务过滤 enabled chunk。
+     * 启用或禁用知识文档切片。
      */
-    @GetMapping("/enabled")
-    public Result<?> updateEnabled(@RequestParam("id") Long id,
-                                   @RequestParam("enabled") Integer enabled) {
+    @PatchMapping("/enabled")
+    public Result<Void> updateEnabled(@RequestParam("id") Long id,@RequestParam("enabled") Integer enabled) {
         chunkService.updateEnabled(id, enabled);
         return Result.success("切片状态更新成功");
     }

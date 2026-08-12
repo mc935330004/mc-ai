@@ -12,6 +12,11 @@ import org.example.ai.agent.modules.knowledgebase.entity.KnowledgeDocumentVersio
 import org.example.ai.agent.modules.knowledgebase.model.VectorStatus;
 import org.example.ai.agent.modules.knowledgebase.service.*;
 import org.example.ai.agent.modules.knowledgebase.service.*;
+import org.example.ai.agent.common.exception.BusinessException;
+import org.example.ai.agent.common.exception.ErrorCode;
+import org.example.ai.agent.modules.knowledgebase.model.KnowledgeDocumentAccessScope;
+import org.example.ai.agent.modules.knowledgebase.security.KnowledgeAccessContext;
+import org.example.ai.agent.modules.knowledgebase.security.KnowledgeAccessPrincipal;
 
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -34,6 +39,7 @@ public class KnowledgeDocumentUploadServiceImpl implements KnowledgeDocumentUplo
     private final FileValidationService fileValidationService;
     private final ContentTypeDetectionService contentTypeDetectionService;
     private final FileHashService fileHashService;
+    private final KnowledgeAccessContext knowledgeAccessContext;
 
     /**
      * 上传企业知识文档，并创建文档版本和向量化任务。
@@ -41,6 +47,14 @@ public class KnowledgeDocumentUploadServiceImpl implements KnowledgeDocumentUplo
     @Override
     @Transactional(rollbackFor = Exception.class)
     public KnowledgeDocumentUploadResponse upload(KnowledgeDocumentUploadRequest request) {
+
+        /*
+         * 必须在保存文件之前校验身份和访问范围，
+         * 避免权限参数错误时已经产生孤立文件。
+         */
+        KnowledgeAccessPrincipal principal =knowledgeAccessContext.getRequiredPrincipal();
+        KnowledgeDocumentAccessScope accessScope = resolveAccessScope(request, principal);
+
         var file = request.getFile();
         // 1. 校验文件大小、空文件等基础规则
         fileValidationService.validateFile(file, MAX_FILE_SIZE, "知识文档");
@@ -60,7 +74,7 @@ public class KnowledgeDocumentUploadServiceImpl implements KnowledgeDocumentUplo
         // 5. 保存原始文件，数据库只保存存储路径
         String storagePath = fileStorageService.saveKnowledgeBase(file);
         // 6. 创建文档主表
-        KnowledgeDocument document = buildDocument(request);
+        KnowledgeDocument document = buildDocument(request, principal, accessScope);
         documentService.save(document);
         // 7. 创建文档版本表
         KnowledgeDocumentVersion version = buildVersion(request, document.getId(), contentType, fileHash, storagePath);
@@ -81,16 +95,38 @@ public class KnowledgeDocumentUploadServiceImpl implements KnowledgeDocumentUplo
     }
 
     /**
-     * 构建文档主表
-     * @param request
-     * @return
+     * 使用服务端认证身份构建文档主记录。
      */
-    private KnowledgeDocument buildDocument(KnowledgeDocumentUploadRequest request) {
+    private KnowledgeDocument buildDocument(
+            KnowledgeDocumentUploadRequest request,
+            KnowledgeAccessPrincipal principal,
+            KnowledgeDocumentAccessScope accessScope) {
+
         KnowledgeDocument document = new KnowledgeDocument();
+        document.setTenantId(principal.tenantId());
         document.setCategoryId(request.getCategoryId());
         document.setTitle(request.getTitle().trim());
-        document.setDocumentCode(trimToNull(request.getDocumentCode()));
-        document.setOwnerDept(trimToNull(request.getOwnerDept()));
+        document.setDocumentCode(
+                trimToNull(request.getDocumentCode())
+        );
+
+        /*
+         * ownerDept仅用于页面展示，不参与安全判断。
+         */
+        document.setOwnerDept(
+                trimToNull(request.getOwnerDept())
+        );
+        document.setAccessScope(accessScope.name());
+
+        /*
+         * 部门文档必须绑定当前登录人员的可信部门ID。
+         */
+        document.setOwnerDeptId(
+                accessScope == KnowledgeDocumentAccessScope.DEPARTMENT
+                        ? principal.deptId()
+                        : null
+        );
+
         document.setStatus("DRAFT");
         document.setSummary(trimToNull(request.getSummary()));
         document.setCurrentVersionId(null);
@@ -98,6 +134,24 @@ public class KnowledgeDocumentUploadServiceImpl implements KnowledgeDocumentUplo
         document.setCreatedAt(LocalDateTime.now());
         document.setUpdatedAt(LocalDateTime.now());
         return document;
+    }
+
+    /**
+     * 校验上传文档的访问范围。
+     */
+    private KnowledgeDocumentAccessScope resolveAccessScope(
+            KnowledgeDocumentUploadRequest request,
+            KnowledgeAccessPrincipal principal) {
+        KnowledgeDocumentAccessScope accessScope =KnowledgeDocumentAccessScope.from( request.getAccessScope());
+        if (accessScope == KnowledgeDocumentAccessScope.DEPARTMENT
+                && (principal.deptId() == null
+                || principal.deptId() <= 0)) {
+            throw new BusinessException(
+                    ErrorCode.BAD_REQUEST,
+                    "当前登录用户没有有效部门，不能创建部门可见文档"
+            );
+        }
+        return accessScope;
     }
 
     /**

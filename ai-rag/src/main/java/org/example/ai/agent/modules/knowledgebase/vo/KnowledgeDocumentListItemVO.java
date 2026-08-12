@@ -42,6 +42,19 @@ public class KnowledgeDocumentListItemVO {
     private String ownerDept;
 
     /**
+     * 文档访问范围：PUBLIC、DEPARTMENT。
+     */
+    private String accessScope;
+
+    /**
+     * 文档归属部门ID。
+     *
+     * 该字段仅用于管理端确认配置结果，
+     * 普通聊天接口不返回该字段。
+     */
+    private Long ownerDeptId;
+
+    /**
      * 知识文档状态。
      */
     private String status;

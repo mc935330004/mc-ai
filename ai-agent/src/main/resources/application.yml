@@ -86,6 +86,9 @@ app:
     # 单个向量化任务最大处理时间，超过后进入恢复或失败流程
     timeout-minutes: 30
   agent:
+    legacy-direct-chat:
+      # 旧版模型直连接口默认关闭，紧急回滚时才临时开启。
+      enabled: ${LEGACY_DIRECT_CHAT_ENABLED:false}
     stream:
       # 单次SSE连接最长保留3分钟
       timeout-ms: 180000

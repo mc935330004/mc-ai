@@ -1,13 +1,28 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!DOCTYPE mapper
+        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
 <mapper namespace="org.example.ai.agent.modules.KnowledgeLog.mapper.KnowledgeQueryReferenceMapper">
 
+    <!-- 通过所属日志强制执行租户隔离。 -->
     <select id="getReferences"
             resultType="org.example.ai.agent.modules.KnowledgeLog.entity.KnowledgeQueryReference">
-        select * from knowledge_query_reference
-        <where>
-            query_log_id = #{logId}
-        </where>
-        order by created_at desc
+        SELECT
+            kr.id,
+            kr.query_log_id AS queryLogId,
+            kr.document_id AS documentId,
+            kr.version_id AS versionId,
+            kr.chunk_id AS chunkId,
+            kr.chunk_index AS chunkIndex,
+            kr.source,
+            kr.created_at AS createdAt
+        FROM knowledge_query_reference kr
+                 INNER JOIN knowledge_query_log kl
+                            ON kl.id = kr.query_log_id
+                                AND kl.tenant_id = #{tenantId}
+        WHERE kr.query_log_id = #{logId}
+        ORDER BY kr.created_at DESC
     </select>
+
 </mapper>

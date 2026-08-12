@@ -4,16 +4,26 @@
 
     <select id="findChunksByDocumentVersionId"
             resultType="org.example.ai.agent.modules.knowledgebase.entity.KnowledgeChunk">
-        select kc.*,kv.original_filename,kv.version_no,kd.status as documentStatus from knowledge_chunk kc
-        LEFT JOIN knowledge_document_version kv on kc.version_id = kv.id
-        left join knowledge_document kd on kc.document_id = kd.id
-        <where>
-            kv.del_flag = 0 and kc.del_flag = 0
-           <if test="keyword != null and keyword != ''">
-               and (kv.original_filename like CONCAT('%', #{keyword}, '%') or
-               kv.version_no like CONCAT('%', #{keyword}, '%'))
-           </if>
-        </where>
-        order by kc.created_at desc
+        SELECT
+        kc.*,
+        kv.original_filename,
+        kv.version_no,
+        kd.status AS documentStatus
+        FROM knowledge_chunk kc
+        INNER JOIN knowledge_document_version kv
+        ON kc.version_id = kv.id
+        AND kv.del_flag = 0
+        INNER JOIN knowledge_document kd
+        ON kc.document_id = kd.id
+        AND kd.del_flag = 0
+        AND kd.tenant_id = #{tenantId}
+        WHERE kc.del_flag = 0
+        <if test="keyword != null and keyword != ''">
+            AND (
+            kv.original_filename LIKE CONCAT('%', #{keyword}, '%')
+            OR kv.version_no LIKE CONCAT('%', #{keyword}, '%')
+            )
+        </if>
+        ORDER BY kc.created_at DESC
     </select>
 </mapper>
