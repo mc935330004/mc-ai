@@ -1,8 +1,10 @@
 package org.example.ai.agent.workflow.answer.report;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.example.ai.agent.capability.entity.FieldDictionary;
 import org.example.ai.agent.common.enums.ReportQueryType;
 import org.example.ai.agent.common.enums.ReportType;
+import org.example.ai.agent.graph.compiler.CompiledGraphSpec;
 import org.example.ai.agent.workflow.answer.report.config.ConfigurableReportSectionBuilder;
 import org.example.ai.agent.workflow.answer.report.config.ReportDefinitionResolver;
 import org.example.ai.agent.workflow.answer.report.config.ResolvedReportDefinition;
@@ -50,12 +52,154 @@ public class ReportSchemaBuilder {
             String artifactId,
             ReportQueryType queryType) {
 
+        ReportTemplate reportTemplate = outcome == null
+                ? null
+                : reportTemplateRegistry
+                .find(outcome.workflowCode())
+                .orElse(null);
+
+        List<String> warnings = outcome == null
+                ? new ArrayList<>()
+                : buildWarnings(
+                        WorkflowResultTraceData.from(
+                                outcome,
+                                "REPORT"
+                        )
+                );
+
+        ResolvedReportDefinition configuredReport =
+                resolveConfiguredReport(
+                        outcome,
+                        reportTemplate,
+                        warnings
+                );
+
+        return buildReport(
+                outcome,
+                artifactId,
+                queryType,
+                reportTemplate,
+                configuredReport,
+                null,
+                false,
+                warnings
+        );
+    }
+
+    /**
+     * 根据临时编译图和临时报告定义构建预览报告。
+     *
+     * 草稿执行没有发布版本ID，
+     * 因此字段策略由临时编译图提供。
+     */
+    public ReportSchemaVO buildDraft(
+            WorkflowExecutionOutcome outcome,
+            CompiledGraphSpec compiledGraph,
+            ResolvedReportDefinition configuredReport,
+            ReportQueryType queryType) {
+
+        ReportTemplate reportTemplate = outcome == null
+                ? null
+                : reportTemplateRegistry
+                .find(outcome.workflowCode())
+                .orElse(null);
+
+        WorkflowAnswerFieldPolicy fieldPolicy =
+                fieldContextResolver.resolveDraftPolicy(
+                        compiledGraph,
+                        outcome == null
+                                ? null
+                                : outcome.result()
+                );
+
+        validateDraftReportFields(
+                configuredReport,
+                fieldPolicy
+        );
+
+        List<String> warnings = outcome == null
+                ? new ArrayList<>()
+                : buildWarnings(
+                        WorkflowResultTraceData.from(
+                                outcome,
+                                "REPORT"
+                        )
+                );
+
+        return buildReport(
+                outcome,
+                null,
+                queryType,
+                reportTemplate,
+                reportTemplate == null
+                        ? configuredReport
+                        : null,
+                fieldPolicy,
+                true,
+                warnings
+        );
+    }
+
+    /**
+     * 草稿报告只能引用本次安全结果中真实出现的字段。
+     */
+    private void validateDraftReportFields(
+            ResolvedReportDefinition configuredReport,
+            WorkflowAnswerFieldPolicy fieldPolicy) {
+
+        if (configuredReport == null) {
+            return;
+        }
+
+        for (FieldDictionary dictionary :
+                configuredReport.fieldsById().values()) {
+
+            boolean present = fieldPolicy.visibleFields()
+                    .stream()
+                    .anyMatch(field ->
+                            java.util.Objects.equals(
+                                    dictionary.getCapabilityCode(),
+                                    field.capabilityCode()
+                            ) && (
+                                    java.util.Objects.equals(
+                                            dictionary.getFieldPath(),
+                                            field.fieldPath()
+                                    ) || java.util.Objects.equals(
+                                            dictionary.getFieldName(),
+                                            field.fieldName()
+                                    )
+                            )
+                    );
+
+            if (!present) {
+                throw new IllegalStateException(
+                        "报告字段没有出现在本次运行结果中，fieldId="
+                                + dictionary.getId()
+                );
+            }
+        }
+    }
+
+    /**
+     * 组装正式报告和草稿预览共用的 ReportSchema。
+     */
+    private ReportSchemaVO buildReport(
+            WorkflowExecutionOutcome outcome,
+            String artifactId,
+            ReportQueryType queryType,
+            ReportTemplate reportTemplate,
+            ResolvedReportDefinition configuredReport,
+            WorkflowAnswerFieldPolicy fieldPolicy,
+            boolean previewMode,
+            List<String> warnings) {
+
         ReportQueryType safeQueryType =queryType == null
                         ? ReportQueryType.DATA_QUERY
                         : queryType;
 
         if (outcome == null) {
-            List<String> warnings = List.of("工作流没有返回结果");
+            List<String> emptyWarnings =
+                    List.of("工作流没有返回结果");
             // 工作流错误归属数据状态区，不写入 AI 分析风险。
             return new ReportSchemaVO(
                     ReportSchemaVO.CURRENT_SCHEMA_VERSION,
@@ -66,7 +210,7 @@ public class ReportSchemaBuilder {
                     "",
                     "FAILED",
                     false,
-                    List.of(buildWarningSection(warnings)),
+                    List.of(buildWarningSection(emptyWarnings)),
                     ReportSchemaVO.Analysis.initial(safeQueryType.name()),
                     ReportSchemaVO.Meta.empty()
             );
@@ -80,19 +224,11 @@ public class ReportSchemaBuilder {
                         ? artifactId
                         : outcome.runId();
 
-        ReportTemplate reportTemplate = reportTemplateRegistry
-                .find(outcome.workflowCode())
-                .orElse(null);
-
-    // 数据提示先创建，配置报告解析失败时需要追加告警。
-        List<String> warnings = buildWarnings(trace);
-
-        ResolvedReportDefinition configuredReport = resolveConfiguredReport(
-                        outcome,
-                        reportTemplate,
-                        warnings
-                );
-        boolean analysisRequired =resolveAnalysisRequired(safeQueryType,configuredReport);
+        boolean analysisRequired = !previewMode
+                && resolveAnalysisRequired(
+                safeQueryType,
+                configuredReport
+        );
         String reportType;
         if (reportTemplate != null) {
             reportType = reportTemplate.reportType().name();
@@ -123,7 +259,14 @@ public class ReportSchemaBuilder {
                           ? "BASE_READY"
                           : "PARTIAL";
 
-        List<ReportSchemaVO.Section> sections =buildReportSections( outcome,trace,reportTemplate,configuredReport,warnings );
+        List<ReportSchemaVO.Section> sections =buildReportSections(
+                outcome,
+                trace,
+                reportTemplate,
+                configuredReport,
+                fieldPolicy,
+                warnings
+        );
 
         ReportSchemaVO.Meta meta = new ReportSchemaVO.Meta(
                         trace.topLevelTotalCount(),
@@ -221,6 +364,7 @@ public class ReportSchemaBuilder {
             WorkflowResultTraceData trace,
             ReportTemplate reportTemplate,
             ResolvedReportDefinition configuredReport,
+            WorkflowAnswerFieldPolicy fieldPolicy,
             List<String> warnings) {
 
         if (reportTemplate == null && configuredReport == null) {
@@ -229,7 +373,9 @@ public class ReportSchemaBuilder {
         }
         List<ReportSchemaVO.Section> sections = new ArrayList<>();
         try {
-            WorkflowAnswerFieldPolicy policy =fieldContextResolver.resolvePolicy(outcome);
+            WorkflowAnswerFieldPolicy policy = fieldPolicy == null
+                    ? fieldContextResolver.resolvePolicy(outcome)
+                    : fieldPolicy;
             if (outcome.result() != null && policy.visibleFields().isEmpty()) {
                 warnings.add("字段展示策略未就绪，明细暂不展示");
                 sections.add(buildMetricsSection(trace));

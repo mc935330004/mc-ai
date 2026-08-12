@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import org.example.ai.agent.capability.entity.FieldDictionary;
 import org.example.ai.agent.capability.mapper.FieldDictionaryMapper;
+import org.example.ai.agent.graph.compiler.CompiledGraphSpec;
 import org.example.ai.agent.workflow.runtime.PublishedWorkflow;
 import org.example.ai.agent.workflow.runtime.WorkflowExecutionOutcome;
 import org.example.ai.agent.workflow.runtime.WorkflowRuntimeSnapshotResolver;
@@ -67,13 +68,48 @@ public class WorkflowAnswerFieldContextResolver {
                         workflow.compiledGraph()
                 );
 
+        return resolvePolicy(
+                capabilityCodes,
+                outcome.result()
+        );
+    }
+
+    /**
+     * 根据临时编译图生成字段安全策略。
+     *
+     * 草稿预览没有发布版本ID，
+     * 但必须执行与正式报告相同的字段字典过滤规则。
+     */
+    public WorkflowAnswerFieldPolicy resolveDraftPolicy(
+            CompiledGraphSpec compiledGraph,
+            Object result) {
+
+        if (compiledGraph == null || result == null) {
+            return WorkflowAnswerFieldPolicy.empty();
+        }
+
+        return resolvePolicy(
+                capabilityCodeCollector.collect(
+                        compiledGraph
+                ),
+                result
+        );
+    }
+
+    /**
+     * 使用确定的能力范围和真实结果生成字段策略。
+     */
+    private WorkflowAnswerFieldPolicy resolvePolicy(
+            List<String> capabilityCodes,
+            Object result) {
+
         if (capabilityCodes.isEmpty()) {
             return WorkflowAnswerFieldPolicy.empty();
         }
 
         Set<String> returnedFieldNames =
                 collectReturnedFieldNames(
-                        outcome.result()
+                        result
                 );
 
         if (returnedFieldNames.isEmpty()) {
