@@ -10,6 +10,7 @@ import lombok.RequiredArgsConstructor;
 import org.example.ai.agent.capability.dto.FieldDictionaryBatchConfirmDTO;
 import org.example.ai.agent.capability.dto.FieldDictionaryCandidateDTO;
 import org.example.ai.agent.capability.dto.FieldDictionaryGenerateDTO;
+import org.example.ai.agent.capability.dto.FieldDictionaryDisplayOptionsDTO;
 import org.example.ai.agent.capability.dto.FieldDictionarySaveDTO;
 import org.example.ai.agent.capability.entity.CapabilityDefinition;
 import org.example.ai.agent.capability.entity.FieldDictionary;
@@ -52,6 +53,14 @@ public class FieldDictionaryServiceImpl extends ServiceImpl<FieldDictionaryMappe
             "sort","optimizeCountSql","code","pages","searchCount","msg",
             "remark"
     );
+
+    /**
+     * 后台能够识别的数字字段类型。
+     */
+    private static final Set<String> NUMBER_FIELD_TYPES = Set.of(
+            "number", "integer", "int", "long", "float",
+            "double", "decimal", "bigdecimal", "numeric"
+    );
     @Override
     public Page<FieldDictionary> listByCapabilityCode(Page<FieldDictionary>page,String capabilityCode) {
         return baseMapper.listByCapabilityCode(page, capabilityCode);
@@ -84,8 +93,73 @@ public class FieldDictionaryServiceImpl extends ServiceImpl<FieldDictionaryMappe
 
         entity.setDisplayGroup(dto.getDisplayGroup());
 
-        entity.setNullDisplayText(StringUtils.hasText(dto.getNullDisplayText()) ? dto.getNullDisplayText().trim(): "当前数据中未提供");
+        entity.setNullDisplayText(resolveNullDisplayText(dto.getFieldType()));
         return saveOrUpdate(entity);
+    }
+
+    @Override
+    public Boolean updateDisplayOptions(
+            Long id,
+            FieldDictionaryDisplayOptionsDTO dto) {
+
+        if (id == null || getById(id) == null) {
+            throw new BusinessException(404, "字段字典不存在：" + id);
+        }
+        validateBinaryOption(dto);
+
+        int visible = dto.getVisible();
+        int requiredOutput = visible == 0
+                ? 0
+                : dto.getRequiredOutput();
+
+        boolean updated = lambdaUpdate()
+                .eq(FieldDictionary::getId, id)
+                .set(FieldDictionary::getVisible, visible)
+                .set(FieldDictionary::getRequiredOutput, requiredOutput)
+                .set(FieldDictionary::getSearchable, dto.getSearchable())
+                .set(FieldDictionary::getAggregatable, dto.getAggregatable())
+                .update();
+        if (!updated) {
+            throw new BusinessException(404, "字段字典不存在：" + id);
+        }
+        return true;
+    }
+
+    /**
+     * 校验列表快捷编辑只接收 0 或 1。
+     */
+    private void validateBinaryOption(
+            FieldDictionaryDisplayOptionsDTO dto) {
+
+        if (dto == null
+                || !isBinary(dto.getVisible())
+                || !isBinary(dto.getRequiredOutput())
+                || !isBinary(dto.getSearchable())
+                || !isBinary(dto.getAggregatable())) {
+
+            throw new BusinessException(
+                    400,
+                    "字段快捷配置只能使用0或1"
+            );
+        }
+    }
+
+    private boolean isBinary(Integer value) {
+        return Integer.valueOf(0).equals(value)
+                || Integer.valueOf(1).equals(value);
+    }
+
+    /**
+     * 数字字段空值显示为0，其他字段不设置默认文本。
+     */
+    private String resolveNullDisplayText(String fieldType) {
+        String normalized = fieldType == null
+                ? ""
+                : fieldType.trim().toLowerCase(Locale.ROOT);
+
+        return NUMBER_FIELD_TYPES.contains(normalized)
+                ? "0"
+                : null;
     }
 
     @Override
@@ -151,6 +225,9 @@ public class FieldDictionaryServiceImpl extends ServiceImpl<FieldDictionaryMappe
                     if (field.getCreatedAt() == null) {
                         field.setCreatedAt(LocalDateTime.now());
                     }
+                    field.setNullDisplayText(
+                            resolveNullDisplayText(field.getFieldType())
+                    );
                 }).toList();
 
         return needSaveList.isEmpty() || saveBatch(needSaveList);
@@ -304,6 +381,9 @@ public class FieldDictionaryServiceImpl extends ServiceImpl<FieldDictionaryMappe
             entity.setSearchable( item.getSearchable() == null ? 1
                             : item.getSearchable());
             entity.setAggregatable( item.getAggregatable() == null ? 1 : item.getAggregatable());
+            entity.setNullDisplayText(
+                    resolveNullDisplayText(entity.getFieldType())
+            );
             entity.setCreatedAt(LocalDateTime.now());
             entities.add(entity);
             });

@@ -45,6 +45,19 @@ public class FieldDictionaryController {
     }
 
     /**
+     * 更新字段用途、回答规则、搜索和聚合配置。
+     */
+    @PostMapping("/{id}/display-options")
+    public Result<Boolean> updateDisplayOptions(
+            @PathVariable Long id,
+            @RequestBody FieldDictionaryDisplayOptionsDTO dto) {
+
+        return Result.success(
+                fieldDictionaryService.updateDisplayOptions(id, dto)
+        );
+    }
+
+    /**
      * 删除字段字典。
      *
      * 字段字典可以物理删除；能力定义不要物理删除。

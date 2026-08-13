@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.IService;
 import org.example.ai.agent.capability.dto.FieldDictionaryBatchConfirmDTO;
 import org.example.ai.agent.capability.dto.FieldDictionaryGenerateDTO;
+import org.example.ai.agent.capability.dto.FieldDictionaryDisplayOptionsDTO;
 import org.example.ai.agent.capability.dto.FieldDictionarySaveDTO;
 import org.example.ai.agent.capability.entity.FieldDictionary;
 import org.example.ai.agent.capability.vo.FieldDictionaryBatchSaveResultVO;
@@ -25,6 +26,14 @@ public interface FieldDictionaryService extends IService<FieldDictionary> {
      * 新增或修改字段字典。
      */
     Boolean saveField(FieldDictionarySaveDTO dto);
+
+    /**
+     * 更新字段字典列表中的四个快捷配置。
+     */
+    Boolean updateDisplayOptions(
+            Long id,
+            FieldDictionaryDisplayOptionsDTO dto
+    );
 
     /**
      * 删除字段字典。

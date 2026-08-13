@@ -609,3 +609,21 @@ CREATE INDEX idx_pending_action_status_updated
 
 CREATE INDEX idx_alert_record_status_resolved
     ON ai_alert_record (status, resolved_at);
+
+-- ============================================================
+-- 字段字典空值显示规则统一
+--
+-- 说明：
+-- 1. 数字字段空值显示为0；
+-- 2. 其他字段不设置默认文本；
+-- 3. Flyway关闭时，由你在目标环境按需手工执行。
+-- ============================================================
+
+UPDATE ai_field_dictionary
+SET null_display_text = CASE
+    WHEN LOWER(TRIM(field_type)) IN (
+        'number', 'integer', 'int', 'long', 'float',
+        'double', 'decimal', 'bigdecimal', 'numeric'
+    ) THEN '0'
+    ELSE NULL
+END;
