@@ -186,42 +186,7 @@ public class WorkflowGraphSnapshotFactory {
 
         return sha256(json);
     }
-    /**
-     * 计算工作流执行结构校验值。
-     *
-     * 报告定义不参与该校验值计算，
-     * 因此调整报告字段后可以复用同一次业务执行结果。
-     *
-     * 节点、连线、输入Schema、能力配置、
-     * 参数映射和分页配置仍然参与校验。
-     */
-    public String executionChecksum(
-            String graphSpecJson) {
 
-        if (!StringUtils.hasText(graphSpecJson)) {
-            throw new IllegalArgumentException(
-                    "待计算执行结构校验值的GraphSpec不能为空"
-            );
-        }
-
-        GraphSpec graph =
-                graphSpecParser.parse(graphSpecJson);
-
-        /*
-         * 报告配置不影响业务能力执行，
-         * 因此从执行结构校验值中排除。
-         */
-        graph.setReportDefinition(null);
-
-        JsonNode canonicalNode =
-                canonicalize(
-                        objectMapper.valueToTree(graph)
-                );
-
-        return sha256(
-                writeJson(canonicalNode)
-        );
-    }
     /**
      * 对JSON对象字段递归排序。
      *

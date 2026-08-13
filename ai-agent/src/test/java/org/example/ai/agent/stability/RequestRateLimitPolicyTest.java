@@ -41,10 +41,6 @@ class RequestRateLimitPolicyTest {
         ));
         assertTrue(policy.isExpensive(
                 "POST",
-                "/api/agent/workflows/12/draft-report-preview"
-        ));
-        assertTrue(policy.isExpensive(
-                "POST",
                 "/api/agent/capabilityOpenapi/sync-preview"
         ));
     }

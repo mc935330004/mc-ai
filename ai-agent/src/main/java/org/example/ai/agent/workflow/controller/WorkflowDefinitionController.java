@@ -1,15 +1,10 @@
 package org.example.ai.agent.workflow.controller;
 
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
-import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.example.ai.agent.common.result.Result;
 import org.example.ai.agent.security.CurrentUserProvider;
-import org.example.ai.agent.chat.vo.ReportSchemaVO;
-import org.example.ai.agent.workflow.answer.report.WorkflowDraftReportPreviewService;
 import org.example.ai.agent.workflow.dto.WorkflowDebugRequestDTO;
-import org.example.ai.agent.workflow.dto.WorkflowDraftReportPreviewRequestDTO;
-import org.example.ai.agent.workflow.dto.WorkflowDraftPreviewRequestDTO;
 import org.example.ai.agent.workflow.dto.WorkflowSaveDTO;
 import org.example.ai.agent.workflow.entity.WorkflowDefinition;
 import org.example.ai.agent.workflow.entity.WorkflowVersion;
@@ -36,7 +31,6 @@ public class WorkflowDefinitionController {
     private final WorkflowDefinitionService workflowService;
     private final CurrentUserProvider currentUserProvider;
     private final WorkflowDebugService workflowDebugService;
-    private final WorkflowDraftReportPreviewService workflowDraftReportPreviewService;
 
     /**
      * 分页查询工作流。
@@ -160,41 +154,6 @@ public class WorkflowDefinitionController {
                 )
         );
     }
-
-    /**
-     * 执行前端传入的临时工作流草稿。
-     *
-     * 本接口不会修改数据库中的工作流定义。
-     */
-    @PostMapping("/{id}/draft-preview")
-    public Result<WorkflowExecutionOutcome> previewDraft(@PathVariable Long id, @Valid @RequestBody WorkflowDraftPreviewRequestDTO request) {
-        return Result.success(workflowDebugService.previewDraft(id, request, currentUserProvider.getRequiredUserId(),
-                        currentUserProvider.getRequiredAuthorization()));
-    }
-
-    /**
-     * 使用临时报告定义预览 ReportSchema。
-     *
-     * 本接口复用已有 DEBUG 安全结果，
-     * 不会再次调用业务系统。
-     */
-    @PostMapping("/{id}/draft-report-preview")
-    public Result<ReportSchemaVO> previewDraftReport(
-            @PathVariable Long id,
-            @Valid
-            @RequestBody
-            WorkflowDraftReportPreviewRequestDTO request) {
-
-        return Result.success(
-                workflowDraftReportPreviewService.preview(
-                        id,
-                        request,
-                        currentUserProvider
-                                .getRequiredUserId()
-                )
-        );
-    }
-
 
     @PostMapping("/{id}/debug")
     public Result<WorkflowExecutionOutcome> debug(@PathVariable Long id, @RequestBody(required = false) WorkflowDebugRequestDTO request) {

@@ -68,16 +68,6 @@ public class RequestRateLimitPolicy {
             return true;
         }
         if (HttpMethod.POST.matches(method)
-                && (PATH_MATCHER.match(
-                "/api/agent/workflows/*/draft-preview",
-                path
-        ) || PATH_MATCHER.match(
-                "/api/agent/workflows/*/draft-report-preview",
-                path
-        ))) {
-            return true;
-        }
-        if (HttpMethod.POST.matches(method)
                 && ("/api/agent/capabilityOpenapi/preview".equals(path)
                 || "/api/agent/capabilityOpenapi/import".equals(path)
                 || "/api/agent/capabilityOpenapi/sync-preview".equals(path)

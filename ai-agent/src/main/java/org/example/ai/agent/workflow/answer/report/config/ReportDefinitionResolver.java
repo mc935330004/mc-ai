@@ -4,7 +4,6 @@ import lombok.RequiredArgsConstructor;
 import org.example.ai.agent.capability.entity.FieldDictionary;
 import org.example.ai.agent.capability.mapper.FieldDictionaryMapper;
 import org.example.ai.agent.graph.GraphSpecParser;
-import org.example.ai.agent.graph.compiler.CompiledGraphSpec;
 import org.example.ai.agent.graph.model.GraphSpec;
 import org.example.ai.agent.graph.model.ReportFieldBindingSpec;
 import org.example.ai.agent.graph.model.report.ReportDefinitionSpec;
@@ -56,39 +55,6 @@ public class ReportDefinitionResolver {
         ReportDefinitionSpec definition =
                 graph.getReportDefinition();
 
-        return resolveDefinition(
-                definition,
-                workflow.compiledGraph()
-        );
-    }
-
-    /**
-     * 解析临时工作流中的报告定义。
-     *
-     * 草稿入口只使用已经通过编译校验的临时图，
-     * 不读取或伪造正式发布版本。
-     */
-    public Optional<ResolvedReportDefinition> resolveDraft(
-            GraphSpec graph,
-            CompiledGraphSpec compiledGraph) {
-
-        if (graph == null || compiledGraph == null) {
-            return Optional.empty();
-        }
-
-        return resolveDefinition(
-                graph.getReportDefinition(),
-                compiledGraph
-        );
-    }
-
-    /**
-     * 使用统一的字段字典规则解析报告定义。
-     */
-    private Optional<ResolvedReportDefinition> resolveDefinition(
-            ReportDefinitionSpec definition,
-            CompiledGraphSpec compiledGraph) {
-
         if (definition == null) {
             return Optional.empty();
         }
@@ -113,7 +79,7 @@ public class ReportDefinitionResolver {
         Set<String> workflowCapabilities =
                 new LinkedHashSet<>(
                         capabilityCodeCollector.collect(
-                                compiledGraph
+                                workflow.compiledGraph()
                         )
                 );
 
