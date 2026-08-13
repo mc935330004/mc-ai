@@ -1,0 +1,362 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="org.example.ai.agent.dashboard.mapper.DashboardMapper">
+
+    <!-- 能力当前配置状态。 -->
+    <select id="selectCapabilityStats"
+            resultType="org.example.ai.agent.dashboard.vo.DashboardOverviewVO$ResourceStats">
+        SELECT
+            COUNT(*) AS totalCount,
+            COALESCE(SUM(CASE WHEN publish_status = 'PUBLISHED' THEN 1 ELSE 0 END), 0) AS publishedCount,
+            COALESCE(SUM(CASE WHEN enabled = 1 THEN 1 ELSE 0 END), 0) AS enabledCount,
+            COALESCE(SUM(CASE WHEN access_scope = 'RESTRICTED' THEN 1 ELSE 0 END), 0) AS restrictedCount,
+            COALESCE(SUM(CASE WHEN draft_dirty = 1 THEN 1 ELSE 0 END), 0) AS draftDirtyCount
+        FROM ai_capability_definition
+    </select>
+
+    <!-- 工作流当前配置状态。 -->
+    <select id="selectWorkflowStats"
+            resultType="org.example.ai.agent.dashboard.vo.DashboardOverviewVO$ResourceStats">
+        SELECT
+            COUNT(*) AS totalCount,
+            COALESCE(SUM(CASE WHEN publish_status = 'PUBLISHED' THEN 1 ELSE 0 END), 0) AS publishedCount,
+            COALESCE(SUM(CASE WHEN enabled = 1 THEN 1 ELSE 0 END), 0) AS enabledCount,
+            COALESCE(SUM(CASE WHEN access_scope = 'RESTRICTED' THEN 1 ELSE 0 END), 0) AS restrictedCount,
+            COALESCE(SUM(CASE WHEN draft_dirty = 1 THEN 1 ELSE 0 END), 0) AS draftDirtyCount
+        FROM ai_workflow_definition
+    </select>
+
+    <!-- 一次用户提问对应一条Agent运行记录。 -->
+    <select id="selectRuntimeStats"
+            resultType="org.example.ai.agent.dashboard.vo.DashboardOverviewVO$RuntimeStats">
+        SELECT
+            COUNT(*) AS runCount,
+            COALESCE(SUM(CASE WHEN status = 'SUCCESS' THEN 1 ELSE 0 END), 0) AS successCount,
+            COALESCE(SUM(CASE WHEN status = 'FAILED' THEN 1 ELSE 0 END), 0) AS failedCount,
+            0 AS partialCount,
+            CASE
+                WHEN SUM(CASE WHEN status IN ('SUCCESS', 'FAILED') THEN 1 ELSE 0 END) = 0 THEN 0
+                ELSE ROUND(
+                    SUM(CASE WHEN status = 'SUCCESS' THEN 1 ELSE 0 END) * 100.0
+                    / SUM(CASE WHEN status IN ('SUCCESS', 'FAILED') THEN 1 ELSE 0 END),
+                    2
+                )
+            END AS successRate,
+            COALESCE(ROUND(AVG(total_duration_ms)), 0) AS averageDurationMs
+        FROM ai_run_trace
+        WHERE tenant_id = #{tenantId}
+          AND created_at <![CDATA[ >= ]]> #{startTime}
+          AND created_at <![CDATA[ < ]]> #{endTime}
+    </select>
+
+    <!--
+        报告统计以已经保存到聊天历史的ReportSchema为准。
+        仅统计合法JSON，避免历史普通文本消息影响查询。
+    -->
+    <select id="selectReportStats"
+            resultType="org.example.ai.agent.dashboard.vo.DashboardOverviewVO$ReportStats">
+        SELECT
+            COUNT(DISTINCT runId) AS generatedCount,
+            COUNT(DISTINCT CASE WHEN queryType = 'DATA_QUERY' THEN runId END) AS dataQueryCount,
+            COUNT(DISTINCT CASE WHEN queryType = 'ANALYSIS_REPORT' THEN runId END) AS analysisReportCount,
+            COUNT(DISTINCT CASE WHEN analysisStatus = 'DONE' THEN runId END) AS analysisSuccessCount,
+            COUNT(DISTINCT CASE WHEN analysisStatus = 'FAILED' THEN runId END) AS analysisFailedCount
+        FROM (
+            SELECT
+                message.run_id AS runId,
+                JSON_UNQUOTE(JSON_EXTRACT(
+                    CASE WHEN JSON_VALID(message.payload_json) = 1 THEN message.payload_json ELSE NULL END,
+                    '$.presentationType'
+                )) AS presentationType,
+                JSON_UNQUOTE(JSON_EXTRACT(
+                    CASE WHEN JSON_VALID(message.payload_json) = 1 THEN message.payload_json ELSE NULL END,
+                    '$.reportSchema.queryType'
+                )) AS queryType,
+                JSON_UNQUOTE(JSON_EXTRACT(
+                    CASE WHEN JSON_VALID(message.payload_json) = 1 THEN message.payload_json ELSE NULL END,
+                    '$.reportSchema.analysis.status'
+                )) AS analysisStatus
+            FROM ai_chat_message message
+            INNER JOIN ai_run_trace trace ON trace.run_id = message.run_id
+            WHERE message.role = 'ASSISTANT'
+              AND trace.tenant_id = #{tenantId}
+              AND message.payload_json IS NOT NULL
+              AND JSON_VALID(message.payload_json) = 1
+              AND message.created_at <![CDATA[ >= ]]> #{startTime}
+              AND message.created_at <![CDATA[ < ]]> #{endTime}
+        ) report_message
+        WHERE presentationType = 'REPORT'
+    </select>
+
+    <select id="selectEnabledModelCount" resultType="java.lang.Long">
+        SELECT COUNT(*)
+        FROM ai_model_config
+        WHERE enabled = 1
+    </select>
+
+    <!-- 按当前租户的真实聊天运行汇总模型用量。 -->
+    <select id="selectModelStats"
+            resultType="org.example.ai.agent.dashboard.vo.DashboardOverviewVO$ModelStats">
+        SELECT
+            COUNT(mu.id) AS callCount,
+            COALESCE(SUM(CASE WHEN mu.success = 0 THEN 1 ELSE 0 END), 0) AS failureCount,
+            CASE
+                WHEN COUNT(mu.id) = 0 THEN 0
+                ELSE ROUND(SUM(CASE WHEN mu.success = 1 THEN 1 ELSE 0 END) * 100.0 / COUNT(mu.id), 2)
+            END AS successRate,
+            COALESCE(SUM(mu.total_tokens), 0) AS totalTokens,
+            COALESCE(ROUND(AVG(mu.duration_ms)), 0) AS averageDurationMs
+        FROM ai_model_usage mu
+        INNER JOIN ai_run_trace trace ON trace.run_id = mu.run_id
+        WHERE trace.tenant_id = #{tenantId}
+          AND mu.created_at <![CDATA[ >= ]]> #{startTime}
+          AND mu.created_at <![CDATA[ < ]]> #{endTime}
+    </select>
+
+    <select id="selectModelUsageByModel"
+            resultType="org.example.ai.agent.modelusage.vo.ModelUsageByModelVO">
+        SELECT
+            COALESCE(NULLIF(mu.model_code, ''), 'UNKNOWN') AS modelCode,
+            MAX(mu.provider) AS provider,
+            MAX(mu.model_name) AS modelName,
+            COUNT(*) AS callCount,
+            SUM(CASE WHEN mu.success = 1 THEN 1 ELSE 0 END) AS successCount,
+            SUM(CASE WHEN mu.success = 0 THEN 1 ELSE 0 END) AS failureCount,
+            CASE
+                WHEN COUNT(*) = 0 THEN 0
+                ELSE ROUND(SUM(CASE WHEN mu.success = 1 THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2)
+            END AS successRate,
+            COALESCE(SUM(mu.total_tokens), 0) AS totalTokens,
+            COALESCE(ROUND(AVG(mu.duration_ms)), 0) AS averageDurationMs
+        FROM ai_model_usage mu
+        INNER JOIN ai_run_trace trace ON trace.run_id = mu.run_id
+        WHERE trace.tenant_id = #{tenantId}
+          AND mu.created_at <![CDATA[ >= ]]> #{startTime}
+          AND mu.created_at <![CDATA[ < ]]> #{endTime}
+        GROUP BY COALESCE(NULLIF(mu.model_code, ''), 'UNKNOWN')
+        ORDER BY totalTokens DESC, callCount DESC
+        LIMIT 5
+    </select>
+
+    <!-- 只有带聊天运行ID和人员编码的调用才能归属到具体用户。 -->
+    <select id="selectUserTokenTotal" resultType="java.lang.Long">
+        SELECT COALESCE(SUM(mu.total_tokens), 0)
+        FROM ai_model_usage mu
+        INNER JOIN ai_run_trace trace ON trace.run_id = mu.run_id
+        WHERE trace.tenant_id = #{tenantId}
+          AND mu.user_id IS NOT NULL
+          AND mu.user_id != ''
+          AND mu.created_at <![CDATA[ >= ]]> #{startTime}
+          AND mu.created_at <![CDATA[ < ]]> #{endTime}
+    </select>
+
+    <!-- 按人员汇总Token，真实账号只在Service内用于脱敏。 -->
+    <select id="selectUserTokenUsage"
+            resultType="org.example.ai.agent.dashboard.vo.DashboardOverviewVO$UserTokenUsage">
+        SELECT
+            mu.user_id AS userKey,
+            COUNT(*) AS callCount,
+            COALESCE(SUM(mu.total_tokens), 0) AS totalTokens,
+            MAX(mu.created_at) AS lastUsedAt
+        FROM ai_model_usage mu
+        INNER JOIN ai_run_trace trace ON trace.run_id = mu.run_id
+        WHERE trace.tenant_id = #{tenantId}
+          AND mu.user_id IS NOT NULL
+          AND mu.user_id != ''
+          AND mu.created_at <![CDATA[ >= ]]> #{startTime}
+          AND mu.created_at <![CDATA[ < ]]> #{endTime}
+        GROUP BY mu.user_id
+        ORDER BY totalTokens DESC, callCount DESC
+        LIMIT #{limit}
+    </select>
+
+    <!-- 文档数量和向量任务积压是当前状态，问答数量使用所选统计周期。 -->
+    <select id="selectKnowledgeStats"
+            resultType="org.example.ai.agent.dashboard.vo.DashboardOverviewVO$KnowledgeStats">
+        SELECT
+            (SELECT COUNT(*) FROM knowledge_document
+                WHERE tenant_id = #{tenantId} AND del_flag = 0) AS documentCount,
+            (SELECT COUNT(*) FROM knowledge_document
+                WHERE tenant_id = #{tenantId} AND del_flag = 0 AND status = 'PUBLISHED') AS publishedDocumentCount,
+            (SELECT COUNT(*) FROM knowledge_query_log
+                WHERE tenant_id = #{tenantId}
+                  AND created_at <![CDATA[ >= ]]> #{startTime} AND created_at <![CDATA[ < ]]> #{endTime}) AS queryCount,
+            (SELECT CASE WHEN COUNT(*) = 0 THEN 0 ELSE ROUND(
+                SUM(CASE WHEN status = 'SUCCESS' THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) END
+                FROM knowledge_query_log
+                WHERE tenant_id = #{tenantId}
+                  AND created_at <![CDATA[ >= ]]> #{startTime} AND created_at <![CDATA[ < ]]> #{endTime}) AS querySuccessRate,
+            (SELECT COUNT(*) FROM knowledge_query_log
+                WHERE tenant_id = #{tenantId} AND status = 'NO_RESULT'
+                  AND created_at <![CDATA[ >= ]]> #{startTime} AND created_at <![CDATA[ < ]]> #{endTime}) AS noResultCount,
+            (SELECT COUNT(*) FROM knowledge_query_log
+                WHERE tenant_id = #{tenantId} AND status = 'FAILED'
+                  AND created_at <![CDATA[ >= ]]> #{startTime} AND created_at <![CDATA[ < ]]> #{endTime}) AS failedCount,
+            (SELECT COUNT(*) FROM knowledge_base_vector_task
+                WHERE status IN ('PENDING', 'PROCESSING')
+                  AND document_id IN (
+                      SELECT id FROM knowledge_document WHERE tenant_id = #{tenantId}
+                  )) AS vectorPendingCount,
+            (SELECT COUNT(*) FROM knowledge_base_vector_task
+                WHERE status = 'FAILED'
+                  AND document_id IN (
+                      SELECT id FROM knowledge_document WHERE tenant_id = #{tenantId}
+                  )) AS vectorFailedCount
+    </select>
+
+    <select id="selectQuestionCount" resultType="java.lang.Long">
+        SELECT COUNT(*)
+        FROM ai_run_trace
+        WHERE tenant_id = #{tenantId}
+          AND question IS NOT NULL
+          AND TRIM(question) != ''
+          AND created_at <![CDATA[ >= ]]> #{startTime}
+          AND created_at <![CDATA[ < ]]> #{endTime}
+    </select>
+
+    <!--
+        优先按已选能力或工作流归并同义问题。
+        未命中业务配置的问题按路由类别归并，不展示原始业务问题。
+    -->
+    <select id="selectPopularQuestions"
+            resultType="org.example.ai.agent.dashboard.vo.DashboardOverviewVO$PopularQuestion">
+        SELECT
+            CASE
+                WHEN route.selected_capability_code IS NOT NULL
+                    THEN CONCAT('CAPABILITY:', route.selected_capability_code)
+                WHEN trace.workflow_code IS NOT NULL AND trace.workflow_code != ''
+                    THEN CONCAT('WORKFLOW:', trace.workflow_code)
+                ELSE CONCAT('ROUTE:', COALESCE(NULLIF(trace.route_type, ''), 'OTHER'))
+            END AS `key`,
+            MAX(CASE
+                WHEN capability.capability_name IS NOT NULL THEN capability.capability_name
+                WHEN workflow.workflow_name IS NOT NULL THEN workflow.workflow_name
+                WHEN trace.route_type = 'RAG_ONLY' THEN '知识库问答'
+                WHEN trace.route_type = 'BUSINESS_QUERY' THEN '业务数据查询'
+                WHEN trace.route_type = 'MIXED_QUERY' THEN '综合业务查询'
+                WHEN trace.route_type = 'STATISTIC_QUERY' THEN '统计分析'
+                WHEN trace.route_type = 'WORKFLOW_QUERY' THEN '工作流查询'
+                WHEN trace.route_type = 'WORKFLOW_ACTION' THEN '业务操作'
+                WHEN trace.route_type = 'RESULT_ANALYSIS' THEN '结果追问分析'
+                WHEN trace.route_type = 'CLARIFY' THEN '待补充信息'
+                WHEN trace.route_type = 'REJECT' THEN '受限问题'
+                ELSE '其他问题'
+            END) AS displayQuestion,
+            MAX(CASE
+                WHEN capability.capability_name IS NOT NULL
+                    THEN COALESCE(NULLIF(capability.module_name, ''), NULLIF(capability.domain, ''), '业务能力')
+                WHEN workflow.workflow_name IS NOT NULL THEN '工作流'
+                WHEN trace.route_type = 'RAG_ONLY' THEN '知识问答'
+                WHEN trace.route_type = 'DIRECT_CHAT' THEN '直接问答'
+                ELSE '其他问题'
+            END) AS topic,
+            COUNT(*) AS questionCount,
+            COUNT(DISTINCT NULLIF(trace.user_id, '')) AS userCount,
+            MAX(trace.created_at) AS lastAskedAt
+        FROM ai_run_trace trace
+        LEFT JOIN ai_capability_route_log route ON route.run_id = trace.run_id
+        LEFT JOIN ai_capability_definition capability
+            ON capability.capability_code = route.selected_capability_code
+        LEFT JOIN ai_workflow_definition workflow
+            ON workflow.workflow_code = trace.workflow_code
+        WHERE trace.question IS NOT NULL
+          AND trace.tenant_id = #{tenantId}
+          AND TRIM(trace.question) != ''
+          AND trace.created_at <![CDATA[ >= ]]> #{startTime}
+          AND trace.created_at <![CDATA[ < ]]> #{endTime}
+        GROUP BY `key`
+        ORDER BY questionCount DESC, lastAskedAt DESC
+        LIMIT #{limit}
+    </select>
+
+    <!-- 最近异常只返回安全摘要，不读取模型和向量任务的原始错误信息。 -->
+    <select id="selectRecentIssues"
+            resultType="org.example.ai.agent.dashboard.vo.DashboardOverviewVO$RecentIssue">
+        SELECT *
+        FROM (
+            SELECT
+                CONCAT('ALERT-', id) AS id,
+                'ALERT' AS sourceType,
+                COALESCE(NULLIF(workflow_name, ''), NULLIF(rule_name, ''), '系统告警') AS sourceName,
+                severity,
+                status,
+                error_code AS errorCode,
+                COALESCE(NULLIF(error_message, ''), '系统检测到需要处理的运行异常') AS errorMessage,
+                last_occurred_at AS occurredAt,
+                '/knowledge/alerts' AS targetPath
+            FROM ai_alert_record
+            WHERE status IN ('OPEN', 'ACKNOWLEDGED')
+              AND last_occurred_at <![CDATA[ >= ]]> #{startTime}
+              AND last_occurred_at <![CDATA[ < ]]> #{endTime}
+
+            UNION ALL
+
+            SELECT
+                CONCAT('WORKFLOW-', workflow_run.id) AS id,
+                'WORKFLOW' AS sourceType,
+                COALESCE(
+                    NULLIF(workflow_run.workflow_name, ''),
+                    workflow_run.workflow_code,
+                    '工作流'
+                ) AS sourceName,
+                'ERROR' AS severity,
+                workflow_run.status,
+                workflow_run.error_code AS errorCode,
+                '工作流运行失败，请进入运行详情查看安全错误信息' AS errorMessage,
+                COALESCE(workflow_run.finished_at, workflow_run.created_at) AS occurredAt,
+                CONCAT('/knowledge/workflow-runs/detail/', workflow_run.run_id) AS targetPath
+            FROM ai_workflow_run workflow_run
+            INNER JOIN ai_run_trace trace
+                ON trace.run_id = workflow_run.agent_run_id
+            WHERE workflow_run.status = 'FAILED'
+              AND trace.tenant_id = #{tenantId}
+              AND workflow_run.created_at <![CDATA[ >= ]]> #{startTime}
+              AND workflow_run.created_at <![CDATA[ < ]]> #{endTime}
+
+            UNION ALL
+
+            SELECT
+                CONCAT('MODEL-', mu.id) AS id,
+                'MODEL' AS sourceType,
+                COALESCE(
+                    NULLIF(mu.model_name, ''),
+                    NULLIF(mu.model_code, ''),
+                    '模型服务'
+                ) AS sourceName,
+                'ERROR' AS severity,
+                'FAILED' AS status,
+                COALESCE(NULLIF(mu.error_category, ''), 'UNKNOWN') AS errorCode,
+                '模型调用失败，请进入模型配置查看连接状态' AS errorMessage,
+                mu.created_at AS occurredAt,
+                '/knowledge/system-config' AS targetPath
+            FROM ai_model_usage mu
+            INNER JOIN ai_run_trace trace ON trace.run_id = mu.run_id
+            WHERE mu.success = 0
+              AND trace.tenant_id = #{tenantId}
+              AND mu.created_at <![CDATA[ >= ]]> #{startTime}
+              AND mu.created_at <![CDATA[ < ]]> #{endTime}
+            UNION ALL
+            SELECT
+                CONCAT('KNOWLEDGE-', id) AS id,
+                'KNOWLEDGE' AS sourceType,
+                CONCAT('向量任务 #', id) AS sourceName,
+                'ERROR' AS severity,
+                status,
+                'VECTOR_TASK_FAILED' AS errorCode,
+                '知识库向量任务失败，请进入向量任务监控查看详情' AS errorMessage,
+                COALESCE(finished_at, updated_at) AS occurredAt,
+                '/knowledge/vector-task' AS targetPath
+            FROM knowledge_base_vector_task
+            WHERE status = 'FAILED'
+              AND document_id IN (
+                  SELECT id FROM knowledge_document WHERE tenant_id = #{tenantId}
+              )
+              AND updated_at <![CDATA[ >= ]]> #{startTime}
+              AND updated_at <![CDATA[ < ]]> #{endTime}
+        ) issue
+        ORDER BY occurredAt DESC
+        LIMIT #{limit}
+    </select>
+
+</mapper>

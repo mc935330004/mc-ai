@@ -28,6 +28,11 @@ public class RunTraceServiceImpl implements RunTraceService {
         trace.setRunId(runId);
         trace.setConversationId(request.getConversationId());
         trace.setUserId(request.getUserId());
+        trace.setTenantId(
+                request.getKnowledgeAccessPrincipal() == null
+                        ? null
+                        : request.getKnowledgeAccessPrincipal().tenantId()
+        );
         trace.setQuestion(request.getUserQuestion());
         trace.setStatus(RunStatus.RUNNING);
 

@@ -40,6 +40,13 @@ public class RunTrace {
     private String userId;
 
     /**
+     * PM租户ID。
+     *
+     * 只由服务端可信会话写入，用于管理统计隔离。
+     */
+    private Long tenantId;
+
+    /**
      * 用户原始问题。
      */
     private String question;

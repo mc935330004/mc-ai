@@ -586,6 +586,26 @@ CREATE INDEX idx_knowledge_query_log_tenant_user_time
 -- 3. 已执行过V11主体的环境只执行以下新增索引语句。
 -- ============================================================
 
+-- ============================================================
+-- 管理端首页按租户统计Agent运行数据
+--
+-- 说明：
+-- 1. tenant_id只由服务端可信会话写入；
+-- 2. 历史运行无法可靠推断租户，保持NULL且不进入租户排行；
+-- 3. 用于模型Token、人员Token、高频问题、报告和运行统计隔离。
+-- ============================================================
+
+ALTER TABLE ai_run_trace
+    ADD COLUMN tenant_id BIGINT NULL
+        COMMENT 'PM租户ID，由服务端可信会话写入'
+        AFTER user_id;
+
+CREATE INDEX idx_run_trace_tenant_created
+    ON ai_run_trace (
+        tenant_id,
+        created_at
+    );
+
 CREATE INDEX idx_run_trace_created
     ON ai_run_trace (created_at);
 
