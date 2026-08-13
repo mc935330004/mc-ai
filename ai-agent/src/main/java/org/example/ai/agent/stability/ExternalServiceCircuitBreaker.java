@@ -1,6 +1,7 @@
 package org.example.ai.agent.stability;
 
 import org.example.ai.agent.common.exception.BusinessException;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 import java.time.Clock;
@@ -17,17 +18,14 @@ public class ExternalServiceCircuitBreaker {
 
     private final ExternalServiceResilienceProperties properties;
     private final Clock clock;
-    private final Map<String, CircuitState> states =
-            new ConcurrentHashMap<>();
+    private final Map<String, CircuitState> states =new ConcurrentHashMap<>();
 
-    public ExternalServiceCircuitBreaker(
-            ExternalServiceResilienceProperties properties) {
+    @Autowired
+    public ExternalServiceCircuitBreaker(ExternalServiceResilienceProperties properties) {
         this(properties, Clock.systemUTC());
     }
 
-    ExternalServiceCircuitBreaker(
-            ExternalServiceResilienceProperties properties,
-            Clock clock) {
+    ExternalServiceCircuitBreaker(ExternalServiceResilienceProperties properties,Clock clock) {
         this.properties = properties;
         this.clock = clock;
     }
@@ -128,7 +126,6 @@ public class ExternalServiceCircuitBreaker {
                 openUntil = now + openDurationMs;
             }
         }
-
         synchronized boolean isOpen(long now) {
             return openUntil > now;
         }

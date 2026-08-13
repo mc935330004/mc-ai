@@ -167,22 +167,9 @@ public class WorkflowDefinitionController {
      * 本接口不会修改数据库中的工作流定义。
      */
     @PostMapping("/{id}/draft-preview")
-    public Result<WorkflowExecutionOutcome> previewDraft(
-            @PathVariable Long id,
-            @Valid
-            @RequestBody
-            WorkflowDraftPreviewRequestDTO request) {
-
-        return Result.success(
-                workflowDebugService.previewDraft(
-                        id,
-                        request,
-                        currentUserProvider
-                                .getRequiredUserId(),
-                        currentUserProvider
-                                .getRequiredAuthorization()
-                )
-        );
+    public Result<WorkflowExecutionOutcome> previewDraft(@PathVariable Long id, @Valid @RequestBody WorkflowDraftPreviewRequestDTO request) {
+        return Result.success(workflowDebugService.previewDraft(id, request, currentUserProvider.getRequiredUserId(),
+                        currentUserProvider.getRequiredAuthorization()));
     }
 
     /**

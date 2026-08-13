@@ -58,12 +58,8 @@ public class AgentKnowledgeAccessContext implements KnowledgeAccessContext {
             );
         }
 
-        if (session.getTenantId() == null
-                || session.getTenantId() <= 0) {
-            throw new BusinessException(
-                    502,
-                    "PM登录身份缺少有效的租户ID"
-            );
+        if (session.getTenantId() == null) {
+            throw new BusinessException(502,"PM登录身份缺少有效的租户ID");
         }
 
         return new KnowledgeAccessPrincipal(

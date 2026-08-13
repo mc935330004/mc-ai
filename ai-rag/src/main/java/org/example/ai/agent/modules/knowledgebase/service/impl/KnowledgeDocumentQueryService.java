@@ -622,7 +622,6 @@ public class KnowledgeDocumentQueryService {
     private void validatePrincipal(KnowledgeAccessPrincipal principal) {
         if (principal == null
                 || principal.tenantId() == null
-                || principal.tenantId() <= 0
                 || !StringUtils.hasText(principal.userId())) {
             throw new BusinessException(
                     ErrorCode.UNAUTHORIZED,

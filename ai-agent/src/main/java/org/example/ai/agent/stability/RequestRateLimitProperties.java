@@ -33,7 +33,7 @@ public class RequestRateLimitProperties {
     /**
      * Redis限流键前缀。
      */
-    private String keyPrefix = "mc-ai:rate-limit:";
+    private String keyPrefix = "mc-ai:rate-limit";
 
     /**
      * 启动时校验限流配置。
@@ -43,11 +43,8 @@ public class RequestRateLimitProperties {
         if (!enabled) {
             return;
         }
-        if (defaultRequestsPerMinute <= 0
-                || expensiveRequestsPerMinute <= 0) {
-            throw new IllegalStateException(
-                    "Agent接口限流阈值必须大于0"
-            );
+        if (defaultRequestsPerMinute <= 0 || expensiveRequestsPerMinute <= 0) {
+            throw new IllegalStateException("Agent接口限流阈值必须大于0");
         }
         if (keyPrefix == null || keyPrefix.isBlank()) {
             throw new IllegalStateException(

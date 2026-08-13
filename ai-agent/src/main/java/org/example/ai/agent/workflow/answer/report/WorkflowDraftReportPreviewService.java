@@ -38,9 +38,7 @@ import java.util.Objects;
 public class WorkflowDraftReportPreviewService {
 
     private static final long PREVIEW_VALID_MINUTES = 30L;
-    private static final int MAX_GRAPH_SPEC_BYTES =
-            1024 * 1024;
-
+    private static final int MAX_GRAPH_SPEC_BYTES =1024 * 1024;
     private final WorkflowDefinitionService workflowService;
     private final WorkflowRunService workflowRunService;
     private final WorkflowGraphSnapshotFactory snapshotFactory;

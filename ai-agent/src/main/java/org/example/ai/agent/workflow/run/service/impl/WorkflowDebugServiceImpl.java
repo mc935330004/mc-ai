@@ -45,8 +45,7 @@ public class WorkflowDebugServiceImpl
     /**
      * 临时 GraphSpec 最大字节数。
      */
-    private static final int MAX_GRAPH_SPEC_BYTES =
-            1024 * 1024;
+    private static final int MAX_GRAPH_SPEC_BYTES = 1024 * 1024;
 
     private final WorkflowDefinitionService workflowService;
     private final WorkflowGraphSnapshotFactory snapshotFactory;
@@ -60,34 +59,17 @@ public class WorkflowDebugServiceImpl
      * 调试数据库中已经保存的工作流草稿。
      */
     @Override
-    public WorkflowExecutionOutcome debug(
-            Long workflowId,
-            WorkflowDebugRequestDTO request,
-            String userId,
-            String authorization) {
+    public WorkflowExecutionOutcome debug(Long workflowId, WorkflowDebugRequestDTO request,
+                                          String userId, String authorization) {
 
-        WorkflowDefinition definition =
-                getRequiredDefinition(workflowId);
-
-        Map<String, Object> rawInput =
-                request == null
+        WorkflowDefinition definition = getRequiredDefinition(workflowId);
+        Map<String, Object> rawInput = request == null
                         ? Map.of()
                         : safeMap(request.getInput());
-
-        Map<String, Object> userContext =
-                request == null
+        Map<String, Object> userContext = request == null
                         ? Map.of()
                         : safeMap(request.getUserContext());
-
-        return execute(
-                definition,
-                definition.getGraphSpecJson(),
-                rawInput,
-                userContext,
-                userId,
-                authorization,
-                false
-        );
+        return execute(definition, definition.getGraphSpecJson(), rawInput, userContext, userId, authorization, false);
     }
 
     /**
@@ -102,22 +84,10 @@ public class WorkflowDebugServiceImpl
             WorkflowDraftPreviewRequestDTO request,
             String userId,
             String authorization) {
-
-        String graphSpecJson =
-                requirePreviewGraphSpec(request);
-
-        WorkflowDefinition definition =
-                getRequiredDefinition(workflowId);
-
-        return execute(
-                definition,
-                graphSpecJson,
-                safeMap(request.getInput()),
-                safeMap(request.getUserContext()),
-                userId,
-                authorization,
-                true
-        );
+        String graphSpecJson = requirePreviewGraphSpec(request);
+        WorkflowDefinition definition = getRequiredDefinition(workflowId);
+        return execute(definition, graphSpecJson, safeMap(request.getInput()),
+                safeMap(request.getUserContext()), userId, authorization, true);
     }
 
     /**
@@ -132,8 +102,7 @@ public class WorkflowDebugServiceImpl
             String authorization,
             boolean useExecutionChecksum) {
 
-        WorkflowGraphMaterial material =
-                snapshotFactory.analyzeDraft(
+        WorkflowGraphMaterial material =snapshotFactory.analyzeDraft(
                         definition.getWorkflowCode(),
                         definition.getWorkflowName(),
                         graphSpecJson
@@ -212,30 +181,21 @@ public class WorkflowDebugServiceImpl
                 )
         );
 
-        long startedAt =
-                System.currentTimeMillis();
+        long startedAt = System.currentTimeMillis();
 
         try {
             GraphExecutionRequest graphRequest =
                     GraphExecutionRequest.builder()
                             .runId(runId)
                             .userId(userId)
-                            .input(
-                                    validation.getSanitizedInput()
-                            )
+                            .input(validation.getSanitizedInput())
                             .userContext(userContext)
                             .authorization(authorization)
                             .secureContext(Map.of())
                             .executionPath("root")
                             .build();
 
-            GraphExecutionResult graphResult =
-                    graphExecutor.execute(
-                            material
-                                    .compilationResult()
-                                    .compiledGraph(),
-                            graphRequest
-                    );
+            GraphExecutionResult graphResult = graphExecutor.execute(material.compilationResult().compiledGraph(), graphRequest);
 
             WorkflowExecutionOutcome outcome =
                     outcomeFactory.create(
@@ -287,58 +247,39 @@ public class WorkflowDebugServiceImpl
     /**
      * 校验临时 GraphSpec 的基础大小限制。
      */
-    private String requirePreviewGraphSpec(
-            WorkflowDraftPreviewRequestDTO request) {
-
-        if (request == null
-                || !StringUtils.hasText(
-                request.getGraphSpecJson()
-        )) {
+    private String requirePreviewGraphSpec(WorkflowDraftPreviewRequestDTO request) {
+        if (request == null || !StringUtils.hasText(request.getGraphSpecJson())) {
             throw new BusinessException(
                     400,
                     "临时GraphSpec不能为空"
             );
         }
-
-        String graphSpecJson =
-                request.getGraphSpecJson();
-
-        int graphSpecBytes =
-                graphSpecJson
-                        .getBytes(StandardCharsets.UTF_8)
-                        .length;
-
+        String graphSpecJson = request.getGraphSpecJson();
+        int graphSpecBytes = graphSpecJson.getBytes(StandardCharsets.UTF_8).length;
         if (graphSpecBytes > MAX_GRAPH_SPEC_BYTES) {
             throw new BusinessException(
                     400,
                     "临时GraphSpec不能超过1MB"
             );
         }
-
         return graphSpecJson;
     }
 
     /**
      * 将空 Map 转换为空只读 Map。
      */
-    private Map<String, Object> safeMap(
-            Map<String, Object> source) {
+    private Map<String, Object> safeMap(Map<String, Object> source) {
 
-        return source == null
-                ? Map.of()
-                : source;
+        return source == null ? Map.of() : source;
     }
 
     /**
      * 将输入 Schema 序列化为 JSON。
      */
-    private String writeJson(
-            Object value) {
+    private String writeJson(Object value) {
 
         try {
-            return objectMapper.writeValueAsString(
-                    value
-            );
+            return objectMapper.writeValueAsString(value);
         } catch (JsonProcessingException exception) {
             throw new IllegalStateException(
                     "工作流输入Schema序列化失败",
@@ -358,12 +299,7 @@ public class WorkflowDebugServiceImpl
             long startedAt,
             RuntimeException originalException) {
 
-        long durationMs =
-                Math.max(
-                        0L,
-                        System.currentTimeMillis()
-                                - startedAt
-                );
+        long durationMs = Math.max(0L, System.currentTimeMillis() - startedAt);
 
         try {
             workflowRunService.markFailed(

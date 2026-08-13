@@ -28,6 +28,9 @@ public class AgentSession {
      */
     private String username;
 
+    /**
+     * PM租户主键。
+     */
     private Long tenantId;
 
     private Long deptId;

@@ -29,37 +29,18 @@ public class ResourceAccessManagementController {
      * 查询指定能力或工作流的访问配置。
      */
     @GetMapping("/{resourceType}/{resourceId}")
-    public Result<ResourceAccessVO> getAccess(
-            @PathVariable String resourceType,
-            @PathVariable Long resourceId) {
-
-        return Result.success(
-                accessService.getAccess(
-                        resourceType,
-                        resourceId
-                )
-        );
+    public Result<ResourceAccessVO> getAccess(@PathVariable String resourceType, @PathVariable Long resourceId) {
+        return Result.success(accessService.getAccess(resourceType, resourceId));
     }
 
     /**
      * 保存指定能力或工作流的访问配置。
      */
     @PutMapping("/{resourceType}/{resourceId}")
-    public Result<ResourceAccessVO> saveAccess(
-            @PathVariable String resourceType,
-            @PathVariable Long resourceId,
-            @Valid @RequestBody ResourceAccessSaveDTO dto) {
-
-        String operatorId =
-                currentUserProvider.getRequiredUserId();
-
-        return Result.success(
-                accessService.saveAccess(
-                        resourceType,
-                        resourceId,
-                        dto,
-                        operatorId
-                )
-        );
+    public Result<ResourceAccessVO> saveAccess(@PathVariable String resourceType,
+                                               @PathVariable Long resourceId,
+                                               @Valid @RequestBody ResourceAccessSaveDTO dto) {
+        String operatorId = currentUserProvider.getRequiredUserId();
+        return Result.success(accessService.saveAccess(resourceType, resourceId, dto, operatorId));
     }
 }
