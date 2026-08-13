@@ -1,6 +1,8 @@
 package org.example.ai.agent.capability.invocation.runtime;
 
 import lombok.RequiredArgsConstructor;
+import org.example.ai.agent.common.exception.BusinessException;
+import org.example.ai.agent.stability.ExternalServiceCircuitBreaker;
 import org.springframework.http.HttpMethod;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.ResourceAccessException;
@@ -19,16 +21,26 @@ import org.springframework.web.client.RestClientResponseException;
 public class CapabilityHttpInvoker {
 
     private final CapabilityRestClientFactory clientFactory;
+    private final ExternalServiceCircuitBreaker circuitBreaker;
 
     public Object invoke(CapabilityHttpRequest request) {
         if (request == null || request.getMethod() == null || request.getUri() == null) {
             throw new IllegalArgumentException( "HTTP请求不能为空" );
         }
+        String serviceName = resolveServiceName(request);
+        checkCircuit(serviceName);
         RestClient client = clientFactory.create( request.getTimeoutMs());
         try {
             RestClient.RequestHeadersSpec<?> requestSpec =createRequest(client, request);
-            return requestSpec.retrieve().body(Object.class);
+            Object result = requestSpec.retrieve().body(Object.class);
+            circuitBreaker.recordSuccess(serviceName);
+            return result;
         } catch (RestClientResponseException exception) {
+            if (exception.getStatusCode().is5xxServerError()) {
+                circuitBreaker.recordFailure(serviceName);
+            } else {
+                circuitBreaker.recordReachable(serviceName);
+            }
             /*
              * 不把业务系统响应正文放进错误消息，
              * 避免敏感信息进入运行轨迹。
@@ -40,17 +52,44 @@ public class CapabilityHttpInvoker {
             );
 
         } catch (ResourceAccessException exception) {
+            circuitBreaker.recordFailure(serviceName);
             throw new CapabilityInvocationException(
                     "BUSINESS_API_TIMEOUT_OR_NETWORK_ERROR",
                     "业务接口超时或网络不可达"
             );
 
         } catch (RestClientException exception) {
+            circuitBreaker.recordFailure(serviceName);
             throw new CapabilityInvocationException(
                     "BUSINESS_API_CALL_FAILED",
                     "业务接口调用失败"
             );
         }
+    }
+
+    /**
+     * 将通用熔断异常转换为能力执行域内的稳定错误码。
+     */
+    private void checkCircuit(String serviceName) {
+        try {
+            circuitBreaker.beforeCall(serviceName);
+        } catch (BusinessException exception) {
+            throw new CapabilityInvocationException(
+                    "BUSINESS_API_CIRCUIT_OPEN",
+                    "业务接口暂时不可用，请稍后重试"
+            );
+        }
+    }
+
+    /**
+     * 按目标主机隔离熔断状态，避免一个业务系统故障阻断其他系统。
+     */
+    private String resolveServiceName(CapabilityHttpRequest request) {
+        String authority = request.getUri().getAuthority();
+        if (authority == null || authority.isBlank()) {
+            return "business-api:relative";
+        }
+        return "business-api:" + authority.toLowerCase();
     }
 
     private RestClient.RequestHeadersSpec<?> createRequest(RestClient client, CapabilityHttpRequest request) {

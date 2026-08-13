@@ -17,5 +17,24 @@ spring:
       type: none
 
 app:
+  pgvector:
+    datasource:
+      # 测试上下文使用独立H2数据源，不连接真实PostgreSQL。
+      url: jdbc:h2:mem:pgvector_test;MODE=PostgreSQL;DB_CLOSE_DELAY=-1
+      driver-class-name: org.h2.Driver
+      username: sa
+      password:
   vector-task:
+    enabled: false
+  data-retention:
+    # 上下文测试不执行定时清理，避免测试线程访问尚未建表的H2库。
+    enabled: false
+  agent:
+    rate-limit:
+      # 上下文测试不连接外部Redis，限流行为由独立单元测试覆盖。
+      enabled: false
+
+agent:
+  sso:
+    # 测试环境不连接真实PM单点登录服务。
     enabled: false

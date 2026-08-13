@@ -576,3 +576,36 @@ CREATE INDEX idx_knowledge_query_log_tenant_user_time
                             user_id,
                             created_at
         );
+
+-- ============================================================
+-- 生产数据保留任务索引
+--
+-- 说明：
+-- 1. 仅为按时间分批清理的条件增加索引，不改变业务数据结构；
+-- 2. Flyway关闭时，需要人工确认数据库中不存在同名索引后执行；
+-- 3. 已执行过V11主体的环境只执行以下新增索引语句。
+-- ============================================================
+
+CREATE INDEX idx_run_trace_created
+    ON ai_run_trace (created_at);
+
+CREATE INDEX idx_workflow_run_created
+    ON ai_workflow_run (created_at);
+
+CREATE INDEX idx_model_usage_created
+    ON ai_model_usage (created_at);
+
+CREATE INDEX idx_action_audit_created
+    ON ai_action_audit_log (created_at);
+
+CREATE INDEX idx_capability_route_log_created
+    ON ai_capability_route_log (created_at);
+
+CREATE INDEX idx_chat_session_deleted_updated
+    ON ai_chat_session (deleted, updated_at);
+
+CREATE INDEX idx_pending_action_status_updated
+    ON ai_pending_action (status, updated_at);
+
+CREATE INDEX idx_alert_record_status_resolved
+    ON ai_alert_record (status, resolved_at);

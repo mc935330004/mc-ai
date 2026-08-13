@@ -2,12 +2,20 @@ package org.example.ai.agent.sso;
 
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
+import jakarta.servlet.http.Cookie;
 import lombok.RequiredArgsConstructor;
 import org.example.ai.agent.common.exception.BusinessException;
 import org.example.ai.agent.security.CurrentUserProvider;
+import org.example.ai.agent.stability.RedisRequestRateLimiter;
+import org.example.ai.agent.stability.RequestRateLimitPolicy;
 import org.springframework.stereotype.Component;
 import org.springframework.util.AntPathMatcher;
 import org.springframework.util.StringUtils;
+
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.HexFormat;
 
 /**
  * Agent接口访问边界。
@@ -26,6 +34,8 @@ public class AgentAccessInterceptor
 
     private final CurrentUserProvider currentUserProvider;
     private final AgentSsoProperties properties;
+    private final RedisRequestRateLimiter requestRateLimiter;
+    private final RequestRateLimitPolicy requestRateLimitPolicy;
 
     @Override
     public boolean preHandle(HttpServletRequest request, HttpServletResponse response,Object handler) {
@@ -58,6 +68,7 @@ public class AgentAccessInterceptor
          * 因为首次Ticket交换时会话尚未创建。
          */
         if (PATH_MATCHER.match("/api/agent/auth/**", path)) {
+            limitAuthenticationRequest(request, response, path);
             return true;
         }
 
@@ -67,7 +78,19 @@ public class AgentAccessInterceptor
          * HeaderCurrentUserProvider会实时请求PM /user/info，
          * PM Token失效时立即删除Agent Redis会话。
          */
-        currentUserProvider.getRequiredUserId();
+        String userId = currentUserProvider.getRequiredUserId();
+
+        boolean expensive = requestRateLimitPolicy.isExpensive(
+                request.getMethod(),
+                path
+        );
+        if (!requestRateLimiter.tryAcquire(userId, expensive)) {
+            response.setHeader("Retry-After", "60");
+            throw new BusinessException(
+                    429,
+                    "请求过于频繁，请稍后重试"
+            );
+        }
 
         if (isChatUserPath(path)) {
             return true;
@@ -82,6 +105,125 @@ public class AgentAccessInterceptor
         );
 
         return true;
+    }
+
+    /**
+     * 认证接口发生在可信用户身份确认之前，按客户端地址限流。
+     */
+    private void limitAuthenticationRequest(
+            HttpServletRequest request,
+            HttpServletResponse response,
+            String path) {
+        boolean exchangeRequest =
+                "POST".equalsIgnoreCase(request.getMethod())
+                && "/api/agent/auth/sso/exchange".equals(path);
+        String clientKey = resolveAuthenticationLimitKey(
+                request,
+                exchangeRequest
+        );
+        if (!requestRateLimiter.tryAcquire(
+                clientKey,
+                exchangeRequest
+        )) {
+            response.setHeader("Retry-After", "60");
+            throw new BusinessException(
+                    429,
+                    "认证请求过于频繁，请稍后重试"
+            );
+        }
+    }
+
+    /**
+     * 已建立会话的认证请求按会话摘要限流，避免同一出口IP下的用户互相影响。
+     */
+    private String resolveAuthenticationLimitKey(
+            HttpServletRequest request,
+            boolean exchangeRequest) {
+        if (!exchangeRequest && request.getCookies() != null) {
+            for (Cookie cookie : request.getCookies()) {
+                if (properties.getSessionCookieName()
+                        .equals(cookie.getName())
+                        && StringUtils.hasText(cookie.getValue())) {
+                    return "session-" + hashClientAddress(
+                            cookie.getValue()
+                    );
+                }
+            }
+        }
+        return "anonymous-" + hashClientAddress(
+                resolveClientAddress(request)
+        );
+    }
+
+    /**
+     * 仅在远端地址属于受信代理时读取转发客户端地址。
+     */
+    private String resolveClientAddress(HttpServletRequest request) {
+        String remoteAddress = request.getRemoteAddr();
+        if (!isTrustedProxy(remoteAddress)) {
+            return remoteAddress;
+        }
+        String forwardedFor = request.getHeader("X-Forwarded-For");
+        if (!StringUtils.hasText(forwardedFor)) {
+            return remoteAddress;
+        }
+        return forwardedFor.split(",", 2)[0].trim();
+    }
+
+    /**
+     * 当前部署只信任本机或内网反向代理写入的转发请求头。
+     */
+    private boolean isTrustedProxy(String address) {
+        if (!StringUtils.hasText(address)) {
+            return false;
+        }
+        return "127.0.0.1".equals(address)
+                || "0:0:0:0:0:0:0:1".equals(address)
+                || "::1".equals(address)
+                || address.startsWith("10.")
+                || address.startsWith("192.168.")
+                || isPrivate172Address(address);
+    }
+
+    /**
+     * 判断地址是否位于172.16.0.0/12私网网段。
+     */
+    private boolean isPrivate172Address(String address) {
+        if (!address.startsWith("172.")) {
+            return false;
+        }
+        String[] parts = address.split("\\.");
+        if (parts.length != 4) {
+            return false;
+        }
+        try {
+            int second = Integer.parseInt(parts[1]);
+            return second >= 16 && second <= 31;
+        } catch (NumberFormatException exception) {
+            return false;
+        }
+    }
+
+    /**
+     * 限流键不直接保存客户端地址，减少基础设施中的可识别信息。
+     */
+    private String hashClientAddress(String address) {
+        String safeAddress = StringUtils.hasText(address)
+                ? address.trim()
+                : "unknown";
+        try {
+            MessageDigest digest = MessageDigest.getInstance("SHA-256");
+            return HexFormat.of().formatHex(
+                    digest.digest(
+                            safeAddress.getBytes(StandardCharsets.UTF_8)
+                    )
+            );
+        } catch (NoSuchAlgorithmException exception) {
+            throw new IllegalStateException(
+                    "当前Java运行环境不支持SHA-256",
+                    exception
+            );
+        }
     }
 
     /**

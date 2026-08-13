@@ -6,6 +6,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import org.example.ai.agent.capability.entity.CapabilityDefinition;
 import org.example.ai.agent.capability.invocation.runtime.CapabilityInvocationException;
+import org.example.ai.agent.common.exception.BusinessException;
+import org.example.ai.agent.stability.ExternalServiceCircuitBreaker;
 import org.springframework.http.HttpHeaders;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
@@ -26,9 +28,11 @@ import java.util.stream.StreamSupport;
 public class PmCapabilityPermissionVerifier {
 
     private static final String REQUIRED_PERMISSION_FIELD ="x-required-permission";
+    private static final String SERVICE_NAME = "pm-write-permission";
 
     private final RestClient restClient;
     private final ObjectMapper objectMapper;
+    private final ExternalServiceCircuitBreaker circuitBreaker;
 
     /**
      * WRITE 能力执行前校验当前 PM 用户权限。
@@ -49,6 +53,7 @@ public class PmCapabilityPermissionVerifier {
 
         JsonNode response;
 
+        checkCircuit();
         try {
             String responseBody = restClient.get()
                     .uri("/user/info")
@@ -60,16 +65,24 @@ public class PmCapabilityPermissionVerifier {
                     .body(String.class);
 
             if (!StringUtils.hasText(responseBody)) {
+                circuitBreaker.recordReachable(SERVICE_NAME);
                 throw invalid(
                         "BUSINESS_PERMISSION_CHECK_FAILED",
                         "业务系统权限接口返回内容为空"
                 );
             }
             response = objectMapper.readTree(responseBody);
+            circuitBreaker.recordSuccess(SERVICE_NAME);
         } catch (JsonProcessingException exception) {
+            circuitBreaker.recordReachable(SERVICE_NAME);
             throw invalid("BUSINESS_PERMISSION_CHECK_FAILED","业务系统权限接口返回格式不正确");
         } catch (RestClientResponseException exception) {
             int status =exception.getStatusCode().value();
+            if (status >= 500) {
+                circuitBreaker.recordFailure(SERVICE_NAME);
+            } else {
+                circuitBreaker.recordReachable(SERVICE_NAME);
+            }
             if (status == 401 || status == 403) {
                 throw invalid("BUSINESS_PERMISSION_TOKEN_INVALID",
                         "业务系统登录状态已失效");
@@ -80,6 +93,7 @@ public class PmCapabilityPermissionVerifier {
             );
 
         } catch (RestClientException exception) {
+            circuitBreaker.recordFailure(SERVICE_NAME);
             // 权限服务不可用时失败关闭，不能继续调用 WRITE API。
             throw invalid(
                     "BUSINESS_PERMISSION_CHECK_FAILED",
@@ -107,6 +121,20 @@ public class PmCapabilityPermissionVerifier {
             throw invalid(
                     "BUSINESS_PERMISSION_DENIED",
                     "当前用户没有执行该业务操作的权限"
+            );
+        }
+    }
+
+    /**
+     * 权限服务熔断时保持能力调用的稳定错误契约。
+     */
+    private void checkCircuit() {
+        try {
+            circuitBreaker.beforeCall(SERVICE_NAME);
+        } catch (BusinessException exception) {
+            throw invalid(
+                    "BUSINESS_PERMISSION_CHECK_FAILED",
+                    "业务系统权限服务暂时不可用"
             );
         }
     }

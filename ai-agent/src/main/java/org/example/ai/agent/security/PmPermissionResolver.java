@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import org.example.ai.agent.common.exception.BusinessException;
+import org.example.ai.agent.stability.ExternalServiceCircuitBreaker;
 import org.springframework.http.HttpHeaders;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
@@ -36,10 +37,12 @@ public class PmPermissionResolver {
      * 如果你PM实际接口地址不同，只修改这一处。
      */
     private static final String RESOLVE_ENDPOINT ="/ai/permission/resolve";
+    private static final String SERVICE_NAME = "pm-permission-resolver";
 
     private static final Set<String> ALLOWED_METHODS =Set.of("GET","POST", "PUT","PATCH", "DELETE");
 
     private final RestClient restClient;
+    private final ExternalServiceCircuitBreaker circuitBreaker;
 
     /**
      * 用于读取WRITE能力输入Schema中的权限配置。
@@ -64,6 +67,7 @@ public class PmPermissionResolver {
         }
         JsonNode response;
 
+        circuitBreaker.beforeCall(SERVICE_NAME);
         try {
             String responseBody = restClient.post()
                     .uri(RESOLVE_ENDPOINT)
@@ -73,13 +77,16 @@ public class PmPermissionResolver {
                     .body(String.class);
 
             if (!StringUtils.hasText(responseBody)) {
+                circuitBreaker.recordReachable(SERVICE_NAME);
                 throw new BusinessException(
                         502,
                         "PM权限解析接口返回内容为空"
                 );
             }
             response = objectMapper.readTree(responseBody);
+            circuitBreaker.recordSuccess(SERVICE_NAME);
         } catch (JsonProcessingException exception) {
+            circuitBreaker.recordReachable(SERVICE_NAME);
             throw new BusinessException(
                     502,
                     "PM权限解析接口返回的不是合法JSON"
@@ -89,6 +96,12 @@ public class PmPermissionResolver {
             int status = exception
                     .getStatusCode()
                     .value();
+
+            if (status >= 500) {
+                circuitBreaker.recordFailure(SERVICE_NAME);
+            } else {
+                circuitBreaker.recordReachable(SERVICE_NAME);
+            }
 
             if (status == 401 || status == 403) {
                 throw new BusinessException(
@@ -110,6 +123,7 @@ public class PmPermissionResolver {
             );
 
         } catch (RestClientException exception) {
+            circuitBreaker.recordFailure(SERVICE_NAME);
             throw new BusinessException(
                     503,
                     "PM权限解析服务暂时不可用"

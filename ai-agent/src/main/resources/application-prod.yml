@@ -12,6 +12,23 @@ spring:
         initialize-schema: false
         # 生产环境建议开启 schema 校验，提前发现向量表结构和配置不一致
         schema-validation: ${PGVECTOR_SCHEMA_VALIDATION:true}
+  data:
+    redis:
+      # 生产Redis连接必须通过部署环境注入。
+      host: ${REDIS_HOST}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD}
+      database: ${REDIS_DATABASE:0}
+      connect-timeout: ${REDIS_CONNECT_TIMEOUT:3s}
+      timeout: ${REDIS_COMMAND_TIMEOUT:3s}
+  lifecycle:
+    # 生产停机时等待正在处理的SSE和工作流请求结束。
+    timeout-per-shutdown-phase: ${SHUTDOWN_TIMEOUT:30s}
+
+server:
+  # 正确识别反向代理传入的HTTPS协议和客户端地址。
+  forward-headers-strategy: framework
+  shutdown: graceful
 
 app:
   storage:
@@ -25,6 +42,32 @@ app:
       base-dir: ${FTP_BASE_DIR}
       # 文件访问前缀，供下载或外部访问场景使用
       path-url: ${FTP_PATH_URL}
+  knowledge-query:
+    # 生产环境使用有界线程池和有限SSE超时。
+    timeout-ms: ${KNOWLEDGE_QUERY_TIMEOUT_MS:180000}
+    executor-core-size: ${KNOWLEDGE_QUERY_CORE_SIZE:4}
+    executor-max-size: ${KNOWLEDGE_QUERY_MAX_SIZE:16}
+    executor-queue-capacity: ${KNOWLEDGE_QUERY_QUEUE_CAPACITY:200}
+    shutdown-await-seconds: ${KNOWLEDGE_QUERY_SHUTDOWN_AWAIT_SECONDS:30}
+  external-service-resilience:
+    failure-threshold: ${EXTERNAL_SERVICE_FAILURE_THRESHOLD:5}
+    open-duration-ms: ${EXTERNAL_SERVICE_OPEN_DURATION_MS:30000}
+  data-retention:
+    enabled: ${DATA_RETENTION_ENABLED:false}
+    cron: ${DATA_RETENTION_CRON:0 0 3 * * *}
+    batch-size: ${DATA_RETENTION_BATCH_SIZE:500}
+    max-batches-per-run: ${DATA_RETENTION_MAX_BATCHES:20}
+    runtime-days: ${DATA_RETENTION_RUNTIME_DAYS:90}
+    model-usage-days: ${DATA_RETENTION_MODEL_USAGE_DAYS:180}
+    knowledge-query-days: ${DATA_RETENTION_KNOWLEDGE_QUERY_DAYS:180}
+    audit-days: ${DATA_RETENTION_AUDIT_DAYS:365}
+  agent:
+    rate-limit:
+      # 限流计数存储在Redis，多实例部署保持一致。
+      enabled: ${AGENT_RATE_LIMIT_ENABLED:true}
+      default-requests-per-minute: ${AGENT_DEFAULT_REQUESTS_PER_MINUTE:120}
+      expensive-requests-per-minute: ${AGENT_EXPENSIVE_REQUESTS_PER_MINUTE:20}
+      key-prefix: ${AGENT_RATE_LIMIT_KEY_PREFIX:mc-ai:rate-limit:}
   pgvector:
     datasource:
       # 生产环境 PGVector 独立数据源，保存向量库表和索引
@@ -32,3 +75,36 @@ app:
       url: ${PGVECTOR_DATASOURCE_URL}
       username: ${PGVECTOR_DATASOURCE_USERNAME}
       password: ${PGVECTOR_DATASOURCE_PASSWORD}
+
+agent:
+  sso:
+    # 生产环境必须通过HTTPS访问并使用Secure Cookie。
+    enabled: true
+    pm-base-url: ${PM_BASE_URL}
+    cookie-secure: true
+    cookie-same-site: ${AGENT_COOKIE_SAME_SITE:Lax}
+    allowed-browser-origins: ${AGENT_ALLOWED_BROWSER_ORIGINS}
+    pm-login-url: ${PM_LOGIN_URL}
+    pm-ai-assistant-url: ${PM_AI_ASSISTANT_URL}
+    connect-timeout-ms: ${PM_SSO_CONNECT_TIMEOUT_MS:5000}
+    read-timeout-ms: ${PM_SSO_READ_TIMEOUT_MS:15000}
+  business-api:
+    # 外部业务接口必须设置有限连接和读取超时。
+    base-url: ${BUSINESS_API_BASE_URL}
+    connect-timeout-ms: ${BUSINESS_API_CONNECT_TIMEOUT_MS:5000}
+    read-timeout-ms: ${BUSINESS_API_READ_TIMEOUT_MS:30000}
+
+management:
+  server:
+    # 管理端点默认仅监听本机独立端口，外部监控需通过受控网络显式放行。
+    address: ${MANAGEMENT_ADDRESS:127.0.0.1}
+    port: ${MANAGEMENT_PORT:9091}
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      group:
+        readiness:
+          include: readinessState,db,redis,externalServices
+        liveness:
+          include: livenessState

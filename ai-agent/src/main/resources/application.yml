@@ -54,9 +54,9 @@ spring:
     baseline-version: 4
   servlet:
     multipart:
-      # 全局安全硬上限；每个字段仍由uploadSource.maxSizeMb进一步限制。
-      max-file-size: 500MB
-      max-request-size: 510MB
+      # 全局安全硬上限；能力字段仍可通过uploadSource.maxSizeMb设置更小限制。
+      max-file-size: ${MAX_UPLOAD_FILE_SIZE:100MB}
+      max-request-size: ${MAX_UPLOAD_REQUEST_SIZE:110MB}
 
 document:
   parse:
@@ -85,6 +85,27 @@ app:
     recover-delay-ms: 60000
     # 单个向量化任务最大处理时间，超过后进入恢复或失败流程
     timeout-minutes: 30
+  knowledge-query:
+    # 知识库查询使用独立有界线程池，避免占用公共ForkJoinPool。
+    timeout-ms: 180000
+    executor-core-size: 2
+    executor-max-size: 8
+    executor-queue-capacity: 100
+    shutdown-await-seconds: 30
+  external-service-resilience:
+    # 连续网络或服务端异常达到阈值后临时熔断，避免故障放大。
+    failure-threshold: 5
+    open-duration-ms: 30000
+  data-retention:
+    # 运行数据按固定白名单分批清理，定义、权限和业务文档不参与清理。
+    enabled: false
+    cron: "0 0 3 * * *"
+    batch-size: 500
+    max-batches-per-run: 20
+    runtime-days: 90
+    model-usage-days: 180
+    knowledge-query-days: 180
+    audit-days: 365
   agent:
     legacy-direct-chat:
       # 旧版模型直连接口默认关闭，紧急回滚时才临时开启。
@@ -119,6 +140,12 @@ app:
     model-config:
       # Redis模型缓存失效频道，只广播modelCode
       cache-invalidation-channel: ${MODEL_CONFIG_CACHE_INVALIDATION_CHANNEL:mc-ai:model-config:changed}
+    rate-limit:
+      # 普通请求和高成本请求分别限流，Redis负责多实例一致计数。
+      enabled: true
+      default-requests-per-minute: 120
+      expensive-requests-per-minute: 20
+      key-prefix: mc-ai:rate-limit:
     answer:
       # 标准事实模型开关，紧急回滚时可设为false
       structured-enabled: true

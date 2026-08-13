@@ -47,6 +47,16 @@ public class AgentSsoProperties {
     private String clientSecret;
 
     /**
+     * PM单点登录接口连接超时时间，单位毫秒。
+     */
+    private int connectTimeoutMs = 5_000;
+
+    /**
+     * PM单点登录接口读取超时时间，单位毫秒。
+     */
+    private int readTimeoutMs = 15_000;
+
+    /**
      * Agent会话最长有效时间，单位：秒。
      */
     private long sessionTtlSeconds = 1800L;
@@ -121,6 +131,12 @@ public class AgentSsoProperties {
         if (!StringUtils.hasText(clientSecret)) {
             throw new IllegalStateException(
                     "agent.sso.client-secret不能为空"
+            );
+        }
+
+        if (connectTimeoutMs <= 0 || readTimeoutMs <= 0) {
+            throw new IllegalStateException(
+                    "Agent SSO连接和读取超时时间必须大于0"
             );
         }
 

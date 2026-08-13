@@ -8,6 +8,7 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.example.ai.agent.common.exception.BusinessException;
 import org.example.ai.agent.sso.AgentSessionService;
+import org.example.ai.agent.stability.ExternalServiceCircuitBreaker;
 import org.springframework.http.HttpHeaders;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
@@ -36,6 +37,7 @@ public class HeaderCurrentUserProvider implements CurrentUserProvider {
     private final ObjectMapper objectMapper;
     private final RestClient restClient;
     private final AgentSessionService agentSessionService;
+    private final ExternalServiceCircuitBreaker circuitBreaker;
     /**
      * 身份查询总尝试次数。
      *
@@ -159,20 +161,28 @@ public class HeaderCurrentUserProvider implements CurrentUserProvider {
      * 401、403、500 等明确 HTTP 响应不重试。
      */
     private String requestPmUserInfo(String authorization) {
+        circuitBreaker.beforeCall("pm-user-info");
         RestClientException lastException = null;
         for (int attempt = 1; attempt <= PM_USER_INFO_MAX_ATTEMPTS; attempt++) {
             try {
-                return restClient.get()
+                String response = restClient.get()
                         .uri("/user/info")
                         .header(HttpHeaders.AUTHORIZATION,authorization)
                         .retrieve()
                         .body(String.class);
+                circuitBreaker.recordSuccess("pm-user-info");
+                return response;
 
             } catch (RestClientResponseException exception) {
                 /*
                  * PM 已经返回明确 HTTP 状态，
                  * 继续交给 loadFromPm() 按原规则处理。
                  */
+                if (exception.getStatusCode().is5xxServerError()) {
+                    circuitBreaker.recordFailure("pm-user-info");
+                } else {
+                    circuitBreaker.recordReachable("pm-user-info");
+                }
                 throw exception;
             } catch (RestClientException exception) {
                 lastException = exception;
@@ -188,6 +198,7 @@ public class HeaderCurrentUserProvider implements CurrentUserProvider {
                 );
             }
         }
+        circuitBreaker.recordFailure("pm-user-info");
         throw new RestClientException( "PM用户身份查询连续失败",lastException);
     }
 

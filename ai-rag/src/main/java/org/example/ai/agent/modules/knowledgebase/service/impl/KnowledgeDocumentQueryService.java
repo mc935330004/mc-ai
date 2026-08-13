@@ -1,6 +1,7 @@
 package org.example.ai.agent.modules.knowledgebase.service.impl;
 
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.example.ai.agent.common.enums.ModelCallType;
 import org.example.ai.agent.common.exception.BusinessException;
 import org.example.ai.agent.common.exception.ErrorCode;
@@ -12,6 +13,8 @@ import org.example.ai.agent.modules.KnowledgeLog.service.KnowledgeQueryLogServic
 import org.example.ai.agent.modules.KnowledgeLog.service.KnowledgeQueryReferenceService;
 import org.example.ai.agent.modules.knowledgebase.dto.KnowledgeDocumentQueryRequest;
 import org.example.ai.agent.modules.knowledgebase.dto.KnowledgeDocumentQueryResponse;
+import org.example.ai.agent.modules.knowledgebase.config.KnowledgeQueryProperties;
+import org.example.ai.agent.modules.knowledgebase.config.KnowledgeQueryTaskExecutor;
 import org.example.ai.agent.modules.knowledgebase.entity.KnowledgeChunk;
 import org.example.ai.agent.modules.knowledgebase.entity.KnowledgeDocument;
 import org.example.ai.agent.modules.knowledgebase.service.KnowledgeChunkService;
@@ -22,6 +25,7 @@ import org.example.ai.agent.modules.knowledgebase.security.KnowledgeAccessPrinci
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.document.Document;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.core.task.TaskRejectedException;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
@@ -30,7 +34,9 @@ import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Objects;
-import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Future;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.Collectors;
 
 import static org.springframework.util.StringUtils.truncate;
@@ -42,6 +48,7 @@ import static org.springframework.util.StringUtils.truncate;
  */
 @Service
 @RequiredArgsConstructor
+@Slf4j
 public class KnowledgeDocumentQueryService {
 
     private static final int DEFAULT_TOP_K = 5;
@@ -55,6 +62,8 @@ public class KnowledgeDocumentQueryService {
     private final KnowledgeChunkService chunkService;
     private final KnowledgeAccessContext knowledgeAccessContext;
     private final TrackedChatClientService trackedChatClientService;
+    private final KnowledgeQueryProperties knowledgeQueryProperties;
+    private final KnowledgeQueryTaskExecutor knowledgeQueryExecutor;
     /**
      *  只有包含上下文指代词的追问才拼接历史，
      * 避免普通问题被无关会话内容干扰。
@@ -86,21 +95,61 @@ public class KnowledgeDocumentQueryService {
          */
         KnowledgeAccessPrincipal principal =knowledgeAccessContext.getRequiredPrincipal();
 
-        SseEmitter emitter = new SseEmitter(0L);
-        CompletableFuture.runAsync(() -> doStreamQuery(
-                        request,
-                        emitter,
-                        context,
-                        principal
-                )
+        SseEmitter emitter = new SseEmitter(
+                knowledgeQueryProperties.getTimeoutMs()
         );
+        AtomicBoolean active = new AtomicBoolean(true);
+        AtomicReference<Future<?>> futureReference =
+                new AtomicReference<>();
+
+        emitter.onTimeout(() -> cancelStream(
+                active,
+                futureReference,
+                "TIMEOUT"
+        ));
+        emitter.onCompletion(() -> cancelStream(
+                active,
+                futureReference,
+                "COMPLETED"
+        ));
+        emitter.onError(error -> cancelStream(
+                active,
+                futureReference,
+                "ERROR"
+        ));
+
+        try {
+            Future<?> future = knowledgeQueryExecutor.submit(
+                    () -> doStreamQuery(
+                            request,
+                            emitter,
+                            context,
+                            principal,
+                            active
+                    )
+            );
+            futureReference.set(future);
+            if (!active.get()) {
+                future.cancel(true);
+            }
+        } catch (TaskRejectedException exception) {
+            active.set(false);
+            throw new BusinessException(
+                    503,
+                    "知识库查询任务繁忙，请稍后重试"
+            );
+        }
         return emitter;
     }
 
     private void doStreamQuery( KnowledgeDocumentQueryRequest request,
                                 SseEmitter emitter,
                                 ModelCallContext modelCallContext,
-                                KnowledgeAccessPrincipal principal) {
+                                KnowledgeAccessPrincipal principal,
+                                AtomicBoolean active) {
+        if (!active.get()) {
+            return;
+        }
         long start = System.currentTimeMillis();
         String question = normalizeQuestion(request);
         int topK = normalizeTopK(request);
@@ -122,7 +171,7 @@ public class KnowledgeDocumentQueryService {
                 sendEvent(emitter, "message", NO_RESULT_RESPONSE);
                 sendEvent(emitter, "references", List.of());
                 sendEvent(emitter, "done", "[DONE]");
-                emitter.complete();
+                completeStream(emitter, active);
                 return;
             }
 
@@ -152,14 +201,49 @@ public class KnowledgeDocumentQueryService {
                         saveQueryReferences(queryLog.getId(), hits);
                         sendEvent(emitter, "references", buildReferences(hits));
                         sendEvent(emitter, "done", "[DONE]");
-                        emitter.complete();
+                        completeStream(emitter, active);
                     })
                     .blockLast();
         } catch (Exception e) {
+            if (!active.compareAndSet(true, false)) {
+                log.debug(
+                        "知识库流式查询已取消，不再记录失败日志，errorType={}",
+                        e.getClass().getSimpleName()
+                );
+                return;
+            }
             saveQueryLog(principal,question, null, topK, minScore, "FAILED", e.getMessage(), start);
-            sendEvent(emitter, "error", truncate(e.getMessage()));
+            sendEventQuietly(emitter, "error", truncate(e.getMessage()));
             emitter.completeWithError(e);
         }
+    }
+
+    /**
+     * 正常完成流式查询，保证连接只关闭一次。
+     */
+    private void completeStream(
+            SseEmitter emitter,
+            AtomicBoolean active) {
+        if (active.compareAndSet(true, false)) {
+            emitter.complete();
+        }
+    }
+
+    /**
+     * 客户端断开或连接超时时取消后台查询任务。
+     */
+    private void cancelStream(
+            AtomicBoolean active,
+            AtomicReference<Future<?>> futureReference,
+            String reason) {
+        if (!active.compareAndSet(true, false)) {
+            return;
+        }
+        Future<?> future = futureReference.get();
+        if (future != null) {
+            future.cancel(true);
+        }
+        log.debug("知识库流式查询已结束，reason={}", reason);
     }
 
     /**
@@ -601,6 +685,20 @@ public class KnowledgeDocumentQueryService {
             emitter.send(SseEmitter.event().name(eventName).data(data));
         } catch (Exception e) {
             throw new BusinessException(ErrorCode.KNOWLEDGE_BASE_QUERY_FAILED, "SSE 发送失败: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * 异常结束时尽力发送错误事件，不覆盖原始异常。
+     */
+    private void sendEventQuietly(
+            SseEmitter emitter,
+            String eventName,
+            Object data) {
+        try {
+            sendEvent(emitter, eventName, data);
+        } catch (RuntimeException ignored) {
+            // 客户端已经断开时无需重复抛出发送异常。
         }
     }
 
