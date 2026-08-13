@@ -365,7 +365,7 @@ public class ModelConfigServiceImpl implements ModelConfigService {
                         .eq(ModelConfig::getDefaultModel,1)
                         .set(ModelConfig::getDefaultModel,0)
                         .set(ModelConfig::getUpdatedBy,operator)
-                        // 中文注释：默认模型被切换后，旧页面保存时必须产生版本冲突。
+                        // 默认模型被切换后，旧页面保存时必须产生版本冲突。
                         .setSql("version = version + 1")
         );
     }
@@ -422,7 +422,7 @@ public class ModelConfigServiceImpl implements ModelConfigService {
 
         return ModelConfigVO.builder()
                 .id(config.getId())
-                // 中文注释：前端后续修改时必须携带当前版本。
+                // 前端后续修改时必须携带当前版本。
                 .version(config.getVersion())
                 .modelCode(config.getModelCode())
                 .modelCode(config.getModelCode())
