@@ -1,6 +1,7 @@
 package org.example.ai.agent.modelusage.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import lombok.RequiredArgsConstructor;
 import org.example.ai.agent.common.enums.ModelCallType;
 import org.example.ai.agent.common.enums.ModelFailureCategory;
@@ -201,13 +202,17 @@ public class ModelUsageServiceImpl implements ModelUsageService {
     @Transactional(readOnly = true)
     public ModelUsageOverviewVO getOverview(
             int days,
-            int failureLimit) {
+            long failureCurrent,
+            long failureSize) {
 
         int normalizedDays =
                 Math.max(1, Math.min(days, 30));
 
-        int normalizedFailureLimit =
-                Math.max(1, Math.min(failureLimit, 100));
+        long normalizedFailureCurrent =
+                Math.max(1, failureCurrent);
+
+        long normalizedFailureSize =
+                Math.max(10, Math.min(failureSize, 50));
 
         LocalDateTime endTime = LocalDateTime.now();
         LocalDateTime startTime =
@@ -220,17 +225,20 @@ public class ModelUsageServiceImpl implements ModelUsageService {
             overview = createEmptyOverview();
         }
 
-        List<RecentModelFailureVO> recentFailures =
+        Page<RecentModelFailureVO> recentFailures =
                 modelUsageMapper.selectRecentFailures(
-                        startTime,
-                        normalizedFailureLimit
+                        new Page<>(
+                                normalizedFailureCurrent,
+                                normalizedFailureSize
+                        ),
+                        startTime
                 );
 
         /*
          * 原始异常信息不返回管理页面。
          * 页面只展示统一失败分类对应的安全提示。
          */
-        recentFailures.forEach(failure ->
+        recentFailures.getRecords().forEach(failure ->
                 failure.setErrorMessage(
                         resolveSafeFailureMessage(
                                 failure.getErrorCategory()
@@ -262,7 +270,9 @@ public class ModelUsageServiceImpl implements ModelUsageService {
         overview.setTotalTokens(0L);
         overview.setAverageDurationMs(0L);
         overview.setModels(List.of());
-        overview.setRecentFailures(List.of());
+        overview.setRecentFailures(
+                new Page<>(1, 10)
+        );
 
         return overview;
     }

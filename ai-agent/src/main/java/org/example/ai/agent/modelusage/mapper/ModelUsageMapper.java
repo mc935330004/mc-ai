@@ -1,6 +1,7 @@
 package org.example.ai.agent.modelusage.mapper;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import org.apache.ibatis.annotations.Mapper;
 import org.apache.ibatis.annotations.Param;
 import org.example.ai.agent.modelusage.entity.ModelUsageRecord;
@@ -36,8 +37,8 @@ public interface ModelUsageMapper extends BaseMapper<ModelUsageRecord> {
      *
      * SQL 不读取原始 error_message，避免管理接口泄漏供应商响应。
      */
-    List<RecentModelFailureVO> selectRecentFailures(
-            @Param("startTime") LocalDateTime startTime,
-            @Param("limit") int limit
+    Page<RecentModelFailureVO> selectRecentFailures(
+            Page<RecentModelFailureVO> page,
+            @Param("startTime") LocalDateTime startTime
     );
 }

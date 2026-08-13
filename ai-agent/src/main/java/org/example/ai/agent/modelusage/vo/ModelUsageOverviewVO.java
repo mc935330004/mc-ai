@@ -1,5 +1,6 @@
 package org.example.ai.agent.modelusage.vo;
 
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import lombok.Data;
 
 import java.math.BigDecimal;
@@ -60,5 +61,5 @@ public class ModelUsageOverviewVO {
     /**
      * 最近失败记录。
      */
-    private List<RecentModelFailureVO> recentFailures;
+    private Page<RecentModelFailureVO> recentFailures;
 }

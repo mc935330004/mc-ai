@@ -30,13 +30,17 @@ public class ModelUsageAdminController {
                     defaultValue = "7"
             ) int days,
             @RequestParam(
-                    defaultValue = "30"
-            ) int failureLimit) {
+                    defaultValue = "1"
+            ) long failureCurrent,
+            @RequestParam(
+                    defaultValue = "10"
+            ) long failureSize) {
 
         return Result.success(
                 modelUsageService.getOverview(
                         days,
-                        failureLimit
+                        failureCurrent,
+                        failureSize
                 )
         );
     }

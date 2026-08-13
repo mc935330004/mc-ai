@@ -75,7 +75,6 @@
         WHERE success = 0
           AND created_at <![CDATA[>=]]> #{startTime}
         ORDER BY id DESC
-            LIMIT #{limit}
     </select>
 
 </mapper>

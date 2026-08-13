@@ -72,10 +72,12 @@ public interface ModelUsageService {
      * 查询管理端模型调用监控数据。
      *
      * @param days 统计最近多少天
-     * @param failureLimit 最近失败数量
+     * @param failureCurrent 最近失败当前页
+     * @param failureSize 最近失败每页数量
      */
     ModelUsageOverviewVO getOverview(
             int days,
-            int failureLimit
+            long failureCurrent,
+            long failureSize
     );
 }
