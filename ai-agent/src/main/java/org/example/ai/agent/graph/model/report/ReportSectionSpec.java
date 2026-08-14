@@ -24,9 +24,17 @@ public record ReportSectionSpec(
         String parentKeyPath,
         String rootParentValue,
         String summaryPath,
+        List<ReportCalculationSpec> calculations,
         List<ReportFieldBindingSpec> fields) {
 
     public ReportSectionSpec {
+        /*
+         * 旧工作流配置没有 calculations，
+         * 反序列化时必须兼容为空集合。
+         */
+        calculations = calculations == null
+                ? List.of()
+                : List.copyOf(calculations);
         fields = fields == null
                 ? List.of()
                 : List.copyOf(fields);

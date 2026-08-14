@@ -81,9 +81,7 @@ public class TextCleaningService {
         if (text == null || text.isBlank()) {
             return "";
         }
-
         String t = text;
-
         // ========== 第一层：语义去噪 ==========
         t = CONTROL_CHARS.matcher(t).replaceAll("");
         t = IMAGE_FILENAME_LINE.matcher(t).replaceAll("");

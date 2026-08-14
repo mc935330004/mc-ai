@@ -7,7 +7,9 @@ import org.example.ai.agent.graph.model.report.ReportSectionSpec;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 import org.example.ai.agent.graph.model.report.ReportFollowUpSpec;
-
+import org.example.ai.agent.graph.model.report.ReportCalculationSpec;
+import org.example.ai.agent.graph.model.report.ReportCalculationTermSpec;
+import java.util.Locale;
 import java.util.Map;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -26,7 +28,35 @@ public class ReportDefinitionValidator {
 
     private static final int MAX_SECTION_COUNT = 20;
     private static final int MAX_FIELD_COUNT = 30;
+    /**
+     * 单个核心指标区块最多允许的计算指标数量。
+     */
+    private static final int MAX_CALCULATION_COUNT = 10;
 
+    /**
+     * 单个计算指标最多允许的计算项数量。
+     */
+    private static final int MAX_CALCULATION_TERM_COUNT = 10;
+
+    /**
+     * 计算指标名称最大长度。
+     */
+    private static final int MAX_CALCULATION_LABEL_LENGTH = 60;
+
+    /**
+     * 计算指标使用的稳定机器字段格式。
+     */
+    private static final Pattern CALCULATION_KEY = Pattern.compile(
+            "^[A-Za-z_][A-Za-z0-9_]{0,63}$"
+    );
+    /**
+     * 第一阶段允许的计算结果展示格式。
+     */
+    private static final Set<String> CALCULATION_DISPLAY_FORMATS = Set.of(
+            "NUMBER",
+            "AMOUNT",
+            "PERCENT"
+    );
     private static final Pattern SAFE_PATH = Pattern.compile(
             "^(\\$\\.)?[A-Za-z_][A-Za-z0-9_]*(\\[\\])?"
                     + "(\\.[A-Za-z_][A-Za-z0-9_]*(\\[\\])?)*$"
@@ -436,14 +466,9 @@ public class ReportDefinitionValidator {
         return value instanceof String text && text.trim().startsWith(SELECTED_PREFIX);
     }
 
-    private void validateSection(
-            ReportSectionSpec section,
-            int index,
-            List<GraphValidationError> errors) {
+    private void validateSection(ReportSectionSpec section, int index, List<GraphValidationError> errors) {
 
-        String graphPath =
-                "root.reportDefinition.sections[" + index + "]";
-
+        String graphPath = "root.reportDefinition.sections[" + index + "]";
         if (section == null || section.type() == null) {
             errors.add(error(
                     "REPORT_SECTION_TYPE_REQUIRED",
@@ -461,15 +486,19 @@ public class ReportDefinitionValidator {
             ));
         }
 
-        if (section.fields().isEmpty()) {
+        /*
+         * 核心指标允许只配置计算指标，
+         * 旧区块仍然继续使用普通字段。
+         */
+        if (section.fields().isEmpty() && section.calculations().isEmpty()) {
+
             errors.add(error(
                     "REPORT_FIELD_REQUIRED",
                     graphPath,
-                    "报告区块至少需要一个字段"
+                    "报告区块至少需要一个普通字段或计算指标"
             ));
             return;
         }
-
         if (section.fields().size() > MAX_FIELD_COUNT) {
             errors.add(error(
                     "REPORT_FIELD_LIMIT",
@@ -478,14 +507,249 @@ public class ReportDefinitionValidator {
                             + MAX_FIELD_COUNT
             ));
         }
-
         if (isItemSection(section.type())) {
-            validateItemSection(section, graphPath, errors);
+            validateItemSection(
+                    section,
+                    graphPath,
+                    errors
+            );
         } else {
-            validateTableSection(section, graphPath, errors);
+            validateTableSection(
+                    section,
+                    graphPath,
+                    errors
+            );
         }
 
-        validateFields(section, graphPath, errors);
+        validateFields(
+                section,
+                graphPath,
+                errors
+        );
+        validateCalculations(
+                section,
+                graphPath,
+                errors
+        );
+    }
+    /**
+     * 校验核心指标区块中的计算指标配置。
+     */
+    private void validateCalculations(
+            ReportSectionSpec section,
+            String graphPath,
+            List<GraphValidationError> errors) {
+
+        if (section.calculations().isEmpty()) {
+            return;
+        }
+
+        /*
+         * 第一阶段只允许核心指标区块配置计算公式，
+         * 避免改变基础信息和表格区块的渲染含义。
+         */
+        if (section.type() != ReportSectionType.METRICS) {
+            errors.add(error(
+                    "REPORT_CALCULATION_NOT_ALLOWED",
+                    graphPath,
+                    "只有核心指标区块允许配置计算指标"
+            ));
+            return;
+        }
+
+        if (section.calculations().size()
+                > MAX_CALCULATION_COUNT) {
+
+            errors.add(error(
+                    "REPORT_CALCULATION_LIMIT",
+                    graphPath,
+                    "单个核心指标区块计算指标不能超过"
+                            + MAX_CALCULATION_COUNT
+            ));
+        }
+
+        /*
+         * 计算指标不能与普通字段使用相同的稳定key。
+         */
+        Set<String> keys = new HashSet<>();
+
+        for (ReportFieldBindingSpec field : section.fields()) {
+            if (field != null
+                    && StringUtils.hasText(field.key())) {
+
+                keys.add(field.key().trim());
+            }
+        }
+
+        for (int index = 0;
+             index < section.calculations().size();
+             index++) {
+
+            ReportCalculationSpec calculation =
+                    section.calculations().get(index);
+
+            String calculationPath =
+                    graphPath
+                            + ".calculations["
+                            + index
+                            + "]";
+
+            validateCalculation(
+                    calculation,
+                    calculationPath,
+                    keys,
+                    errors
+            );
+        }
+    }
+
+    /**
+     * 校验单个计算指标。
+     */
+    private void validateCalculation(
+            ReportCalculationSpec calculation,
+            String graphPath,
+            Set<String> keys,
+            List<GraphValidationError> errors) {
+
+        if (calculation == null) {
+            errors.add(error(
+                    "REPORT_CALCULATION_INVALID",
+                    graphPath,
+                    "计算指标配置不能为空"
+            ));
+            return;
+        }
+
+        String key = calculation.key() == null
+                ? ""
+                : calculation.key().trim();
+
+        if (!CALCULATION_KEY.matcher(key).matches()
+                || !keys.add(key)) {
+
+            errors.add(error(
+                    "REPORT_CALCULATION_KEY_INVALID",
+                    graphPath,
+                    "计算指标key格式不正确或与其他字段重复"
+            ));
+        }
+
+        if (!StringUtils.hasText(calculation.label())
+                || calculation.label().trim().length()
+                > MAX_CALCULATION_LABEL_LENGTH) {
+
+            errors.add(error(
+                    "REPORT_CALCULATION_LABEL_INVALID",
+                    graphPath,
+                    "计算指标名称不能为空且不能超过"
+                            + MAX_CALCULATION_LABEL_LENGTH
+                            + "个字符"
+            ));
+        }
+
+        String displayFormat =
+                calculation.displayFormat() == null
+                        ? ""
+                        : calculation.displayFormat()
+                        .trim()
+                        .toUpperCase(Locale.ROOT);
+
+        if (!CALCULATION_DISPLAY_FORMATS.contains(
+                displayFormat)) {
+
+            errors.add(error(
+                    "REPORT_CALCULATION_FORMAT_INVALID",
+                    graphPath,
+                    "计算指标展示格式只允许NUMBER、AMOUNT或PERCENT"
+            ));
+        }
+
+        if (calculation.terms().size() < 2
+                || calculation.terms().size()
+                > MAX_CALCULATION_TERM_COUNT) {
+
+            errors.add(error(
+                    "REPORT_CALCULATION_TERM_LIMIT",
+                    graphPath,
+                    "计算指标必须包含2至"
+                            + MAX_CALCULATION_TERM_COUNT
+                            + "个计算项"
+            ));
+            return;
+        }
+
+        for (int index = 0;
+             index < calculation.terms().size();
+             index++) {
+
+            validateCalculationTerm(
+                    calculation.terms().get(index),
+                    index,
+                    graphPath
+                            + ".terms["
+                            + index
+                            + "]",
+                    errors
+            );
+        }
+    }
+
+    /**
+     * 校验计算公式中的单个字段计算项。
+     */
+    private void validateCalculationTerm(ReportCalculationTermSpec term, int index, String graphPath, List<GraphValidationError> errors) {
+        if (term == null) {
+            errors.add(error(
+                    "REPORT_CALCULATION_TERM_INVALID",
+                    graphPath,
+                    "计算项不能为空"
+            ));
+            return;
+        }
+        if (term.fieldId() == null || term.fieldId() <= 0) {
+            errors.add(error(
+                    "REPORT_CALCULATION_FIELD_INVALID",
+                    graphPath,
+                    "计算项必须选择有效的字段字典"
+            ));
+        }
+
+        /*
+         * 计算字段允许穿过中间数组，
+         * 但末级必须是具体标量字段。
+         */
+        if (!isAbsoluteScalarPath(term.sourcePath())) {
+            errors.add(error(
+                    "REPORT_CALCULATION_PATH_INVALID",
+                    graphPath,
+                    "计算字段必须使用安全的绝对标量路径"
+            ));
+        }
+
+        if (term.aggregation() == null) {
+            errors.add(error(
+                    "REPORT_CALCULATION_AGGREGATION_REQUIRED",
+                    graphPath,
+                    "计算项必须指定汇总方式"
+            ));
+        }
+
+        if (index == 0 && term.operator() != null) {
+            errors.add(error(
+                    "REPORT_CALCULATION_FIRST_OPERATOR_INVALID",
+                    graphPath,
+                    "第一个计算项不能配置运算符"
+            ));
+        }
+
+        if (index > 0 && term.operator() == null) {
+            errors.add(error(
+                    "REPORT_CALCULATION_OPERATOR_REQUIRED",
+                    graphPath,
+                    "第二个及后续计算项必须配置运算符"
+            ));
+        }
     }
 
     private void validateItemSection(

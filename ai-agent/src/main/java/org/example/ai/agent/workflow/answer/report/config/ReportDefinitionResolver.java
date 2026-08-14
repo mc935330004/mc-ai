@@ -14,7 +14,9 @@ import org.example.ai.agent.workflow.runtime.WorkflowExecutionOutcome;
 import org.example.ai.agent.workflow.runtime.WorkflowRuntimeSnapshotResolver;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
-
+import org.example.ai.agent.common.enums.report.ReportAggregationType;
+import org.example.ai.agent.graph.model.report.ReportCalculationSpec;
+import org.example.ai.agent.graph.model.report.ReportCalculationTermSpec;
 import java.util.*;
 
 /**
@@ -30,7 +32,20 @@ public class ReportDefinitionResolver {
     private final WorkflowCapabilityCodeCollector capabilityCodeCollector;
     private final FieldDictionaryMapper fieldDictionaryMapper;
     private final GraphSpecParser graphSpecParser;
-
+    /**
+     * 允许参与数值聚合的字段字典类型。
+     */
+    private static final Set<String> NUMBER_FIELD_TYPES = Set.of(
+            "number",
+            "integer",
+            "int",
+            "long",
+            "float",
+            "double",
+            "decimal",
+            "bigdecimal",
+            "numeric"
+    );
     public Optional<ResolvedReportDefinition> resolve(
             WorkflowExecutionOutcome outcome) {
 
@@ -104,23 +119,36 @@ public class ReportDefinitionResolver {
     /**
      * 收集报告引用的全部字段字典 ID。
      */
+    /**
+     * 收集普通展示字段、文件字段和计算字段引用的全部字典ID。
+     */
     private Set<Long> collectFieldIds(ReportDefinitionSpec definition) {
-
         Set<Long> fieldIds = new LinkedHashSet<>();
-
         for (ReportSectionSpec section : definition.sections()) {
-            for (ReportFieldBindingSpec field : section.fields()) {
 
+            for (ReportFieldBindingSpec field : section.fields()) {
                 if (field == null) {
                     continue;
                 }
-
                 if (field.fieldId() != null) {
                     fieldIds.add(field.fieldId());
                 }
-
                 if (field.fileUrlFieldId() != null) {
-                    fieldIds.add(field.fileUrlFieldId());
+                    fieldIds.add(
+                            field.fileUrlFieldId()
+                    );
+                }
+            }
+
+            for (ReportCalculationSpec calculation : section.calculations()) {
+                if (calculation == null) {
+                    continue;
+                }
+
+                for (ReportCalculationTermSpec term : calculation.terms()) {
+                    if (term != null && term.fieldId() != null) {
+                        fieldIds.add(term.fieldId());
+                    }
                 }
             }
         }
@@ -128,36 +156,26 @@ public class ReportDefinitionResolver {
         return fieldIds;
     }
 
-    private Map<Long, FieldDictionary> indexFields(
-            List<FieldDictionary> dictionaries) {
+    private Map<Long, FieldDictionary> indexFields(List<FieldDictionary> dictionaries) {
 
-        Map<Long, FieldDictionary> result =
-                new LinkedHashMap<>();
+        Map<Long, FieldDictionary> result = new LinkedHashMap<>();
 
         if (dictionaries == null) {
             return result;
         }
 
-        for (FieldDictionary dictionary :
-                dictionaries) {
+        for (FieldDictionary dictionary : dictionaries) {
 
-            if (dictionary != null
-                    && dictionary.getId() != null) {
+            if (dictionary != null && dictionary.getId() != null) {
 
-                result.put(
-                        dictionary.getId(),
-                        dictionary
-                );
+                result.put(dictionary.getId(), dictionary);
             }
         }
 
         return result;
     }
 
-    private void validateFields(
-            Set<Long> fieldIds,
-            Map<Long, FieldDictionary> fieldsById,
-            Set<String> workflowCapabilities) {
+    private void validateFields(Set<Long> fieldIds, Map<Long, FieldDictionary> fieldsById, Set<String> workflowCapabilities) {
 
         for (Long fieldId : fieldIds) {
             FieldDictionary field =
@@ -198,23 +216,24 @@ public class ReportDefinitionResolver {
             }
         }
     }
+
     /**
-     * 验证普通字段和文件字段的字典绑定。
+     * 验证普通字段、文件字段和计算字段的字典绑定。
      */
     private void validateBindings(
             ReportDefinitionSpec definition,
             Map<Long, FieldDictionary> fieldsById) {
 
-        for (ReportSectionSpec section : definition.sections()) {
+        for (ReportSectionSpec section :
+                definition.sections()) {
+
             for (ReportFieldBindingSpec binding : section.fields()) {
 
-                FieldDictionary dictionary =
-                        fieldsById.get(binding.fieldId());
+                FieldDictionary dictionary = fieldsById.get(binding.fieldId());
 
                 if (dictionary == null) {
                     continue;
                 }
-
                 if (binding.fileList()) {
                     validateFileBinding(
                             binding,
@@ -223,16 +242,98 @@ public class ReportDefinitionResolver {
                     );
                     continue;
                 }
+                validateBindingFieldName(dictionary, binding.sourcePath(), binding.fieldId());
+            }
+            validateCalculationBindings(section, fieldsById);
+        }
+    }
+    /**
+     * 验证计算指标引用的字段字典和取值路径。
+     */
+    private void validateCalculationBindings(ReportSectionSpec section, Map<Long, FieldDictionary> fieldsById) {
 
-                validateBindingFieldName(
-                        dictionary,
-                        binding.sourcePath(),
-                        binding.fieldId()
+        for (ReportCalculationSpec calculation : section.calculations()) {
+
+            if (calculation == null) {
+                throw new IllegalStateException(
+                        "报告计算指标配置不能为空"
+                );
+            }
+
+            for (ReportCalculationTermSpec term : calculation.terms()) {
+
+                validateCalculationTermBinding(
+                        term,
+                        fieldsById
                 );
             }
         }
     }
 
+    /**
+     * 验证单个计算项的字段字典绑定。
+     */
+    private void validateCalculationTermBinding(
+            ReportCalculationTermSpec term,
+            Map<Long, FieldDictionary> fieldsById) {
+
+        if (term == null || term.fieldId() == null) {
+            throw new IllegalStateException(
+                    "报告计算项没有配置字段字典"
+            );
+        }
+
+        FieldDictionary dictionary = fieldsById.get(term.fieldId());
+
+        if (dictionary == null) {
+            /*
+             * 正常情况下前面的字段完整性校验会先阻止，
+             * 这里保留运行时保护。
+             */
+            throw new IllegalStateException(
+                    "报告计算字段字典不存在："
+                            + term.fieldId()
+            );
+        }
+
+        validateBindingFieldName(
+                dictionary,
+                term.sourcePath(),
+                term.fieldId()
+        );
+
+        /*
+         * COUNT只统计有效标量数量，可以作用于字符串字段。
+         * 其他聚合方式必须使用数字字段。
+         */
+        if (term.aggregation() != ReportAggregationType.COUNT && !isNumberField(dictionary)) {
+
+            throw new IllegalStateException(
+                    "报告计算字段不是数字类型，fieldId="
+                            + term.fieldId()
+            );
+        }
+    }
+
+    /**
+     * 判断字段字典是否声明为数字类型。
+     */
+    private boolean isNumberField(FieldDictionary dictionary) {
+
+        if (dictionary == null
+                || !StringUtils.hasText(
+                dictionary.getFieldType())) {
+
+            return false;
+        }
+
+        String fieldType = dictionary
+                .getFieldType()
+                .trim()
+                .toLowerCase(Locale.ROOT);
+
+        return NUMBER_FIELD_TYPES.contains(fieldType);
+    }
     /**
      * 验证文件名和文件地址都来自同一个文件数组。
      */

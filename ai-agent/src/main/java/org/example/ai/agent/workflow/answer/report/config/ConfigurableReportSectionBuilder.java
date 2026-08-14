@@ -8,6 +8,9 @@ import org.example.ai.agent.chat.vo.ReportSchemaVO;
 import org.example.ai.agent.common.enums.ReportSectionType;
 import org.example.ai.agent.graph.model.ReportFieldBindingSpec;
 import org.example.ai.agent.graph.model.report.ReportSectionSpec;
+import lombok.extern.slf4j.Slf4j;
+import org.example.ai.agent.graph.model.report.ReportCalculationSpec;
+import org.example.ai.agent.graph.model.report.config.ReportMetricCalculationService;
 import org.example.ai.agent.tool.FieldMeta;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
@@ -24,6 +27,7 @@ import java.util.Map;
  *
  * 本类不查询业务接口、不调用大模型、不生成页面代码。
  */
+@Slf4j
 @Component
 @RequiredArgsConstructor
 public class ConfigurableReportSectionBuilder {
@@ -36,6 +40,11 @@ public class ConfigurableReportSectionBuilder {
     private static final int MAX_FILE_COUNT_PER_FIELD = 20;
     private final ReportValueReader valueReader;
     private final FactValueFormatter valueFormatter;
+
+    /**
+     * 负责执行核心指标中的结构化计算公式。
+     */
+    private final ReportMetricCalculationService metricCalculationService;
 
     public List<ReportSchemaVO.Section> build(ResolvedReportDefinition resolved,JsonNode safeResult) {
 
@@ -67,36 +76,29 @@ public class ConfigurableReportSectionBuilder {
         };
     }
 
-    private ReportSchemaVO.Section buildItemSection(
-            ReportSectionSpec section,
-            ResolvedReportDefinition resolved,
-            JsonNode safeResult) {
-
-        List<ReportSchemaVO.Item> items =
-                new ArrayList<>();
-
-        for (ReportFieldBindingSpec binding :
-                section.fields()) {
-
-            FieldDictionary dictionary =
-                    resolved.requireField(
-                            binding.fieldId()
-                    );
-
-            Object value = buildFieldValue(
-                    safeResult,
-                    binding,
-                    dictionary
-            );
-
-            items.add(
-                    new ReportSchemaVO.Item(
+    private ReportSchemaVO.Section buildItemSection(ReportSectionSpec section, ResolvedReportDefinition resolved, JsonNode safeResult) {
+        List<ReportSchemaVO.Item> items = new ArrayList<>();
+        /*
+         * 保留原有普通字段构建逻辑，
+         * 兼容已有基础信息和核心指标配置。
+         */
+        for (ReportFieldBindingSpec binding : section.fields()) {
+            FieldDictionary dictionary = resolved.requireField(binding.fieldId());
+            Object value = buildFieldValue(safeResult, binding, dictionary);
+            items.add(new ReportSchemaVO.Item(
                             binding.key(),
                             resolveLabel(dictionary, binding.key()),
                             value,
-                            resolveDataType(binding, dictionary)
-                    )
+                            resolveDataType(binding, dictionary))
             );
+        }
+
+        /*
+         * 只有核心指标区块追加计算结果，
+         * 不影响基础信息和表格区块。
+         */
+        if (section.type() == ReportSectionType.METRICS) {
+            items.addAll(buildCalculationItems(section, safeResult));
         }
 
         return new ReportSchemaVO.Section(
@@ -106,6 +108,40 @@ public class ConfigurableReportSectionBuilder {
                 List.of(),
                 List.of()
         );
+    }
+
+
+    /**
+     * 构建核心指标区块中的自定义计算结果。
+     *
+     * 单个计算指标执行失败时只返回空值，
+     * 不影响其他指标和报告区块继续生成。
+     */
+    private List<ReportSchemaVO.Item> buildCalculationItems(ReportSectionSpec section, JsonNode safeResult) {
+        List<ReportSchemaVO.Item> items = new ArrayList<>();
+        for (ReportCalculationSpec calculation : section.calculations()) {
+            Object value = null;
+            try {
+                value = metricCalculationService.calculate(
+                        calculation,
+                        safeResult
+                );
+            } catch (RuntimeException exception) {
+                /*
+                 * 日志只记录配置标识和异常类型，
+                 * 不记录接口返回的实际业务数据。
+                 */
+                log.warn(
+                        "报告计算指标构建失败，sectionTitle={}，calculationKey={}，errorType={}",
+                        section.title(),
+                        calculation.key(),
+                        exception.getClass().getSimpleName()
+                );
+            }
+            items.add(new ReportSchemaVO.Item(calculation.key(), calculation.label(), value, calculation.displayFormat()));
+        }
+
+        return List.copyOf(items);
     }
 
     /**
