@@ -533,7 +533,7 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
                                 .displayGroup(item.getDisplayGroup())
                                 .nullDisplayText(StringUtils.hasText(item.getNullDisplayText())
                                                 ? item.getNullDisplayText().trim()
-                                                : "当前数据中未提供")
+                                                : "")
                                 .build()
                 )
                 .toList();

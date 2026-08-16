@@ -36,20 +36,12 @@ public class WorkflowDefinitionController {
      * 分页查询工作流。
      */
     @GetMapping("/pageList")
-    public Result<Page<WorkflowDefinition>> pageList(
-            Page<WorkflowDefinition> page,
-            @RequestParam( value = "keyword", required = false)String keyword,
-            @RequestParam( value = "publishStatus", required = false)
-            String publishStatus,
-            @RequestParam(value = "enabled",required = false)Integer enabled) {
-        return Result.success(
-                workflowService.pageWorkflows(
-                        page,
-                        keyword,
-                        publishStatus,
-                        enabled
-                )
-        );
+    public Result<Page<WorkflowDefinition>> pageList(Page<WorkflowDefinition> page,
+                                                     @RequestParam( value = "keyword", required = false)String keyword,
+                                                     @RequestParam( value = "publishStatus", required = false)
+                                                         String publishStatus,
+                                                     @RequestParam(value = "enabled",required = false)Integer enabled) {
+        return Result.success(workflowService.pageWorkflows(page, keyword, publishStatus, enabled));
     }
 
     /**

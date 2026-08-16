@@ -145,6 +145,6 @@ public class FactValueFormatter {
         if (field != null && StringUtils.hasText(field.getNullDisplayText() )) {
             return field.getNullDisplayText();
         }
-        return "当前数据中未提供";
+        return "";
     }
 }

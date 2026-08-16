@@ -10,6 +10,8 @@ import java.util.Collection;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * GraphSpec运行表达式解析器。
@@ -20,6 +22,13 @@ import java.util.Map;
 @Component
 @RequiredArgsConstructor
 public class GraphRuntimeExpressionResolver {
+
+    /**
+     * 兼容旧工作流把原始响应的data层级重复写入workflowData的配置。
+     */
+    private static final Pattern LEGACY_WORKFLOW_DATA_PATH = Pattern.compile(
+            "^\\$vars\\.([A-Za-z0-9_-]+)\\.workflowData\\.data\\.(.+)$"
+    );
 
     private final RestrictedExpressionResolver
             restrictedExpressionResolver;
@@ -54,8 +63,58 @@ public class GraphRuntimeExpressionResolver {
                         .secure(Map.of())
                         .build();
 
-        return restrictedExpressionResolver.resolve(
+        Object value = restrictedExpressionResolver.resolve(
                 expression,
+                invocationContext
+        );
+
+        if (value != null) {
+            return value;
+        }
+
+        return resolveLegacyWorkflowDataPath(
+                expression,
+                context,
+                invocationContext
+        );
+    }
+
+    /**
+     * 旧配置路径如果多写了一层data，且当前workflowData已经是投影后的扁平结构，
+     * 自动尝试去掉重复层级，避免已发布工作流必须全部手工重配。
+     */
+    private Object resolveLegacyWorkflowDataPath(
+            String expression,
+            GraphExecutionContext context,
+            CapabilityInvocationContext invocationContext) {
+
+        Matcher matcher = LEGACY_WORKFLOW_DATA_PATH.matcher(
+                expression == null ? "" : expression
+        );
+        if (!matcher.matches()) {
+            return null;
+        }
+
+        Object envelope = context.snapshotVariables().get(
+                matcher.group(1)
+        );
+        if (!(envelope instanceof Map<?, ?> envelopeMap)) {
+            return null;
+        }
+
+        Object workflowData = envelopeMap.get("workflowData");
+        if (!(workflowData instanceof Map<?, ?> workflowDataMap)
+                || workflowDataMap.containsKey("data")) {
+            return null;
+        }
+
+        String compatibleExpression = "$vars."
+                + matcher.group(1)
+                + ".workflowData."
+                + matcher.group(2);
+
+        return restrictedExpressionResolver.resolve(
+                compatibleExpression,
                 invocationContext
         );
     }
