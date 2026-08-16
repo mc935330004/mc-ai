@@ -375,8 +375,17 @@ public class FieldDictionaryServiceImpl extends ServiceImpl<FieldDictionaryMappe
             JsonNode root = objectMapper.readTree(json);
             List<FieldDictionary> fields = new ArrayList<>();
             walkJson(capabilityCode,"$",root,fields);
-
-            return fields;
+            // 数组会扫描全部元素，按路径去重，同路径保留首次出现的字段。
+            return fields.stream()
+                    .collect(Collectors.toMap(
+                            FieldDictionary::getFieldPath,
+                            field -> field,
+                            (first, duplicate) -> first,
+                            LinkedHashMap::new
+                    ))
+                    .values()
+                    .stream()
+                    .toList();
         } catch (Exception e) {
             throw new BusinessException(400, "JSON解析失败：" + e.getMessage());
         }
@@ -487,6 +496,24 @@ public class FieldDictionaryServiceImpl extends ServiceImpl<FieldDictionaryMappe
      */
     private void walkJson(String capabilityCode, String path, JsonNode node, List<FieldDictionary> fields) {
         if (node == null || node.isNull()) {
+            // 值为 null 的字段也要展示：字段真实存在，只是本次样例值为空，类型未知按 string。
+            // 根节点或数组元素为 null 时无法得知结构，直接跳过。
+            if ("$".equals(path) || path.endsWith("[]")) {
+                return;
+            }
+            String fieldName = path.substring(path.lastIndexOf('.') + 1);
+            if (IGNORE_FIELD_NAMES.contains(fieldName)) {
+                return;
+            }
+            FieldDictionary field = new FieldDictionary();
+            field.setCapabilityCode(capabilityCode);
+            field.setFieldPath(path);
+            field.setFieldName(fieldName);
+            field.setFieldType("string");
+            field.setFieldCnName("");
+            field.setBusinessMeaning("");
+            field.setDisplayFormat(guessDisplayFormat(fieldName, node));
+            fields.add(field);
             return;
         }
         if (node.isObject()) {
@@ -499,8 +526,11 @@ public class FieldDictionaryServiceImpl extends ServiceImpl<FieldDictionaryMappe
             return;
         }
         if (node.isArray()) {
-            if (!node.isEmpty()) {
-                walkJson(capabilityCode, path + "[]", node.get(0), fields);
+            // 扫描全部非空元素而不是只取第一个，元素结构不一致时也能发现所有字段。
+            for (JsonNode item : node) {
+                if (item != null && !item.isNull()) {
+                    walkJson(capabilityCode, path + "[]", item, fields);
+                }
             }
             return;
         }

@@ -181,10 +181,7 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
                 }
             }
 
-            ToolResult sideEffectFailure =validateSideEffect(
-                            capability,
-                            step,
-                            confirmedWrite);
+            ToolResult sideEffectFailure =validateSideEffect(capability, step, confirmedWrite);
 
             if (sideEffectFailure != null) {
                 return sideEffectFailure;
@@ -204,20 +201,8 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
              * 把工作流输入、上游变量和可信安全上下文
              * 转换为能力绑定可以读取的调用上下文。
              */
-            CapabilityInvocationContext
-                    invocationContext =
-                    invocationContextFactory.create(
-                            context,
-                            step
-                    );
-
-            CapabilityHttpRequest httpRequest =
-                    httpRequestBuilder.build(
-                            capability,
-                            invocationContext,
-                            idempotencyKey
-                    );
-
+            CapabilityInvocationContext invocationContext = invocationContextFactory.create(context, step);
+            CapabilityHttpRequest httpRequest = httpRequestBuilder.build(capability, invocationContext, idempotencyKey);
             Object raw =httpInvoker.invoke(httpRequest);
 
             /*
@@ -228,22 +213,10 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
              * 2. data路径在哪里；
              * 3. 返回数据是否为空。
              */
-            ResponseInterpretationResult interpreted =
-                    responseInterpreter.interpret(
-                            capability,
-                            raw,
-                            adminReadTest
-                    );
+            ResponseInterpretationResult interpreted = responseInterpreter.interpret(capability, raw, adminReadTest);
 
             if (!interpreted.success()) {
-                return buildBusinessFailure(
-                        capabilityCode,
-                        step,
-                        httpRequest,
-                        interpreted,
-                        raw,
-                        adminReadTest
-                );
+                return buildBusinessFailure(capabilityCode, step, httpRequest, interpreted, raw, adminReadTest);
             }
             List<FieldMeta> fields = loadFieldMetas(capabilityCode);
             /*
@@ -257,8 +230,7 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
              */
             CapabilityOutputProjection projection = outputProjector.project(raw, interpreted.data(), fields);
 
-            List<AnswerFact> facts = dictionaryFactExtractor.extract(capabilityCode, raw, fields
-            );
+            List<AnswerFact> facts = dictionaryFactExtractor.extract(capabilityCode, raw, fields);
 
             return ToolResult.builder()
                     .success(true)
