@@ -69,6 +69,10 @@ public class FieldDictionaryServiceImpl extends ServiceImpl<FieldDictionaryMappe
     @Override
     public Boolean saveField(FieldDictionarySaveDTO dto) {
         validateDisplayConfig(dto);
+
+        String enumMappingJson = normalizeEnumMapping(dto.getDisplayFormat(), dto.getEnumMappingJson()
+        );
+
         boolean exists = lambdaQuery()
                 .eq(FieldDictionary::getCapabilityCode, dto.getCapabilityCode())
                 .eq(FieldDictionary::getFieldPath, dto.getFieldPath())
@@ -77,8 +81,12 @@ public class FieldDictionaryServiceImpl extends ServiceImpl<FieldDictionaryMappe
         if (exists) {
             throw new BusinessException(400, "同一能力下字段路径已存在：" + dto.getFieldPath());
         }
+
         FieldDictionary entity = new FieldDictionary();
         BeanUtils.copyProperties(dto, entity);
+
+        // 非枚举格式会自动清空旧映射，避免产生失效配置。
+        entity.setEnumMappingJson(enumMappingJson);
         entity.setCreatedAt(LocalDateTime.now());
         if (entity.getSearchable() == null) {
             entity.setSearchable(0);
@@ -86,27 +94,83 @@ public class FieldDictionaryServiceImpl extends ServiceImpl<FieldDictionaryMappe
         if (entity.getAggregatable() == null) {
             entity.setAggregatable(0);
         }
-        entity.setRequiredOutput(dto.getRequiredOutput() == null? 0 : dto.getRequiredOutput());
-        entity.setVisible( dto.getVisible() == null? 1: dto.getVisible());
-
-        entity.setDisplayOrder( dto.getDisplayOrder() == null? 0 : dto.getDisplayOrder());
-
+        entity.setRequiredOutput(dto.getRequiredOutput() == null
+                        ? 0
+                        : dto.getRequiredOutput());
+        entity.setVisible(dto.getVisible() == null
+                        ? 1
+                        : dto.getVisible());
+        entity.setDisplayOrder(dto.getDisplayOrder() == null
+                        ? 0
+                        : dto.getDisplayOrder()
+        );
         entity.setDisplayGroup(dto.getDisplayGroup());
-
         entity.setNullDisplayText(resolveNullDisplayText(dto.getFieldType()));
+
         return saveOrUpdate(entity);
     }
 
+    /**
+     * 校验并规范化枚举映射。
+     */
+    private String normalizeEnumMapping(String displayFormat, String enumMappingJson) {
+
+        if (!"enum".equalsIgnoreCase(displayFormat)) {
+            return null;
+        }
+        if (!StringUtils.hasText(enumMappingJson)) {
+            throw new BusinessException(
+                    400,
+                    "枚举展示格式必须配置枚举值映射"
+            );
+        }
+
+        if (enumMappingJson.length() > 8000) {
+            throw new BusinessException(400, "枚举值映射内容不能超过8000个字符");
+        }
+
+        try {
+            JsonNode root = objectMapper.readTree(enumMappingJson);
+            if (!root.isObject() || root.isEmpty()) {
+                throw new BusinessException(400, "枚举值映射必须是非空JSON对象");
+            }
+            if (root.size() > 100) {
+                throw new BusinessException(400, "单个字段最多配置100个枚举值");
+            }
+
+            Iterator<Map.Entry<String, JsonNode>> fields = root.fields();
+            Map<String, String> normalized = new LinkedHashMap<>();
+            while (fields.hasNext()) {
+                Map.Entry<String, JsonNode> entry = fields.next();
+                String rawValue = entry.getKey().trim();
+                JsonNode labelNode = entry.getValue();
+                if (!StringUtils.hasText(rawValue) || rawValue.length() > 64) {
+                    throw new BusinessException(400, "枚举原始值不能为空且不能超过64个字符");
+                }
+                if (labelNode == null || !labelNode.isTextual() || !StringUtils.hasText(labelNode.asText())) {
+                    throw new BusinessException(400, "枚举展示文字必须是非空字符串");
+                }
+                String label = labelNode.asText().trim();
+                if (label.length() > 128) {
+                    throw new BusinessException(400, "枚举展示文字不能超过128个字符");
+                }
+                normalized.put(rawValue, label);
+            }
+            return objectMapper.writeValueAsString(normalized);
+        } catch (BusinessException exception) {
+            throw exception;
+        } catch (Exception exception) {
+            throw new BusinessException(400, "枚举值映射不是合法JSON对象");
+        }
+    }
+
     @Override
-    public Boolean updateDisplayOptions(
-            Long id,
-            FieldDictionaryDisplayOptionsDTO dto) {
+    public Boolean updateDisplayOptions(Long id, FieldDictionaryDisplayOptionsDTO dto) {
 
         if (id == null || getById(id) == null) {
             throw new BusinessException(404, "字段字典不存在：" + id);
         }
         validateBinaryOption(dto);
-
         int visible = dto.getVisible();
         int requiredOutput = visible == 0
                 ? 0

@@ -157,62 +157,25 @@ public class WorkflowAnswerChunkConsumer {
      * 3. 不跳过失败分块；
      * 4. 第二次仍失败才交给外层终止本次报告生成。
      */
-    private String consumeChunkWithRetry(
-            AgentRequest request,
-            String runId,
-            String fieldSemanticsJson,
-            WorkflowAnswerChunkPlan plan,
-            WorkflowAnswerChunk chunk) {
-
-        String userPrompt =
-                buildUserPrompt(
-                        request,
-                        fieldSemanticsJson,
-                        plan,
-                        chunk
-                );
-
+    private String consumeChunkWithRetry(AgentRequest request, String runId, String fieldSemanticsJson, WorkflowAnswerChunkPlan plan, WorkflowAnswerChunk chunk) {
+        String userPrompt = buildUserPrompt(request, fieldSemanticsJson, plan, chunk);
         Exception lastException = null;
 
         for (int attempt = 1;attempt <= 2;attempt++) {
-            ModelCallType callType =
-                    attempt == 1
-                            ? ModelCallType.ANSWER
-                            : ModelCallType.ANSWER_RETRY;
-
-            ModelCallContext context =
-                    buildContext(
-                            request,
-                            runId,
-                            chunk.index(),
-                            callType);
+            ModelCallType callType = attempt == 1 ? ModelCallType.ANSWER : ModelCallType.ANSWER_RETRY;
+            ModelCallContext context = buildContext(request, runId, chunk.index(), callType);
 
             try {
-                ChatResponse response =
-                        chatClientService.call(
-                                context,
-                                SYSTEM_PROMPT,
-                                userPrompt
-                        );
-
+                ChatResponse response = chatClientService.call(context, SYSTEM_PROMPT, userPrompt);
                 /*
                  * 空响应也视为失败并进入重试，
                  * 不能把空字符串登记成成功分块。
                  */
                 return extractResponseText(response);
-
             } catch (Exception exception) {
                 lastException = exception;
-
                 if (attempt == 1) {
-                    log.warn(
-                            "工作流回答分块首次调用失败，准备重试，"
-                                    + "runId={}，chunkIndex={}，errorType={}",
-                            runId,
-                            chunk.index(),
-                            exception.getClass()
-                                    .getSimpleName()
-                    );
+                    log.warn("工作流回答分块首次调用失败，准备重试，"+ "runId={}，chunkIndex={}，errorType={}", runId, chunk.index(), exception.getClass().getSimpleName());
                 }
             }
         }
@@ -294,10 +257,7 @@ public class WorkflowAnswerChunkConsumer {
     private String extractResponseText(
             ChatResponse response) {
 
-        if (response == null
-                || response.getResult() == null
-                || response.getResult()
-                        .getOutput() == null) {
+        if (response == null || response.getResult() == null || response.getResult().getOutput() == null) {
 
             throw new IllegalStateException(
                     "模型没有返回有效的分块分析结果"

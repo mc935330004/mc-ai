@@ -48,32 +48,15 @@ public class ModelConfigController {
     }
 
     @PutMapping("/{modelCode}")
-    public Result<ModelConfigVO> update(
-            @PathVariable String modelCode,
-            @Valid @RequestBody ModelConfigSaveDTO dto) {
-
-        String operator =
-                currentUserProvider.getRequiredUserId();
-
-        return Result.success(
-                modelConfigService.update(
-                        modelCode,
-                        dto,
-                        operator
-                )
-        );
+    public Result<ModelConfigVO> update(@PathVariable String modelCode, @Valid @RequestBody ModelConfigSaveDTO dto) {
+        String operator = currentUserProvider.getRequiredUserId();
+        return Result.success(modelConfigService.update(modelCode, dto, operator));
     }
 
     @PatchMapping("/{modelCode}/status")
-    public Result<Void> updateStatus(
-            @PathVariable String modelCode,
-            @Valid @RequestBody ModelStatusDTO dto) {
-
+    public Result<Void> updateStatus(@PathVariable String modelCode, @Valid @RequestBody ModelStatusDTO dto) {
         String operator =currentUserProvider.getRequiredUserId();
-        modelConfigService.updateStatus(modelCode,
-                dto.getEnabled(),
-                dto.getVersion(),
-                operator );
+        modelConfigService.updateStatus(modelCode, dto.getEnabled(), dto.getVersion(), operator );
         return Result.success();
     }
 

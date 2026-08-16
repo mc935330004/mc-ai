@@ -40,7 +40,10 @@ public class ConfigurableReportSectionBuilder {
     private static final int MAX_FILE_COUNT_PER_FIELD = 20;
     private final ReportValueReader valueReader;
     private final FactValueFormatter valueFormatter;
-
+    /**
+     * 单个报告区块最多允许的分组数量。
+     */
+    private static final int MAX_GROUP_COUNT = 500;
     /**
      * 负责执行核心指标中的结构化计算公式。
      */
@@ -57,8 +60,10 @@ public class ConfigurableReportSectionBuilder {
         return List.copyOf(sections);
     }
 
-    private ReportSchemaVO.Section buildSection(ReportSectionSpec section,ResolvedReportDefinition resolved,
-                                                JsonNode safeResult) {
+    private ReportSchemaVO.Section buildSection(
+            ReportSectionSpec section,
+            ResolvedReportDefinition resolved,
+            JsonNode safeResult) {
 
         return switch (section.type()) {
             case KEY_VALUE, METRICS ->
@@ -67,13 +72,131 @@ public class ConfigurableReportSectionBuilder {
                             resolved,
                             safeResult
                     );
+
             case TABLE, TREE_TABLE ->
                     buildTableSection(
                             section,
                             resolved,
                             safeResult
                     );
+
+            case GROUP_TABLE ->buildGroupTableSection(
+                            section,
+                            resolved,
+                            safeResult
+                    );
         };
+    }
+    /**
+     * 根据配置构建分组明细表。
+     *
+     * 分组路径相对于完整结果，
+     * 明细路径相对于当前分组记录。
+     */
+    private ReportSchemaVO.Section buildGroupTableSection(ReportSectionSpec section, ResolvedReportDefinition resolved, JsonNode safeResult) {
+
+        List<JsonNode> groupNodes = valueReader.readMany(safeResult, section.groupPath());
+
+        if (groupNodes.size() > MAX_GROUP_COUNT) {
+            throw new IllegalStateException(
+                    "报告分组数量超过限制：" + MAX_GROUP_COUNT
+            );
+        }
+        List<ReportSchemaVO.Column> columns = buildColumns(section, resolved);
+
+        List<ReportSchemaVO.Group> groups = new ArrayList<>();
+
+        Set<String> groupKeys = new HashSet<>();
+        RowCounter rowCounter = new RowCounter();
+
+        for (JsonNode groupNode : groupNodes) {
+            if (groupNode == null || !groupNode.isObject()) {
+                throw new IllegalStateException(
+                        "分组报告的分组数据必须是对象"
+                );
+            }
+
+            String groupKey = readRequiredGroupKey(groupNode, section.groupKeyPath());
+
+            if (!groupKeys.add(groupKey)) {
+                throw new IllegalStateException(
+                        "分组报告存在重复分组标识：" + groupKey
+                );
+            }
+
+            GroupHeader groupHeader = buildGroupHeader(groupNode, section, resolved);
+
+            List<Map<String, Object>> detailRows = buildGroupDetailRows(groupNode, section, resolved, rowCounter);
+
+            groups.add(new ReportSchemaVO.Group(groupKey, groupHeader.title(), groupHeader.items(), detailRows));
+        }
+        return new ReportSchemaVO.Section(section.type().name(), section.title(), List.of(), columns, List.of(), groups);
+    }
+
+    /**
+     * 构建一个分组的标题和汇总字段。
+     *
+     * 标题必须引用已经通过字段字典校验的字段，
+     * 防止直接配置路径绕过字段展示权限。
+     */
+    private GroupHeader buildGroupHeader(
+            JsonNode groupNode,
+            ReportSectionSpec section,
+            ResolvedReportDefinition resolved) {
+
+        String title = null;
+        List<ReportSchemaVO.Item> items = new ArrayList<>();
+
+        for (ReportFieldBindingSpec binding : section.groupFields()) {
+
+            FieldDictionary dictionary = resolved.requireField(binding.fieldId());
+
+            Object value = buildFieldValue(groupNode, binding, dictionary);
+
+            if (binding.key().equals(section.groupTitleKey())) {
+                title = value == null ? null : String.valueOf(value).trim();
+
+                continue;
+            }
+
+            items.add(new ReportSchemaVO.Item(binding.key(), resolveLabel(dictionary, binding.key()), value,
+                            resolveDataType(binding, dictionary)));
+        }
+        if (!StringUtils.hasText(title)) {
+            throw new IllegalStateException(
+                    "分组报告缺少有效的分组标题"
+            );
+        }
+        return new GroupHeader(title, List.copyOf(items));
+    }
+    /**
+     * 构建当前分组下面的明细行。
+     */
+    private List<Map<String, Object>> buildGroupDetailRows(JsonNode groupNode, ReportSectionSpec section, ResolvedReportDefinition resolved, RowCounter rowCounter) {
+        List<JsonNode> detailNodes = valueReader.readMany(groupNode, section.detailPath());
+        List<Map<String, Object>> rows = new ArrayList<>();
+        for (JsonNode detailNode : detailNodes) {
+            rows.add(buildRow(detailNode, section, resolved, 0, rowCounter));
+        }
+        return List.copyOf(rows);
+    }
+
+    /**
+     * 读取分组稳定标识。
+     */
+    private String readRequiredGroupKey(JsonNode groupNode, String groupKeyPath) {
+
+        JsonNode value = valueReader.readScalar(groupNode, groupKeyPath);
+        if (value == null || !value.isValueNode()) {
+            throw new IllegalStateException(
+                    "分组报告缺少稳定分组标识"
+            );
+        }
+        String groupKey = value.asText().trim();
+        if (!StringUtils.hasText(groupKey)) {
+            throw new IllegalStateException("分组报告缺少稳定分组标识");
+        }
+        return groupKey;
     }
 
     private ReportSchemaVO.Section buildItemSection(ReportSectionSpec section, ResolvedReportDefinition resolved, JsonNode safeResult) {
@@ -686,13 +809,15 @@ public class ConfigurableReportSectionBuilder {
     }
 
     private FieldMeta toFieldMeta(FieldDictionary dictionary) {
-
         return FieldMeta.builder()
                 .name(dictionary.getFieldName())
                 .cnName(dictionary.getFieldCnName())
                 .path(dictionary.getFieldPath())
                 .type(dictionary.getFieldType())
                 .format(dictionary.getDisplayFormat())
+                .enumMappingJson(
+                        dictionary.getEnumMappingJson()
+                )
                 .meaning(dictionary.getBusinessMeaning())
                 .requiredOutput(
                         dictionary.getRequiredOutput()
@@ -767,7 +892,12 @@ public class ConfigurableReportSectionBuilder {
             children.add(child);
         }
     }
+    /**
+     * 分组头部的内部构建结果。
+     */
+    private record GroupHeader(String title, List<ReportSchemaVO.Item> items) {
 
+    }
     private static final class RowCounter {
         private int count;
         private void increment() {

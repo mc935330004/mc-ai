@@ -42,30 +42,74 @@ public record ReportSchemaVO(
 
     /**
      * 报告区块。
-     *
-     * METRICS 表示汇总指标。
-     * TABLE 表示固定表格。
-     * WARNINGS 表示数据状态。
      */
     public record Section(
             String type,
             String title,
             List<Item> items,
             List<Column> columns,
-            List<Map<String, Object>> rows) {
+            List<Map<String, Object>> rows,
+            List<Group> groups) {
+
+        /**
+         * 保留旧构造方法，避免修改现有报告模板。
+         */
+        public Section(
+                String type,
+                String title,
+                List<Item> items,
+                List<Column> columns,
+                List<Map<String, Object>> rows) {
+
+            this(
+                    type,
+                    title,
+                    items,
+                    columns,
+                    rows,
+                    List.of()
+            );
+        }
 
         public Section {
-            items =items == null
-                            ? List.of()
-                            : List.copyOf(items);
+            items = items == null
+                    ? List.of()
+                    : List.copyOf(items);
 
-            columns =columns == null
-                            ? List.of()
-                            : List.copyOf(columns);
+            columns = columns == null
+                    ? List.of()
+                    : List.copyOf(columns);
 
-            rows =rows == null
-                            ? List.of()
-                            : List.copyOf(rows);
+            rows = rows == null
+                    ? List.of()
+                    : List.copyOf(rows);
+
+            groups = groups == null
+                    ? List.of()
+                    : List.copyOf(groups);
+        }
+    }
+
+    /**
+     * 分组明细表中的一个分组。
+     *
+     * items 保存分组汇总信息，
+     * rows 保存当前分组的明细数据。
+     */
+    public record Group(
+            String key,
+            String title,
+            List<Item> items,
+            List<Map<String, Object>> rows) {
+
+        public Group {
+            items = items == null
+                    ? List.of()
+                    : List.copyOf(items);
+
+            rows = rows == null
+                    ? List.of()
+                    : List.copyOf(rows);
         }
     }
 

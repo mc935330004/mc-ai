@@ -647,3 +647,16 @@ SET null_display_text = CASE
     ) THEN '0'
     ELSE NULL
 END;
+-- ============================================================
+-- 字段字典枚举值映射
+--
+-- 说明：
+-- 1. 只有 display_format=enum 时使用；
+-- 2. 保存业务原始值与展示文字的对应关系；
+-- 3. 未命中映射时保留原始值，避免隐藏未知业务状态。
+-- ============================================================
+
+ALTER TABLE ai_field_dictionary
+    ADD COLUMN enum_mapping_json TEXT NULL
+        COMMENT '枚举值映射JSON，例如：{"0":"审批中","1":"审批通过"}'
+        AFTER display_format;

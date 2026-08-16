@@ -122,29 +122,18 @@ public class ReportDefinitionResolver {
     /**
      * 收集普通展示字段、文件字段和计算字段引用的全部字典ID。
      */
+    /**
+     * 收集普通字段、分组字段、文件字段和计算字段引用的全部字典ID。
+     */
     private Set<Long> collectFieldIds(ReportDefinitionSpec definition) {
         Set<Long> fieldIds = new LinkedHashSet<>();
         for (ReportSectionSpec section : definition.sections()) {
-
-            for (ReportFieldBindingSpec field : section.fields()) {
-                if (field == null) {
-                    continue;
-                }
-                if (field.fieldId() != null) {
-                    fieldIds.add(field.fieldId());
-                }
-                if (field.fileUrlFieldId() != null) {
-                    fieldIds.add(
-                            field.fileUrlFieldId()
-                    );
-                }
-            }
-
+            collectBindingFieldIds(section.fields(), fieldIds);
+            collectBindingFieldIds(section.groupFields(), fieldIds);
             for (ReportCalculationSpec calculation : section.calculations()) {
                 if (calculation == null) {
                     continue;
                 }
-
                 for (ReportCalculationTermSpec term : calculation.terms()) {
                     if (term != null && term.fieldId() != null) {
                         fieldIds.add(term.fieldId());
@@ -152,9 +141,27 @@ public class ReportDefinitionResolver {
                 }
             }
         }
-
         return fieldIds;
     }
+
+    /**
+     * 收集普通字段或分组字段引用的字段字典ID。
+     */
+    private void collectBindingFieldIds(List<ReportFieldBindingSpec> bindings, Set<Long> fieldIds) {
+
+        for (ReportFieldBindingSpec field : bindings) {
+            if (field == null) {
+                continue;
+            }
+            if (field.fieldId() != null) {
+                fieldIds.add(field.fieldId());
+            }
+            if (field.fileUrlFieldId() != null) {
+                fieldIds.add(field.fileUrlFieldId());
+            }
+        }
+    }
+
 
     private Map<Long, FieldDictionary> indexFields(List<FieldDictionary> dictionaries) {
 
@@ -220,33 +227,38 @@ public class ReportDefinitionResolver {
     /**
      * 验证普通字段、文件字段和计算字段的字典绑定。
      */
-    private void validateBindings(
-            ReportDefinitionSpec definition,
-            Map<Long, FieldDictionary> fieldsById) {
-
-        for (ReportSectionSpec section :
-                definition.sections()) {
-
-            for (ReportFieldBindingSpec binding : section.fields()) {
-
-                FieldDictionary dictionary = fieldsById.get(binding.fieldId());
-
-                if (dictionary == null) {
-                    continue;
-                }
-                if (binding.fileList()) {
-                    validateFileBinding(
-                            binding,
-                            dictionary,
-                            fieldsById
-                    );
-                    continue;
-                }
-                validateBindingFieldName(dictionary, binding.sourcePath(), binding.fieldId());
-            }
+    /**
+     * 验证普通字段、分组字段、文件字段和计算字段绑定。
+     */
+    private void validateBindings(ReportDefinitionSpec definition, Map<Long, FieldDictionary> fieldsById) {
+        for (ReportSectionSpec section : definition.sections()) {
+            validateBindingList(section.fields(), fieldsById);
+            validateBindingList(section.groupFields(), fieldsById);
+            /*
+             * 保留原有核心指标计算字段校验，
+             * 避免新增分组列表影响已有报告。
+             */
             validateCalculationBindings(section, fieldsById);
         }
     }
+
+    /**
+     * 校验一组报告字段绑定。
+     */
+    private void validateBindingList(List<ReportFieldBindingSpec> bindings, Map<Long, FieldDictionary> fieldsById) {
+        for (ReportFieldBindingSpec binding : bindings) {
+            FieldDictionary dictionary = fieldsById.get(binding.fieldId());
+            if (dictionary == null) {
+                continue;
+            }
+            if (binding.fileList()) {
+                validateFileBinding(binding, dictionary, fieldsById);
+                continue;
+            }
+            validateBindingFieldName(dictionary, binding.sourcePath(), binding.fieldId());
+        }
+    }
+
     /**
      * 验证计算指标引用的字段字典和取值路径。
      */

@@ -245,12 +245,7 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
                         adminReadTest
                 );
             }
-
-            List<FieldMeta> fields =
-                    loadFieldMetas(
-                            capabilityCode
-                    );
-
+            List<FieldMeta> fields = loadFieldMetas(capabilityCode);
             /*
              * 生成双通道安全数据：
              *
@@ -260,19 +255,10 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
              * displayData：
              * 使用记录ID、项目编码等中文展示字段。
              */
-            CapabilityOutputProjection projection =
-                    outputProjector.project(
-                            raw,
-                            interpreted.data(),
-                            fields
-                    );
+            CapabilityOutputProjection projection = outputProjector.project(raw, interpreted.data(), fields);
 
-            List<AnswerFact> facts =
-                    dictionaryFactExtractor.extract(
-                            capabilityCode,
-                            raw,
-                            fields
-                    );
+            List<AnswerFact> facts = dictionaryFactExtractor.extract(capabilityCode, raw, fields
+            );
 
             return ToolResult.builder()
                     .success(true)
@@ -561,53 +547,21 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
         return dictionaries.stream()
                 .map(item ->
                         FieldMeta.builder()
-                                .name(
-                                        item.getFieldName()
-                                )
-                                .cnName(
-                                        item.getFieldCnName()
-                                )
-                                .path(
-                                        item.getFieldPath()
-                                )
-                                .type(
-                                        item.getFieldType()
-                                )
-                                .format(
-                                        item.getDisplayFormat()
-                                )
-                                .meaning(
-                                        item.getBusinessMeaning()
-                                )
-                                .requiredOutput(
-                                        defaultInteger(
-                                                item.getRequiredOutput(),
-                                                0
-                                        )
-                                )
-                                .visible(
-                                        defaultInteger(
-                                                item.getVisible(),
-                                                1
-                                        )
-                                )
-                                .displayOrder(
-                                        defaultInteger(
-                                                item.getDisplayOrder(),
-                                                0
-                                        )
-                                )
-                                .displayGroup(
-                                        item.getDisplayGroup()
-                                )
-                                .nullDisplayText(
-                                        StringUtils.hasText(
-                                                item.getNullDisplayText()
-                                        )
-                                                ? item.getNullDisplayText()
-                                                .trim()
-                                                : "当前数据中未提供"
-                                )
+                                .name(item.getFieldName())
+                                .cnName(item.getFieldCnName())
+                                .path(item.getFieldPath())
+                                .type(item.getFieldType())
+                                .format(item.getDisplayFormat())
+                                .enumMappingJson(item.getEnumMappingJson())
+                                .meaning(item.getBusinessMeaning())
+                                .requiredOutput(defaultInteger(item.getRequiredOutput(), 0))
+                                .visible(defaultInteger(item.getVisible(),
+                                                1))
+                                .displayOrder(defaultInteger(item.getDisplayOrder(), 0))
+                                .displayGroup(item.getDisplayGroup())
+                                .nullDisplayText(StringUtils.hasText(item.getNullDisplayText())
+                                                ? item.getNullDisplayText().trim()
+                                                : "当前数据中未提供")
                                 .build()
                 )
                 .toList();

@@ -69,6 +69,13 @@ public class FieldDictionary {
     private String displayFormat;
 
     /**
+     * 枚举原始值与展示文字的映射配置。
+     *
+     * 仅在 displayFormat=enum 时生效。
+     */
+    private String enumMappingJson;
+
+    /**
      * 示例值。
      */
     private String exampleValue;

@@ -44,10 +44,8 @@ public class ReportMetricCalculationService {
         List<ReportCalculationTermSpec> terms =
                 calculation.terms();
 
-        if (terms.size() < 2) {
-            throw new IllegalArgumentException(
-                    "计算指标至少需要两个计算项"
-            );
+        if (terms.isEmpty()) {
+            throw new IllegalArgumentException("计算指标至少需要一个计算项");
         }
 
         BigDecimal current = aggregate(

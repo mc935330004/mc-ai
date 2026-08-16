@@ -39,6 +39,11 @@ public class FieldMeta {
     private String format;
 
     /**
+     * 枚举原始值与展示文字的映射配置。
+     */
+    private String enumMappingJson;
+
+    /**
      * 业务含义说明。
      */
     private String meaning;

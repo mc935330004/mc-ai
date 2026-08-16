@@ -490,7 +490,7 @@ public class ReportDefinitionValidator {
          * 核心指标允许只配置计算指标，
          * 旧区块仍然继续使用普通字段。
          */
-        if (section.fields().isEmpty() && section.calculations().isEmpty()) {
+        if (section.fields().isEmpty() && section.groupFields().isEmpty() && section.calculations().isEmpty()) {
 
             errors.add(error(
                     "REPORT_FIELD_REQUIRED",
@@ -507,8 +507,22 @@ public class ReportDefinitionValidator {
                             + MAX_FIELD_COUNT
             ));
         }
+        if (section.groupFields().size() > MAX_FIELD_COUNT) {
+            errors.add(error(
+                    "REPORT_GROUP_FIELD_LIMIT",
+                    graphPath,
+                    "单个分组区块的分组字段数量不能超过"
+                            + MAX_FIELD_COUNT
+            ));
+        }
         if (isItemSection(section.type())) {
             validateItemSection(
+                    section,
+                    graphPath,
+                    errors
+            );
+        } else if (section.type() == ReportSectionType.GROUP_TABLE) {
+            validateGroupTableSection(
                     section,
                     graphPath,
                     errors
@@ -532,6 +546,106 @@ public class ReportDefinitionValidator {
                 errors
         );
     }
+
+    /**
+     * 校验分组明细表配置。
+     */
+    private void validateGroupTableSection(ReportSectionSpec section, String graphPath, List<GraphValidationError> errors) {
+        if (!isAbsoluteArrayPath(section.groupPath())) {
+
+            errors.add(error(
+                    "REPORT_GROUP_PATH_INVALID",
+                    graphPath,
+                    "分组数据路径必须是以 $. 开头并以 [] 结尾的安全路径"
+            ));
+        }
+
+        if (!isRelativeScalarPath(section.groupKeyPath())) {
+
+            errors.add(error(
+                    "REPORT_GROUP_KEY_PATH_INVALID",
+                    graphPath,
+                    "分组唯一标识必须是相对标量路径"
+            ));
+        }
+
+        if (!isRelativeArrayPath(section.detailPath())) {
+
+            errors.add(error(
+                    "REPORT_DETAIL_PATH_INVALID",
+                    graphPath,
+                    "分组明细路径必须是以 [] 结尾的相对数组路径"
+            ));
+        }
+
+        if (section.groupFields().isEmpty()) {
+            errors.add(error(
+                    "REPORT_GROUP_FIELD_REQUIRED",
+                    graphPath,
+                    "分组明细表至少需要一个分组字段"
+            ));
+        }
+
+        if (section.fields().isEmpty()) {
+            errors.add(error(
+                    "REPORT_DETAIL_FIELD_REQUIRED",
+                    graphPath,
+                    "分组明细表至少需要一个明细字段"
+            ));
+        }
+        validateGroupTitleKey(
+                section,
+                graphPath,
+                errors
+        );
+
+        /*
+         * GROUP_TABLE 使用独立路径配置，
+         * 禁止混用普通表格和树表配置。
+         */
+        boolean mixedLegacyPath = StringUtils.hasText(section.rowPath()) ||
+                StringUtils.hasText(section.rowKeyPath()) || StringUtils.hasText(section.childrenPath()) ||
+                StringUtils.hasText(section.parentKeyPath()) || StringUtils.hasText(section.rootParentValue()) ||
+                StringUtils.hasText(section.summaryPath());
+        if (mixedLegacyPath) {
+            errors.add(error("REPORT_GROUP_PATH_CONFLICT", graphPath, "分组明细表不能同时配置普通列表或树形列表路径"));
+        }
+    }
+
+    /**
+     * 分组标题必须引用已经配置的普通分组字段。
+     */
+    private void validateGroupTitleKey(ReportSectionSpec section, String graphPath, List<GraphValidationError> errors) {
+        if (!StringUtils.hasText(section.groupTitleKey())) {
+            errors.add(error(
+                    "REPORT_GROUP_TITLE_REQUIRED",
+                    graphPath,
+                    "分组标题字段不能为空"
+            ));
+            return;
+        }
+        ReportFieldBindingSpec titleField = section.groupFields()
+                        .stream()
+                        .filter(field -> field != null && section.groupTitleKey().equals(field.key()))
+                        .findFirst()
+                        .orElse(null);
+        if (titleField == null) {
+            errors.add(error(
+                    "REPORT_GROUP_TITLE_NOT_FOUND",
+                    graphPath,
+                    "分组标题必须引用已选择的分组字段"
+            ));
+            return;
+        }
+        if (titleField.fileList()) {
+            errors.add(error(
+                    "REPORT_GROUP_TITLE_FILE_NOT_ALLOWED",
+                    graphPath,
+                    "文件字段不能作为分组标题"
+            ));
+        }
+    }
+
     /**
      * 校验核心指标区块中的计算指标配置。
      */
@@ -665,17 +779,9 @@ public class ReportDefinitionValidator {
             ));
         }
 
-        if (calculation.terms().size() < 2
-                || calculation.terms().size()
-                > MAX_CALCULATION_TERM_COUNT) {
-
-            errors.add(error(
-                    "REPORT_CALCULATION_TERM_LIMIT",
-                    graphPath,
-                    "计算指标必须包含2至"
-                            + MAX_CALCULATION_TERM_COUNT
-                            + "个计算项"
-            ));
+        if (calculation.terms().isEmpty() || calculation.terms().size() > MAX_CALCULATION_TERM_COUNT) {
+            errors.add(error("REPORT_CALCULATION_TERM_LIMIT", graphPath, "计算指标必须包含1至"
+                    + MAX_CALCULATION_TERM_COUNT + "个计算项"));
             return;
         }
 
@@ -851,13 +957,39 @@ public class ReportDefinitionValidator {
             String graphPath,
             List<GraphValidationError> errors) {
 
+        validateFieldList(
+                section.fields(),
+                graphPath + ".fields",
+                isItemSection(section.type()),
+                section.type()
+                        == ReportSectionType.TREE_TABLE,
+                errors
+        );
+
+        if (section.type()
+                == ReportSectionType.GROUP_TABLE) {
+
+            validateFieldList(
+                    section.groupFields(),
+                    graphPath + ".groupFields",
+                    false,
+                    false,
+                    errors
+            );
+        }
+    }
+
+    private void validateFieldList(List<ReportFieldBindingSpec> fields, String fieldListPath, boolean absolutePath,
+                                   boolean validateTreeReservedKey, List<GraphValidationError> errors) {
+
         Set<String> keys = new HashSet<>();
         Set<Long> fieldIds = new HashSet<>();
 
-        for (int index = 0; index < section.fields().size(); index++) {
+        for (int index = 0; index < fields.size(); index++) {
 
-            ReportFieldBindingSpec field = section.fields().get(index);
-            String fieldPath = graphPath + ".fields[" + index + "]";
+            ReportFieldBindingSpec field = fields.get(index);
+
+            String fieldPath = fieldListPath + "[" + index + "]";
 
             if (field == null) {
                 errors.add(error(
@@ -868,67 +1000,54 @@ public class ReportDefinitionValidator {
                 continue;
             }
 
-            if (!StringUtils.hasText(field.key())
-                    || !keys.add(field.key().trim())) {
+            if (!StringUtils.hasText(field.key()) || !keys.add(field.key().trim())) {
 
                 errors.add(error(
                         "REPORT_FIELD_KEY_INVALID",
                         fieldPath,
-                        "报告字段 key 不能为空且不能重复"
+                        "报告字段key不能为空且不能重复"
                 ));
             }
 
-            if (section.type() == ReportSectionType.TREE_TABLE
-                    && RESERVED_TREE_KEYS.contains(field.key())) {
+            if (validateTreeReservedKey && RESERVED_TREE_KEYS.contains(field.key())) {
 
                 errors.add(error(
                         "REPORT_FIELD_KEY_RESERVED",
                         fieldPath,
-                        "TREE_TABLE 字段不能使用系统保留名称"
+                        "树形列表字段不能使用系统保留名称"
                 ));
             }
 
-            if (field.fieldId() == null
-                    || field.fieldId() <= 0
-                    || !fieldIds.add(field.fieldId())) {
+            if (field.fieldId() == null || field.fieldId() <= 0 || !fieldIds.add(field.fieldId())) {
 
                 errors.add(error(
                         "REPORT_FIELD_ID_INVALID",
                         fieldPath,
-                        "字段字典 ID 必须有效且不能重复"
+                        "字段字典ID必须有效且不能重复"
                 ));
             }
-
             boolean fileBinding = field.fileList();
-
             if (field.hasAnyFileConfig() && !fileBinding) {
+
                 errors.add(error(
                         "REPORT_FILE_BINDING_INCOMPLETE",
                         fieldPath,
-                        "文件字段必须同时配置文件地址字段、文件名路径和文件地址路径"
+                        "文件字段必须完整配置文件名称和文件地址"
                 ));
             }
-
-            if (fileBinding
-                    && (field.fileUrlFieldId() <= 0
-                    || !fieldIds.add(field.fileUrlFieldId()))) {
-
+            if (fileBinding && (field.fileUrlFieldId() <= 0 || !fieldIds.add(field.fileUrlFieldId()))) {
                 errors.add(error(
                         "REPORT_FILE_URL_FIELD_INVALID",
                         fieldPath,
-                        "文件地址字段字典 ID 必须有效且不能重复"
+                        "文件地址字段字典ID必须有效且不能重复"
                 ));
             }
 
-            boolean validPath = isItemSection(section.type())
-                    ? fileBinding
-                      ? isAbsoluteArrayPath(field.sourcePath())
-                      : isAbsoluteScalarPath(field.sourcePath())
-                    : fileBinding
-                      ? isRelativeArrayPath(field.sourcePath())
-                      : isRelativeScalarPath(field.sourcePath());
+            boolean validSourcePath = absolutePath ? fileBinding ? isAbsoluteArrayPath(field.sourcePath()) :
+                    isAbsoluteScalarPath(field.sourcePath()) : fileBinding ?
+                    isRelativeArrayPath(field.sourcePath()) : isRelativeScalarPath(field.sourcePath());
 
-            if (!validPath) {
+            if (!validSourcePath) {
                 errors.add(error(
                         "REPORT_FIELD_PATH_INVALID",
                         fieldPath,
@@ -942,7 +1061,9 @@ public class ReportDefinitionValidator {
                 continue;
             }
 
-            if (!isRelativeScalarPath(field.fileNamePath())) {
+            if (!isRelativeScalarPath(
+                    field.fileNamePath())) {
+
                 errors.add(error(
                         "REPORT_FILE_NAME_PATH_INVALID",
                         fieldPath,
@@ -950,7 +1071,9 @@ public class ReportDefinitionValidator {
                 ));
             }
 
-            if (!isRelativeScalarPath(field.fileUrlPath())) {
+            if (!isRelativeScalarPath(
+                    field.fileUrlPath())) {
+
                 errors.add(error(
                         "REPORT_FILE_URL_PATH_INVALID",
                         fieldPath,
@@ -958,7 +1081,9 @@ public class ReportDefinitionValidator {
                 ));
             }
 
-            if (field.fileNamePath().equals(field.fileUrlPath())) {
+            if (field.fileNamePath().equals(
+                    field.fileUrlPath())) {
+
                 errors.add(error(
                         "REPORT_FILE_PATH_DUPLICATED",
                         fieldPath,

@@ -52,6 +52,13 @@ public class FieldDictionarySaveDTO {
     private String displayFormat;
 
     /**
+     * 枚举值映射 JSON。
+     *
+     * 示例：{"0":"审批中","1":"审批通过"}
+     */
+    private String enumMappingJson;
+
+    /**
      * 示例值。
      */
     private String exampleValue;

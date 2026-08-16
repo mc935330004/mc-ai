@@ -6,6 +6,7 @@ import org.springframework.util.StringUtils;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * 读取报告定义中的受限字段路径。
@@ -14,75 +15,71 @@ import java.util.List;
  */
 @Component
 public class ReportValueReader {
-
     public List<JsonNode> readMany(JsonNode root,String path) {
-
         if (root == null  || root.isNull() || !StringUtils.hasText(path)) {
             return List.of();
         }
-
         List<PathSegment> segments =  parse(path);
 
         List<JsonNode> current = List.of(root);
 
         for (PathSegment segment : segments) {
-            current = readSegment(
-                    current,
-                    segment
-            );
-
+            current = readSegment(current, segment);
             if (current.isEmpty()) {
                 return List.of();
             }
         }
-
         return List.copyOf(current);
     }
 
-    public JsonNode readScalar(
-            JsonNode root,
-            String path) {
-        List<JsonNode> values =readMany(root, path);
+    public JsonNode readScalar(JsonNode root, String path) {
+        List<JsonNode> values = readMany(root, path);
         if (values.isEmpty()) {
             return null;
         }
 
-        if (values.size() > 1) {
-            throw new IllegalStateException(
-                    "报告标量路径返回了多个值：" + path
-            );
+        JsonNode firstValue = requireScalarValue(values.get(0), path);
+
+        /*
+         * 一对多业务数据可能重复携带相同的项目基础信息。
+         * 所有值一致时按一个标量处理，出现不同值时拒绝生成错误报告。
+         */
+        for (int index = 1; index < values.size(); index++) {
+            JsonNode currentValue = requireScalarValue(values.get(index), path);
+            if (!Objects.equals(firstValue, currentValue)) {
+                throw new IllegalStateException(
+                        "报告标量路径返回了多个不同值：" + path
+                );
+            }
         }
-        JsonNode value = values.get(0);
-        if (value == null  || value.isNull() || value.isMissingNode()) {
+
+        return firstValue;
+    }
+    /**
+     * 校验报告单元格只能使用标量数据。
+     */
+    private JsonNode requireScalarValue(JsonNode value, String path) {
+        if (value == null || value.isNull() || value.isMissingNode()) {
             return null;
         }
 
         if (value.isContainerNode()) {
             throw new IllegalStateException(
-                    "报告单元格不能展示对象或数组："
-                            + path
+                    "报告单元格不能展示对象或数组：" + path
             );
         }
-
         return value;
     }
 
-    private List<JsonNode> readSegment(
-            List<JsonNode> source,
-            PathSegment segment) {
-
+    private List<JsonNode> readSegment(List<JsonNode> source, PathSegment segment) {
         List<JsonNode> result = new ArrayList<>();
 
         for (JsonNode parent : source) {
             if (parent == null || !parent.isObject()) {
                 continue;
             }
-
             JsonNode value = parent.get(segment.name());
-
-            if (value == null
-                    || value.isNull()
-                    || value.isMissingNode()) {
+            if (value == null || value.isNull() || value.isMissingNode()) {
                 continue;
             }
 
@@ -121,11 +118,7 @@ public class ReportValueReader {
             boolean array =
                     rawSegment.endsWith("[]");
 
-            String name = array
-                    ? rawSegment.substring(
-                    0,
-                    rawSegment.length() - 2
-            )
+            String name = array ? rawSegment.substring(0, rawSegment.length() - 2)
                     : rawSegment;
 
             if (!StringUtils.hasText(name)) {
@@ -133,12 +126,8 @@ public class ReportValueReader {
                         "报告路径包含空字段"
                 );
             }
-
-            result.add(
-                    new PathSegment(name, array)
-            );
+            result.add(new PathSegment(name, array));
         }
-
         return List.copyOf(result);
     }
 

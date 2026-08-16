@@ -11,5 +11,12 @@ public enum ReportSectionType {
 
     TABLE,
 
-    TREE_TABLE
+    TREE_TABLE,
+    /**
+     * 分组明细表。
+     *
+     * 先根据分组路径读取分组数据，
+     * 再从每个分组中读取相对明细列表。
+     */
+    GROUP_TABLE,
 }
