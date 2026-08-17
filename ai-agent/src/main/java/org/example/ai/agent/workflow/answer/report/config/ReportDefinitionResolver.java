@@ -46,36 +46,23 @@ public class ReportDefinitionResolver {
             "bigdecimal",
             "numeric"
     );
-    public Optional<ResolvedReportDefinition> resolve(
-            WorkflowExecutionOutcome outcome) {
 
-        if (outcome == null
-                || outcome.versionId() == null
-                || !StringUtils.hasText(
-                outcome.workflowCode())) {
-
+    public Optional<ResolvedReportDefinition> resolve(WorkflowExecutionOutcome outcome) {
+        if (outcome == null || outcome.versionId() == null || !StringUtils.hasText(outcome.workflowCode())) {
             return Optional.empty();
         }
 
-        PublishedWorkflow workflow =
-                snapshotResolver.resolveExactVersion(
-                        outcome.workflowCode(),
-                        outcome.versionId()
-                );
+        PublishedWorkflow workflow = snapshotResolver.resolveExactVersion(outcome.workflowCode(), outcome.versionId());
 
-        GraphSpec graph = graphSpecParser.parse(
-                workflow.version().getSnapshotJson()
-        );
+        GraphSpec graph = graphSpecParser.parse(workflow.version().getSnapshotJson());
 
-        ReportDefinitionSpec definition =
-                graph.getReportDefinition();
+        ReportDefinitionSpec definition = graph.getReportDefinition();
 
         if (definition == null) {
             return Optional.empty();
         }
 
-        Set<Long> fieldIds =
-                collectFieldIds(definition);
+        Set<Long> fieldIds = collectFieldIds(definition);
 
         if (fieldIds.isEmpty()) {
             throw new IllegalStateException(
@@ -83,37 +70,16 @@ public class ReportDefinitionResolver {
             );
         }
 
-        List<FieldDictionary> dictionaries =
-                fieldDictionaryMapper.selectBatchIds(
-                        fieldIds
-                );
+        List<FieldDictionary> dictionaries = fieldDictionaryMapper.selectBatchIds(fieldIds);
 
-        Map<Long, FieldDictionary> fieldsById =
-                indexFields(dictionaries);
+        Map<Long, FieldDictionary> fieldsById = indexFields(dictionaries);
 
-        Set<String> workflowCapabilities =
-                new LinkedHashSet<>(
-                        capabilityCodeCollector.collect(
-                                workflow.compiledGraph()
-                        )
-                );
+        Set<String> workflowCapabilities = new LinkedHashSet<>(capabilityCodeCollector.collect(workflow.compiledGraph()));
 
-        validateFields(
-                fieldIds,
-                fieldsById,
-                workflowCapabilities
-        );
+        validateFields(fieldIds, fieldsById, workflowCapabilities);
         // 字段路径必须与字段字典机器字段一致，避免业务含义错配。
-        validateBindings(
-                definition,
-                fieldsById
-        );
-        return Optional.of(
-                new ResolvedReportDefinition(
-                        definition,
-                        fieldsById
-                )
-        );
+        validateBindings(definition, fieldsById);
+        return Optional.of(new ResolvedReportDefinition(definition, fieldsById));
     }
 
     /**

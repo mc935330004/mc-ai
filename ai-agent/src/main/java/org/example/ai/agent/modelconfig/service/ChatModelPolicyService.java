@@ -34,17 +34,14 @@ public class ChatModelPolicyService {
      */
     public List<ChatModelVO> listSelectableModels(String userId) {
         List<ModelOption> enabledModels = requireEnabledModels();
-        List<ModelAssignment> assignments =
-                findEffectiveAssignments(userId);
+        List<ModelAssignment> assignments = findEffectiveAssignments(userId);
 
         /*
          * 没有人员或系统授权配置时，
          * 默认允许使用数据库中全部已启用模型。
          */
         if (assignments.isEmpty()) {
-            String defaultModelCode =
-                    resolveDatabaseDefault(enabledModels);
-
+            String defaultModelCode = resolveDatabaseDefault(enabledModels);
             return enabledModels.stream()
                     .map(option -> toChatModelVO(
                             option,
@@ -53,21 +50,16 @@ public class ChatModelPolicyService {
                     .toList();
         }
 
-        Map<String, ModelOption> enabledModelMap =
-                toEnabledModelMap(enabledModels);
+        Map<String, ModelOption> enabledModelMap = toEnabledModelMap(enabledModels);
 
-        List<ModelAssignment> availableAssignments =
-                filterAvailableAssignments(
+        List<ModelAssignment> availableAssignments = filterAvailableAssignments(
                         assignments,
                         enabledModelMap
                 );
 
         requireAvailableAssignments(availableAssignments);
 
-        String defaultModelCode =
-                resolveConfiguredDefault(
-                        availableAssignments
-                );
+        String defaultModelCode = resolveConfiguredDefault(availableAssignments);
 
         return availableAssignments.stream()
                 .map(assignment -> toChatModelVO(
@@ -152,14 +144,9 @@ public class ChatModelPolicyService {
     /**
      * 优先使用人员授权，没有人员授权时继承系统授权。
      */
-    private List<ModelAssignment> findEffectiveAssignments(
-            String userId) {
+    private List<ModelAssignment> findEffectiveAssignments(String userId) {
 
-        List<ModelAssignment> userAssignments =
-                assignmentService.listRows(
-                        ModelAssignmentSubjectType.USER.name(),
-                        userId
-                );
+        List<ModelAssignment> userAssignments = assignmentService.listRows(ModelAssignmentSubjectType.USER.name(), userId);
 
         if (!userAssignments.isEmpty()) {
             return userAssignments;
@@ -178,28 +165,21 @@ public class ChatModelPolicyService {
      * 只在实际查询或使用聊天模型时返回业务错误。
      */
     private List<ModelOption> requireEnabledModels() {
-        List<ModelOption> enabledModels =
-                modelConfigService.listEnabledOptions();
-
+        List<ModelOption> enabledModels = modelConfigService.listEnabledOptions();
         if (enabledModels.isEmpty()) {
             throw new BusinessException(
                     ErrorCode.AI_SERVICE_UNAVAILABLE,
                     "当前没有已启用的聊天模型，请联系管理员配置"
             );
         }
-
         return enabledModels;
     }
 
-    private Map<String, ModelOption> toEnabledModelMap(
-            List<ModelOption> enabledModels) {
-
+    private Map<String, ModelOption> toEnabledModelMap(List<ModelOption> enabledModels) {
         Map<String, ModelOption> result = new HashMap<>();
-
         for (ModelOption option : enabledModels) {
             result.put(option.modelCode(), option);
         }
-
         return result;
     }
 
@@ -266,9 +246,7 @@ public class ChatModelPolicyService {
      * 数据库默认模型不存在时，
      * 使用排序后的第一个启用模型。
      */
-    private String resolveDatabaseDefault(
-            List<ModelOption> enabledModels) {
-
+    private String resolveDatabaseDefault(List<ModelOption> enabledModels) {
         return enabledModels.stream()
                 .filter(ModelOption::defaultModel)
                 .map(ModelOption::modelCode)

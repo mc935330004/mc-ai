@@ -64,11 +64,9 @@ public class AgentAuthController {
     public Result<AgentCurrentUserVO> currentUser() {
         currentUserProvider.getRequiredUserId();
 
-        AgentSession session =
-                sessionService.getRequiredSession();
+        AgentSession session = sessionService.getRequiredSession();
 
-        boolean agentAdmin =
-                currentUserProvider.hasPermission(AgentSsoConstants.ADMIN_PERMISSION);
+        boolean agentAdmin = currentUserProvider.hasPermission(AgentSsoConstants.ADMIN_PERMISSION);
 
         return Result.success(
                 toVO(

@@ -91,10 +91,7 @@ public class AgentSessionService {
         AgentSession session = getCurrentSession();
 
         if (session == null) {
-            throw new BusinessException(
-                    401,
-                    "Agent登录状态不存在或已过期"
-            );
+            throw new BusinessException(401, "Agent登录状态不存在或已过期");
         }
 
         return session;
@@ -110,14 +107,11 @@ public class AgentSessionService {
         }
         String key = buildSessionKey(sessionId);
         String json = redisTemplate.opsForValue().get(key);
-
         if (!StringUtils.hasText(json)) {
             return null;
         }
-
         try {
             AgentSession session = objectMapper.readValue(json, AgentSession.class);
-
             if (session.getExpiresAt() == null || session.getExpiresAt() <= System.currentTimeMillis()) {
                 redisTemplate.delete(key);
                 return null;
@@ -141,8 +135,7 @@ public class AgentSessionService {
         String pmAccessToken = decrypt(session.getEncryptedPmAccessToken());
 
         if (!StringUtils.hasText(pmAccessToken)) {
-            throw new BusinessException(401,
-                    "Agent会话中的PM登录凭证无效");
+            throw new BusinessException(401,"Agent会话中的PM登录凭证无效");
         }
         return "Bearer " + pmAccessToken;
     }
@@ -235,7 +228,6 @@ public class AgentSessionService {
         if (!StringUtils.hasText(value) || !value.contains(".")) {
             throw new BusinessException( 401,"Agent会话凭证格式不正确" );
         }
-
         try {
             String[] parts = value.split("\\.", 2);
             byte[] iv = BASE64_DECODER.decode(parts[0]);

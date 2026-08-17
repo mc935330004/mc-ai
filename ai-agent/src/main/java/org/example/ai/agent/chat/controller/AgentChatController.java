@@ -85,10 +85,7 @@ public class AgentChatController {
     @GetMapping("/models")
     public Result<List<ChatModelVO>> listModels() {
         String userId =currentUserProvider.getRequiredUserId();
-
-        return Result.success(
-                aiChatSessionService.listModels(userId)
-        );
+        return Result.success(aiChatSessionService.listModels(userId));
     }
 
     @GetMapping("/sessions")
