@@ -45,12 +45,13 @@ public class AgentAuthController {
                 buildSessionCookie(sessionId).toString()
         );
         return Result.success(
-                toVO(
-                        identity.getUserId(),
-                        identity.getUsername(),
-                        identity.getTarget(),
-                        identity.hasAgentAdminPermission()
-                )
+                AgentCurrentUserVO.builder()
+                        .pmUserId(identity.getUserId())
+                        .username(identity.getUsername())
+                        .target(identity.getTarget())
+                        .agentAdmin(identity.hasAgentAdminPermission())
+                        .sessionId(sessionId)
+                        .build()
         );
     }
 
@@ -63,11 +64,8 @@ public class AgentAuthController {
     @GetMapping("/me")
     public Result<AgentCurrentUserVO> currentUser() {
         currentUserProvider.getRequiredUserId();
-
         AgentSession session = sessionService.getRequiredSession();
-
         boolean agentAdmin = currentUserProvider.hasPermission(AgentSsoConstants.ADMIN_PERMISSION);
-
         return Result.success(
                 toVO(
                         session.getPmUserId(),
@@ -82,16 +80,9 @@ public class AgentAuthController {
      * 销毁Agent会话。
      */
     @PostMapping("/logout")
-    public Result<Void> logout(
-            HttpServletResponse response) {
-
+    public Result<Void> logout(HttpServletResponse response) {
         sessionService.deleteCurrentSession();
-
-        response.addHeader(
-                HttpHeaders.SET_COOKIE,
-                buildDeleteCookie().toString()
-        );
-
+        response.addHeader(HttpHeaders.SET_COOKIE, buildDeleteCookie().toString());
         return Result.success();
     }
 

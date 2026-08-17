@@ -105,13 +105,7 @@ public class DynamicCapabilityPlanner {
         if (candidates.isEmpty()) {
             DynamicCapabilityPlan result = unmatched("没有召回到相关业务能力",
                             "当前没有找到明确匹配的业务接口，请补充具体业务对象、查询条件和期望结果。" );
-
-            return auditedReturn(
-                    callContext,
-                    userQuestion,
-                    candidates,
-                    result,
-                    planningStartTime);
+            return auditedReturn(callContext, userQuestion, candidates, result, planningStartTime);
         }
 
         String systemPrompt = buildSystemPrompt();
@@ -486,16 +480,13 @@ public class DynamicCapabilityPlanner {
      * 构建未匹配结果。
      */
     private DynamicCapabilityPlan unmatched( String reason,String clarifyQuestion) {
-
         DynamicCapabilityPlan plan = new DynamicCapabilityPlan();
-
         plan.setMatched(false);
         plan.setCapabilityCode(null);
         plan.setConfidence(0D);
         plan.setInput(new LinkedHashMap<>());
         plan.setReason(reason);
         plan.setClarifyQuestion(clarifyQuestion);
-
         return plan;
     }
 

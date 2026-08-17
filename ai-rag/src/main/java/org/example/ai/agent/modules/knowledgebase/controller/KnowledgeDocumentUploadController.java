@@ -24,9 +24,7 @@ public class KnowledgeDocumentUploadController {
      * 请求类型：multipart/form-data
      */
     @PostMapping(value = "/upload", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
-    public Result<KnowledgeDocumentUploadResponse> upload(
-            @Valid @ModelAttribute KnowledgeDocumentUploadRequest request
-    ) {
+    public Result<KnowledgeDocumentUploadResponse> upload( @Valid @ModelAttribute KnowledgeDocumentUploadRequest request) {
         return Result.success(uploadService.upload(request));
     }
 

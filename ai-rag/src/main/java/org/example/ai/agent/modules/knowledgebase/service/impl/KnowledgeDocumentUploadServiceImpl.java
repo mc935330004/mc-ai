@@ -47,14 +47,12 @@ public class KnowledgeDocumentUploadServiceImpl implements KnowledgeDocumentUplo
     @Override
     @Transactional(rollbackFor = Exception.class)
     public KnowledgeDocumentUploadResponse upload(KnowledgeDocumentUploadRequest request) {
-
         /*
          * 必须在保存文件之前校验身份和访问范围，
          * 避免权限参数错误时已经产生孤立文件。
          */
         KnowledgeAccessPrincipal principal =knowledgeAccessContext.getRequiredPrincipal();
         KnowledgeDocumentAccessScope accessScope = resolveAccessScope(request, principal);
-
         var file = request.getFile();
         // 1. 校验文件大小、空文件等基础规则
         fileValidationService.validateFile(file, MAX_FILE_SIZE, "知识文档");

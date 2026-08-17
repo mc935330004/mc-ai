@@ -89,11 +89,9 @@ public class AgentSessionService {
      */
     public AgentSession getRequiredSession() {
         AgentSession session = getCurrentSession();
-
         if (session == null) {
             throw new BusinessException(401, "Agent登录状态不存在或已过期");
         }
-
         return session;
     }
 
@@ -173,6 +171,20 @@ public class AgentSessionService {
     }
 
     private String getCurrentSessionId() {
+        /*
+         * 优先读取请求头中的会话ID。
+         *
+         * 跨站iframe内嵌场景下，SameSite=Lax的Cookie不会被发送，
+         * 前端通过X-Agent-Session请求头传递会话ID。
+         * 顶层跳转场景Cookie仍可正常携带，作为兜底。
+         */
+        String headerSessionId = request.getHeader(
+                AgentSsoConstants.SESSION_HEADER_NAME
+        );
+        if (StringUtils.hasText(headerSessionId)) {
+            return headerSessionId.trim();
+        }
+
         Cookie cookie = WebUtils.getCookie(
                 request,
                 properties.getSessionCookieName()

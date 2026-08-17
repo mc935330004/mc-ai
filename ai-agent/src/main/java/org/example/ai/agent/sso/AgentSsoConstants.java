@@ -30,6 +30,15 @@ public final class AgentSsoConstants {
      */
     public static final String SESSION_COOKIE_NAME = "AGENT_SESSION";
 
+    /**
+     * Agent会话请求头名称。
+     *
+     * 跨站iframe场景下Cookie（SameSite=Lax）不会被发送，
+     * 前端登录后将该值存入sessionStorage，请求时通过此请求头传递。
+     * 优先级高于Cookie。
+     */
+    public static final String SESSION_HEADER_NAME = "X-Agent-Session";
+
     private AgentSsoConstants() {
     }
 }

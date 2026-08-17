@@ -31,4 +31,12 @@ public class AgentCurrentUserVO {
      * 是否允许访问Agent完整管理端。
      */
     private boolean agentAdmin;
+
+    /**
+     * 当前会话ID。
+     *
+     * 仅在SSO登录(exchange)接口返回，
+     * 供跨站iframe场景下前端通过X-Agent-Session请求头传递会话。
+     */
+    private String sessionId;
 }

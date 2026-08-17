@@ -139,14 +139,24 @@ public class AgentAccessInterceptor
     private String resolveAuthenticationLimitKey(
             HttpServletRequest request,
             boolean exchangeRequest) {
-        if (!exchangeRequest && request.getCookies() != null) {
-            for (Cookie cookie : request.getCookies()) {
-                if (properties.getSessionCookieName()
-                        .equals(cookie.getName())
-                        && StringUtils.hasText(cookie.getValue())) {
-                    return "session-" + hashClientAddress(
-                            cookie.getValue()
-                    );
+        if (!exchangeRequest) {
+            String headerSessionId = request.getHeader(
+                    AgentSsoConstants.SESSION_HEADER_NAME
+            );
+            if (StringUtils.hasText(headerSessionId)) {
+                return "session-" + hashClientAddress(
+                        headerSessionId.trim()
+                );
+            }
+            if (request.getCookies() != null) {
+                for (Cookie cookie : request.getCookies()) {
+                    if (properties.getSessionCookieName()
+                            .equals(cookie.getName())
+                            && StringUtils.hasText(cookie.getValue())) {
+                        return "session-" + hashClientAddress(
+                                cookie.getValue()
+                        );
+                    }
                 }
             }
         }
