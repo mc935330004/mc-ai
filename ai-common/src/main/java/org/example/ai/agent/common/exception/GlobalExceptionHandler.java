@@ -12,6 +12,7 @@ import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClientException;
+import org.springframework.web.context.request.async.AsyncRequestNotUsableException;
 import org.springframework.web.multipart.MaxUploadSizeExceededException;
 
 import java.net.SocketTimeoutException;
@@ -145,6 +146,19 @@ public class GlobalExceptionHandler {
     public Result<Void> handleHttpRequestMethodNotSupportedException(org.springframework.web.HttpRequestMethodNotSupportedException e) {
         log.warn("请求方法不支持: {} {}", e.getMethod(), e.getSupportedHttpMethods());
         return Result.error(ErrorCode.METHOD_NOT_ALLOWED, "请求方法不支持: " + e.getMethod());
+    }
+
+    /**
+     * 处理 SSE 客户端断开异常。
+     *
+     * 用户刷新、关闭页面或取消请求时，容器会通知
+     * AsyncRequestNotUsableException。此时响应已不可用，
+     * 无法再写回 Result，必须静默处理并降级日志级别，
+     * 避免产生"系统异常" ERROR 日志和二次转换报错。
+     */
+    @ExceptionHandler(AsyncRequestNotUsableException.class)
+    public void handleAsyncRequestNotUsable(AsyncRequestNotUsableException e) {
+        log.debug("SSE客户端连接已断开，忽略异常: {}", e.getMessage());
     }
 
     /**

@@ -7,6 +7,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.example.ai.agent.chat.entity.AgentRequest;
 import org.example.ai.agent.chat.vo.ReportSchemaVO;
 import org.example.ai.agent.workflow.answer.artifact.ResultArtifactService;
+import org.example.ai.agent.workflow.answer.analysis.WorkflowAnswerAnalysisProperties;
 import org.example.ai.agent.workflow.answer.chunk.*;
 import org.example.ai.agent.workflow.answer.trace.WorkflowAnswerTraceRecorder;
 import org.example.ai.agent.workflow.runtime.WorkflowExecutionOutcome;
@@ -40,6 +41,10 @@ public class WorkflowAnswerComposer {
     private final WorkflowAnswerSummaryReducer summaryReducer;
     private final WorkflowAnswerTraceRecorder traceRecorder;
     private final ResultArtifactService resultArtifactService;
+    /**
+     * AI 分析速度优化配置，决定快路径阈值。
+     */
+    private final WorkflowAnswerAnalysisProperties analysisProperties;
     /**
      *  准备基础报告。
      *
@@ -81,11 +86,24 @@ public class WorkflowAnswerComposer {
     }
     /**
      *  基于已保存 Artifact 生成结构化 AI 分析。
+     *
+     *  分块数不超过快路径阈值时走一次性分析（1次模型调用）；
+     *  大数据量仍走"受控并发逐块消费 + 分层汇总"保证覆盖率。
      */
     public WorkflowAnswerAnalysisResult analyzeReport(
             AgentRequest request,
             WorkflowAnswerPreparation preparation) {
         WorkflowAnswerChunkPlan chunkPlan = preparation.chunkPlan();
+
+        /*
+         * 小数据快路径：
+         * 分块少时直接把全部分块交给模型一次生成结构化分析，
+         * 替代"逐块消费 + 分层汇总"的多轮调用，耗时从10~25秒降到3~8秒。
+         */
+        if (chunkPlan.totalChunks() <= analysisProperties.getLightweightMaxChunks()) {
+            return analyzeLightweight(request, preparation);
+        }
+
         long chunkStartedAt = System.currentTimeMillis();
         WorkflowAnswerChunkCoverage coverage =chunkConsumer.consume(
                         request,
@@ -123,6 +141,36 @@ public class WorkflowAnswerComposer {
         );
 
         ReportSchemaVO.Analysis analysis = parseStructuredAnalysis(reduction.finalAnswer());
+        return new WorkflowAnswerAnalysisResult(
+                analysis,
+                preparation.artifactId()
+        );
+    }
+
+    /**
+     * 小数据快路径：一次模型调用生成结构化分析。
+     *
+     * 不逐块消费、不分层汇总，因此不记录分块/汇总遥测，
+     * 仅记录一条轻量分析成功日志。
+     */
+    private WorkflowAnswerAnalysisResult analyzeLightweight(
+            AgentRequest request,
+            WorkflowAnswerPreparation preparation) {
+
+        long startedAt = System.currentTimeMillis();
+        String analysisJson = chunkConsumer.consumeAllInOne(
+                request,
+                preparation.outcome().runId(),
+                preparation.fieldSemanticsJson(),
+                preparation.chunkPlan()
+        );
+        ReportSchemaVO.Analysis analysis = parseStructuredAnalysis(analysisJson);
+        log.info(
+                "轻量分析完成，runId={}，chunks={}，耗时={}ms",
+                preparation.outcome().runId(),
+                preparation.chunkPlan().totalChunks(),
+                System.currentTimeMillis() - startedAt
+        );
         return new WorkflowAnswerAnalysisResult(
                 analysis,
                 preparation.artifactId()

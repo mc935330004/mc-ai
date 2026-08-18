@@ -127,7 +127,25 @@ public class AgentStreamSession {
         event.setEventId(eventId);
         event.setSequence(currentSequence);
         event.setTimestamp(System.currentTimeMillis());
-        emitter.send(SseEmitter.event().id(eventId).name(eventName) .data(event));
+        try {
+            emitter.send(SseEmitter.event().id(eventId).name(eventName) .data(event));
+        } catch (Exception exception) {
+            /*
+             * 客户端断开（刷新/关闭/取消/网络中断）时，写入必然失败。
+             * 标记会话已断开并抛出专用异常，
+             * 让调用方静默收尾，不再当作业务异常处理。
+             */
+            if (isClientDisconnected(exception)) {
+                completed.set(true);
+                log.debug("SSE客户端已断开，停止发送事件，runId={}，eventType={}",
+                        runId, event.getType());
+                throw new AgentClientDisconnectedException(
+                        "SSE客户端连接已断开",
+                        exception
+                );
+            }
+            throw exception;
+        }
         agentMetrics.recordSseEvent( protocolVersion,event.getType());
         boolean firstVisibleContent =AgentStreamEventType.FACTS.name()
                         .equalsIgnoreCase(event.getType())
@@ -327,6 +345,21 @@ public class AgentStreamSession {
 
             emitter.complete();
         } catch (Exception exception) {
+            /*
+             * 客户端已断开时，结束事件无法发送。
+             * 直接标记取消并尝试正常结束，避免 completeWithError
+             * 触发容器 onError 二次通知和全局异常日志。
+             */
+            if (isClientDisconnected(exception)) {
+                closeReason = "CANCELLED";
+                log.debug("SSE客户端已断开，跳过结束事件发送，runId={}", runId);
+                try {
+                    emitter.complete();
+                } catch (Exception ignored) {
+                    // 连接已断，忽略容器关闭异常。
+                }
+                return;
+            }
             closeReason = "ERROR";
 
             /*
@@ -345,6 +378,16 @@ public class AgentStreamSession {
      */
     public synchronized void error(Throwable throwable) {
         if (!completed.compareAndSet(false,true )) {
+            return;
+        }
+        /*
+         * 客户端已断开时错误事件同样无法送达。
+         * 不再调用 completeWithError，避免容器 onError 二次通知
+         * 触发全局异常处理器的 ERROR 日志。
+         */
+        if (isClientDisconnected(throwable)) {
+            log.debug("SSE客户端已断开，跳过错误事件发送，runId={}", runId);
+            agentMetrics.recordSseClosed(protocolVersion,"CANCELLED");
             return;
         }
         try {
@@ -414,6 +457,31 @@ public class AgentStreamSession {
                 throwable
         );
         return "Agent处理失败，请稍后重试。";
+    }
+
+    /**
+     * 判断异常是否源于客户端断开连接。
+     *
+     * 不直接 import 容器实现类，通过类名判断，
+     * 兼容 Spring 异步请求不可用和 Tomcat 客户端中止两类异常，
+     * 并递归检查 cause 链。
+     */
+    private boolean isClientDisconnected(Throwable throwable) {
+        if (throwable == null) {
+            return false;
+        }
+        if (throwable instanceof AgentClientDisconnectedException) {
+            return true;
+        }
+        String className = throwable.getClass().getName();
+        if ("org.springframework.web.context.request.async.AsyncRequestNotUsableException"
+                .equals(className)) {
+            return true;
+        }
+        if ("org.apache.catalina.connector.ClientAbortException".equals(className)) {
+            return true;
+        }
+        return isClientDisconnected(throwable.getCause());
     }
 
     /**

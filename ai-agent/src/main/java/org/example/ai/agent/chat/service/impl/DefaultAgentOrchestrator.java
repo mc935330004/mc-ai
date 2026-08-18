@@ -13,6 +13,7 @@ import org.example.ai.agent.chat.vo.ChatTextPayloadVO;
 import org.example.ai.agent.common.enums.ReportQueryType;
 import org.example.ai.agent.modelusage.service.ModelUsageService;
 import org.example.ai.agent.vo.ActionFormVO;
+import org.example.ai.agent.chat.support.AgentClientDisconnectedException;
 import org.example.ai.agent.chat.support.AgentStreamSession;
 import org.example.ai.agent.chat.support.AgentStreamSessionFactory;
 import org.example.ai.agent.chat.vo.FactPreviewVO;
@@ -39,6 +40,8 @@ import org.example.ai.agent.workflow.answer.WorkflowAnswerAnalysisResult;
 import org.example.ai.agent.workflow.answer.WorkflowAnswerComposeResult;
 import org.example.ai.agent.workflow.answer.WorkflowAnswerComposer;
 import org.example.ai.agent.workflow.answer.WorkflowAnswerPreparation;
+import org.example.ai.agent.workflow.answer.analysis.WorkflowAnswerAnalysisDecider;
+import org.example.ai.agent.workflow.answer.analysis.WorkflowAnswerAnalysisProperties;
 import org.example.ai.agent.workflow.plan.WorkflowPlan;
 import org.example.ai.agent.workflow.runtime.WorkflowExecutionCommand;
 import org.example.ai.agent.workflow.runtime.WorkflowExecutionFacade;
@@ -60,6 +63,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 @Slf4j
 @Service
 public class DefaultAgentOrchestrator implements AgentOrchestrator {
@@ -129,6 +136,18 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
      */
     private final ReportSchemaBuilder reportSchemaBuilder;
     /**
+     * 模型判定本次报告是否需要 AI 分析。
+     */
+    private final WorkflowAnswerAnalysisDecider workflowAnswerAnalysisDecider;
+    /**
+     * AI 分析速度优化配置。
+     */
+    private final WorkflowAnswerAnalysisProperties analysisProperties;
+    /**
+     * 分析超时保护专用线程池，避免占用 agentChatExecutor。
+     */
+    private final ExecutorService workflowAnswerAnalysisExecutor;
+    /**
      * 处理报告后的确定性业务追问。
      */
     private final ReportFollowUpService reportFollowUpService;
@@ -158,7 +177,10 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
             ResultArtifactAnalysisService resultArtifactAnalysisService,
             ReportFollowUpService reportFollowUpService,
             ReportSchemaBuilder reportSchemaBuilder,
-            ModelUsageService modelUsageService
+            ModelUsageService modelUsageService,
+            WorkflowAnswerAnalysisDecider workflowAnswerAnalysisDecider,
+            WorkflowAnswerAnalysisProperties analysisProperties,
+            @Qualifier("workflowAnswerAnalysisExecutor") ExecutorService workflowAnswerAnalysisExecutor
     ) {
         this.streamSessionFactory = streamSessionFactory;
         this.knowledgeDocumentQueryService = knowledgeDocumentQueryService;
@@ -179,6 +201,9 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
         this.resultArtifactAnalysisService = resultArtifactAnalysisService;
         this.reportFollowUpService = reportFollowUpService;
         this.reportSchemaBuilder = reportSchemaBuilder;
+        this.workflowAnswerAnalysisDecider = workflowAnswerAnalysisDecider;
+        this.analysisProperties = analysisProperties;
+        this.workflowAnswerAnalysisExecutor = workflowAnswerAnalysisExecutor;
 
     }
     @Override
@@ -484,6 +509,19 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
             runTraceService.markSuccess(runId, System.currentTimeMillis() - startTime);
 
         } catch (Exception exception) {
+            /*
+             * 客户端断开（刷新/关闭/取消）不是业务失败：
+             * 不发送错误事件，避免容器 onError 二次通知产生 ERROR 日志。
+             */
+            if (exception instanceof AgentClientDisconnectedException) {
+                log.debug("SSE客户端已断开，静默收尾，runId={}", runId);
+                runTraceService.markFailed(
+                        runId,
+                        System.currentTimeMillis() - startTime,
+                        "客户端连接已断开"
+                );
+                return;
+            }
             runTraceService.markFailed(
                     runId,
                     System.currentTimeMillis() - startTime,
@@ -1123,7 +1161,15 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
             );
         }
 
-        if (!analysisRequired) {
+        /*
+         * 触发 AI 分析的两条通道：
+         * 1. ANALYSIS_REPORT（用户明确要求分析）——意图强信号，直接异步分析；
+         * 2. DATA_QUERY + 判定开启——报告先展示，由模型判定本次数据是否需要分析。
+         */
+        boolean decisionEnabled = analysisProperties.isDecisionEnabled()
+                && !analysisRequired;
+
+        if (!analysisRequired && !decisionEnabled) {
             completeDataQueryReport(
                     request,
                     stream,
@@ -1215,6 +1261,26 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                                             WorkflowAnswerPreparation preparation,
                                             ReportSchemaVO baseReportSchema) {
         try {
+            /*
+             * DATA_QUERY 且判定开启时，先由模型判定本次数据是否需要分析。
+             * 判定不需要分析时与普通数据查询一致收尾，只展示业务报告。
+             */
+            if (analysisProperties.isDecisionEnabled() && !baseReportSchema.analysis().requiresExecution()) {
+                boolean needAnalysis = workflowAnswerAnalysisDecider.decide(
+                        request,
+                        runId,
+                        preparation
+                );
+                if (!needAnalysis) {
+                    completeDataQueryReport(
+                            request,
+                            stream,
+                            runId,
+                            baseReportSchema
+                    );
+                    return;
+                }
+            }
             stream.send(
                     "report_analysis_start",
                     AgentStreamEvent.builder()
@@ -1224,8 +1290,27 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                             .data(Map.of("status", "RUNNING"))
                             .build()
             );
-            WorkflowAnswerAnalysisResult result = workflowAnswerComposer.analyzeReport(request,preparation);
+            WorkflowAnswerAnalysisResult result = analyzeReportWithTimeout(request, preparation);
             ReportSchemaVO finalSchema =reportSchemaBuilder.withAnalysis(baseReportSchema,result.analysis());
+            /*
+             * 分析结果先持久化、再推送 SSE 事件：
+             * 客户端在分析期间断开（send 抛断连异常）时，
+             * 数据库仍保存完整分析结果，刷新页面可以从历史消息恢复，
+             * 而不是停留在 PENDING 的“未生成分析”。
+             */
+            ChatTextPayloadVO payload =ChatTextPayloadVO.builder()
+                            .workflow(outcome)
+                            .reportSchema(finalSchema)
+                            .presentationType("REPORT")
+                            .presentationTitle(finalSchema.title())
+                            .build();
+            updateAssistantReportMessage(
+                    request,
+                    stream,
+                    runId,
+                    "基础报告和 AI 分析已生成。",
+                    payload
+            );
             stream.send(
                     "report_analysis_delta",
                     AgentStreamEvent.builder()
@@ -1246,19 +1331,6 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                             .presentationTitle(finalSchema.title())
                             .build()
             );
-            ChatTextPayloadVO payload =ChatTextPayloadVO.builder()
-                            .workflow(outcome)
-                            .reportSchema(finalSchema)
-                            .presentationType("REPORT")
-                            .presentationTitle(finalSchema.title())
-                            .build();
-            updateAssistantReportMessage(
-                    request,
-                    stream,
-                    runId,
-                    "基础报告和 AI 分析已生成。",
-                    payload
-            );
 
             /*
              * AI 分析完成后再发送追问，
@@ -1269,7 +1341,6 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                     stream,
                     runId
             );
-
             stream.complete();
         } catch (Exception exception) {
             sendReportAnalysisFailure(
@@ -1283,6 +1354,39 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
         }
     }
     /**
+     * 带超时保护的分析调用。
+     *
+     * 分析任务提交到独立线程池执行，超过配置秒数即取消，
+     * 确保 30 秒内一定返回：要么返回分析结果，要么走失败降级保留基础报告。
+     */
+    private WorkflowAnswerAnalysisResult analyzeReportWithTimeout(
+            AgentRequest request,
+            WorkflowAnswerPreparation preparation) throws Exception {
+
+        Future<WorkflowAnswerAnalysisResult> future =
+                workflowAnswerAnalysisExecutor.submit(
+                        () -> workflowAnswerComposer.analyzeReport(
+                                request,
+                                preparation
+                        )
+                );
+
+        try {
+            return future.get(
+                    analysisProperties.getTimeoutSeconds(),
+                    TimeUnit.SECONDS
+            );
+        } catch (TimeoutException exception) {
+            future.cancel(true);
+            throw new IllegalStateException(
+                    "AI分析超过"
+                            + analysisProperties.getTimeoutSeconds()
+                            + "秒未完成，已保留基础业务报告",
+                    exception
+            );
+        }
+    }
+    /**
      * AI 分析失败时保留基础报告。
      */
     private void sendReportAnalysisFailure( AgentRequest request,
@@ -1291,6 +1395,15 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                                             WorkflowExecutionOutcome outcome,
                                             ReportSchemaVO baseSchema,
                                             Exception exception) {
+        /*
+         * 客户端断开不是分析失败：事件推不出去，数据库也不应被覆盖为 FAILED
+         * （成功路径已先持久化完整分析结果，这里覆盖会丢失）。
+         * 只记日志，静默结束。
+         */
+        if (exception instanceof AgentClientDisconnectedException) {
+            log.info("客户端连接已断开，AI 分析结果无法推送，runId={}", runId);
+            return;
+        }
         log.warn("报告分析失败，runId={}，errorType={}",runId,exception.getClass().getSimpleName());
         ReportSchemaVO.Analysis failedAnalysis =
                 new ReportSchemaVO.Analysis(
@@ -1378,15 +1491,10 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
             String runId) {
 
         try {
-            String prompt =
-                    reportFollowUpService
-                            .findPendingPrompt(request)
-                            .orElse(null);
-
+            String prompt =reportFollowUpService.findPendingPrompt(request).orElse(null);
             if (!StringUtils.hasText(prompt)) {
                 return;
             }
-
             /*
              * 独立保存为普通助手消息，
              * 页面刷新后可以按照聊天历史正常恢复。

@@ -103,7 +103,7 @@ public class WorkflowAnswerSummaryReducer {
             TrackedChatClientService chatClientService,
             @Value("${ai.workflow.answer.reduce.max-group-items:8}")
             int maxGroupItems,
-            @Value("${ai.workflow.answer.reduce.max-group-chars:12000}")
+            @Value("${ai.workflow.answer.reduce.max-group-chars:15000}")
             int maxGroupChars,
             @Value("${ai.workflow.answer.reduce.max-levels:10}")
             int maxReductionLevels) {

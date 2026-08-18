@@ -27,8 +27,10 @@ spring:
       embedding:
         # 百炼 DashScope Embedding，维度必须与 PGVector 配置保持一致
         base-url: https://dashscope.aliyuncs.com/compatible-mode/v1
+#        base-url: https://ws-kgvn0xlyb793ffzu.cn-beijing.maas.aliyuncs.com/compatible-mode/v1
         api-key: ${DASHSCOPE_API_KEY}
-        model: text-embedding-v4
+#        model: text-embedding-v4
+        model: text-embedding-v3
         dimensions: 1024
     vectorstore:
       # 向量库类型：当前项目使用 PostgreSQL + pgvector
@@ -145,7 +147,7 @@ app:
       enabled: true
       default-requests-per-minute: 120
       expensive-requests-per-minute: 20
-      key-prefix: mc-ai:rate-limit:
+      key-prefix: mc-ai:rate-limit
     answer:
       # 标准事实模型开关，紧急回滚时可设为false
       structured-enabled: true
@@ -191,8 +193,8 @@ agent:
     min-score-margin: 0.12
   sso:
     enabled: true
-#    pm-base-url: http://192.168.8.251:9999
-    pm-base-url: http://pm.s-ic.cn
+    pm-base-url: http://192.168.6.183:9999
+#    pm-base-url: http://pm.s-ic.cn
     exchange-path: /pm/ai-agent/sso/exchange
     client-id: mc-ai-agent
     client-secret: Dz6idVg6MjSsS7RqBiWTe7q90Lvrz6nw3mwDa17uCwM=
@@ -207,10 +209,10 @@ agent:
     # 只填写Origin，不要填写路径或末尾斜杠
     allowed-browser-origins:
       - http://ai-agent.s-ic.cn
-      - http://pm.s-ic.cn
-    pm-login-url: http://pm.s-ic.cn/pm-web/#/login
+      - http://192.168.6.183:9999
+#    pm-login-url: http://pm.s-ic.cn/pm-web/#/login
     pm-ai-assistant-url: http://ai-agent.s-ic.cn/pm-web/
-#    pm-login-url: http://192.168.8.251:8081/pm-web/#/login
+    pm-login-url: http://192.168.6.183:8081/pm-web/#/login
 #    pm-ai-assistant-url: http://192.168.8.251:8081/pm-web/
 
 ai:
@@ -244,9 +246,22 @@ ai:
         # 每次最多合并8份摘要。
         max-group-items: 8
         # 每组摘要最大字符数，不执行静默截断。
-        max-group-chars: 12000
+        # 12000调大到15000，减少大数据量报告的分层汇总轮数。
+        max-group-chars: 15000
         # 防止异常模型输出导致无限递归汇总。
         max-levels: 10
+      analysis:
+        # 是否启用模型判定：DATA_QUERY 报告由模型判断是否需要 AI 分析。
+        # false 时回退旧逻辑，只按 queryType 决定（ANALYSIS_REPORT 才分析）。
+        decision-enabled: true
+        # 小数据快路径阈值：分块数不超过该值时一次性生成分析（1次模型调用）。
+        lightweight-max-chunks: 3
+        # 分块消费受控并发数，限制同时调用模型的请求数量。
+        concurrency: 4
+        # 分析总超时秒数，超时后保留基础业务报告。
+        timeout-seconds: 30
+        # 判定调用使用的数据抽样最大字符数。
+        sample-max-chars: 2000
       artifact:
         # 安全结果快照保留时间，单位小时。
         # 开发环境建议24小时，正式环境可按审计要求调整。

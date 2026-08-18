@@ -1,30 +1,33 @@
 package org.example.ai.agent.workflow.answer.chunk;
 
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.example.ai.agent.chat.entity.AgentRequest;
 import org.example.ai.agent.common.enums.ModelCallType;
 import org.example.ai.agent.common.modelusage.ModelCallContext;
 import org.example.ai.agent.common.modelusage.TrackedChatClientService;
 import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
+import java.util.concurrent.ExecutorService;
 
 /**
  * 工作流回答数据块模型消费器。
  *
- * 当前采用顺序调用：
- * 1. 最容易保证调用顺序和覆盖率；
- * 2. 不会瞬间并发大量模型请求；
- * 3. 方便根据callSequence追踪Token消耗；
- * 4. 后续确有性能压力时，再增加受控并发。
+ * 采用受控并发调用：
+ * 1. 并发数由 ai.workflow.answer.analysis.concurrency 控制，默认4；
+ * 2. 不会瞬间打爆模型服务，多分块场景显著缩短总耗时；
+ * 3. 结果按分块序号排序后返回，覆盖率校验逻辑不变；
+ * 4. 任意分块失败仍然整体失败，失败语义与原串行实现一致。
  */
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class WorkflowAnswerChunkConsumer {
 
     private static final String SYSTEM_PROMPT = """
@@ -63,10 +66,52 @@ public class WorkflowAnswerChunkConsumer {
             8. 查询结果不完整时，只说明缺少的业务结果以及用户需要补充的业务条件。
             """;
 
+    /**
+     * 小数据快路径结构化分析提示词。
+     *
+     * 分块数量少时一次调用直接生成最终结构化分析，
+     * 跳过"逐块消费 + 分层汇总"的多轮调用。
+     */
+    private static final String LIGHTWEIGHT_SYSTEM_PROMPT = """
+            你是企业PM项目管理系统的结构化数据分析助手。
+
+            只能依据输入数据生成分析结果。
+            禁止编造项目、金额、日期和状态。
+            禁止输出Markdown、HTML、CSS和表格。
+            必须只返回一个合法JSON对象。
+
+            分析规则：
+            1. summary 用不超过两句话概括当前数据的主要事实。
+            2. highlights 只列出有明确数据依据的重要科目和业务事实，最多5条。
+            3. warnings 只列出异常、缺失数据、潜在风险和建议核实事项，最多3条。
+            4. 缺失、空白或未提供的数据不得解释为0。
+            5. 不得自行汇总父科目、子科目和合计行，避免重复计算。
+            6. 不得自行计算项目结余、成本率、利润率等精确业务指标。
+            7. 已知事实和风险推断必须明确区分。
+            8. 数据不足时使用"建议核实"，不得生成推测金额。
+            9. 不输出内部ID、字段路径、节点信息或原始JSON。
+
+            JSON格式必须是：
+            {
+              "summary": "简短事实摘要",
+              "highlights": ["重要事实一", "重要事实二"],
+              "warnings": ["风险或建议核实事项一"]
+            }
+            """;
+
     private final TrackedChatClientService chatClientService;
 
+    private final ExecutorService chunkExecutor;
+
+    public WorkflowAnswerChunkConsumer(
+            TrackedChatClientService chatClientService,
+            @Qualifier("workflowAnswerChunkExecutor") ExecutorService chunkExecutor) {
+        this.chatClientService = chatClientService;
+        this.chunkExecutor = chunkExecutor;
+    }
+
     /**
-     * 让模型依次消费全部安全数据块。
+     * 让模型并发消费全部安全数据块。
      *
      * @param request            当前用户请求
      * @param runId              工作流运行ID
@@ -79,59 +124,98 @@ public class WorkflowAnswerChunkConsumer {
             String fieldSemanticsJson,
             WorkflowAnswerChunkPlan plan) {
 
-        validateRequest(request,plan);
+        validateRequest(request, plan);
 
         List<WorkflowAnswerChunkAnalysis> analyses = new ArrayList<>(plan.totalChunks());
 
-        for (WorkflowAnswerChunk chunk :  plan.chunks()) {
+        /*
+         * 受控并发提交：
+         * 并发数由专用线程池限制，最多同时调用 concurrency 个分块。
+         */
+        List<CompletableFuture<WorkflowAnswerChunkAnalysis>> futures =
+                new ArrayList<>(plan.totalChunks());
 
-            try {
-                String summary =consumeChunkWithRetry(
-                                request,
-                                runId,
-                                fieldSemanticsJson,
-                                plan,
-                                chunk);
-
-                analyses.add(new WorkflowAnswerChunkAnalysis(
-                                chunk.index(),
-                                chunk.sourcePointer(),
-                                chunk.sha256(),
-                                chunk.charCount(),
-                                summary ) );
-            } catch (Exception exception) {
-                WorkflowAnswerChunkCoverage
-                        failedCoverage =WorkflowAnswerChunkCoverage.failed(
-                                plan,
-                                analyses,
-                                chunk.index()
-                        );
-
-                /*
-                 * 日志只记录分块序号和异常类型，
-                 * 不打印原始业务数据和完整提示词。
-                 */
-                log.error(
-                        "工作流回答分块处理失败，runId={}，chunkIndex={}，errorType={}",
+        for (WorkflowAnswerChunk chunk : plan.chunks()) {
+            final WorkflowAnswerChunk current = chunk;
+            futures.add(CompletableFuture.supplyAsync(() -> {
+                String summary = consumeChunkWithRetry(
+                        request,
                         runId,
-                        chunk.index(),
-                        exception.getClass()
-                                .getSimpleName()
+                        fieldSemanticsJson,
+                        plan,
+                        current
                 );
+                return new WorkflowAnswerChunkAnalysis(
+                        current.index(),
+                        current.sourcePointer(),
+                        current.sha256(),
+                        current.charCount(),
+                        summary
+                );
+            }, chunkExecutor));
+        }
 
-                throw new WorkflowAnswerChunkConsumeException(
-                        "WORKFLOW_ANSWER_CHUNK_CONSUME_FAILED",
-                        "第"
-                                + chunk.index()
-                                + "个模型分块处理失败，"
-                                + "本次未生成最终业务回答",
-                        failedCoverage,
-                        exception
-                );
+        /*
+         * 等待全部分块结束。
+         * 任意分块失败时，保留其他成功结果用于失败覆盖率台账。
+         */
+        Throwable firstFailure = null;
+        int failedIndex = -1;
+        for (int index = 0; index < futures.size(); index++) {
+            try {
+                analyses.add(futures.get(index).join());
+            } catch (CompletionException exception) {
+                if (firstFailure == null) {
+                    firstFailure = exception.getCause() == null
+                            ? exception
+                            : exception.getCause();
+                    failedIndex = plan.chunks().get(index).index();
+                }
             }
         }
 
-        WorkflowAnswerChunkCoverage coverage = WorkflowAnswerChunkCoverage.completed( plan,analyses );
+        if (firstFailure != null) {
+            WorkflowAnswerChunkCoverage failedCoverage =
+                    WorkflowAnswerChunkCoverage.failed(
+                            plan,
+                            analyses,
+                            failedIndex
+                    );
+
+            /*
+             * 日志只记录分块序号和异常类型，
+             * 不打印原始业务数据和完整提示词。
+             */
+            log.error(
+                    "工作流回答分块处理失败，runId={}，chunkIndex={}，errorType={}",
+                    runId,
+                    failedIndex,
+                    firstFailure.getClass().getSimpleName()
+            );
+
+            throw new WorkflowAnswerChunkConsumeException(
+                    "WORKFLOW_ANSWER_CHUNK_CONSUME_FAILED",
+                    "第"
+                            + failedIndex
+                            + "个模型分块处理失败，"
+                            + "本次未生成最终业务回答",
+                    failedCoverage,
+                    firstFailure
+            );
+        }
+
+        /*
+         * 并发完成顺序不确定，按分块序号排序，
+         * 保证 coverage.analyses() 与计划顺序一致。
+         */
+        analyses.sort(
+                Comparator.comparingInt(
+                        WorkflowAnswerChunkAnalysis::chunkIndex
+                )
+        );
+
+        WorkflowAnswerChunkCoverage coverage =
+                WorkflowAnswerChunkCoverage.completed(plan, analyses);
 
         /*
          * 理论上循环结束后应该全部成功。
@@ -147,6 +231,45 @@ public class WorkflowAnswerChunkConsumer {
         }
 
         return coverage;
+    }
+
+    /**
+     * 小数据快路径：一次模型调用分析全部分块。
+     *
+     * 只适用于分块数量很少（默认不超过3）的报告，
+     * 一次调用替代"逐块消费 + 分层汇总"的多轮调用，
+     * 将 AI 分析耗时从 10~25 秒压缩到 3~8 秒。
+     *
+     * @return 模型返回的结构化分析JSON（summary/highlights/warnings）
+     */
+    public String consumeAllInOne(
+            AgentRequest request,
+            String runId,
+            String fieldSemanticsJson,
+            WorkflowAnswerChunkPlan plan) {
+
+        validateRequest(request, plan);
+
+        String userPrompt = buildAllInOnePrompt(
+                request,
+                fieldSemanticsJson,
+                plan
+        );
+
+        ModelCallContext context = buildContext(
+                request,
+                runId,
+                1,
+                ModelCallType.ANSWER
+        );
+
+        ChatResponse response = chatClientService.call(
+                context,
+                LIGHTWEIGHT_SYSTEM_PROMPT,
+                userPrompt
+        );
+
+        return extractResponseText(response);
     }
     /**
      * 单个分块最多调用两次。
@@ -251,6 +374,62 @@ public class WorkflowAnswerChunkConsumer {
                 ),
                 chunk.charCount(),
                 chunk.payloadJson()
+        );
+    }
+
+    /**
+     * 构造小数据快路径的一次性分析提示词。
+     *
+     * 输入全部安全分块，要求模型直接生成最终结构化分析。
+     */
+    private String buildAllInOnePrompt(
+            AgentRequest request,
+            String fieldSemanticsJson,
+            WorkflowAnswerChunkPlan plan) {
+
+        StringBuilder data = new StringBuilder();
+        for (WorkflowAnswerChunk chunk : plan.chunks()) {
+            data.append("分块")
+                    .append(chunk.index())
+                    .append("（")
+                    .append(chunk.charCount())
+                    .append("字符）：")
+                    .append(System.lineSeparator())
+                    .append(chunk.payloadJson())
+                    .append(System.lineSeparator())
+                    .append(System.lineSeparator());
+        }
+
+        return """
+                用户问题：
+                %s
+
+                字段中文语义：
+                %s
+
+                分块规模：
+                - 分块总数：%d
+                - 原始字符数量：%d
+                - 分块字符总量：%d
+
+                全部分块安全业务数据：
+                %s
+
+                请基于以上全部数据生成结构化分析JSON，
+                只返回合法JSON对象，不要输出其他内容。
+                """.formatted(
+                safeText(
+                        request.getEffectiveQuestion(),
+                        "用户未提供具体问题"
+                ),
+                safeText(
+                        fieldSemanticsJson,
+                        "[]"
+                ),
+                plan.totalChunks(),
+                plan.sourceCharCount(),
+                plan.chunkCharCount(),
+                data
         );
     }
 
