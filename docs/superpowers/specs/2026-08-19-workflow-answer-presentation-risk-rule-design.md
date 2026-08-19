@@ -126,9 +126,10 @@
 
 ### 6.3 发布与审计
 
+- 风险规则作为 `GraphSpec.riskRules` 随工作流发布快照保存，不新增独立规则表；规则版本直接使用工作流版本 ID。
 - 发布前校验字段是否属于该工作流的已发布字段字典，并校验左右值类型和运算符兼容性。
 - 运行时复用现有计算指标和安全结果，不绕过字段权限。
-- 保存规则编码、规则版本、项目编码、判定状态、证据字段值、原因和判定时间。
+- 判定结果复用现有 `ai_run_step` 运行步骤记录，保存规则编码、工作流版本 ID、项目编码、判定状态、脱敏证据值、原因和判定时间，不新增判定结果表。
 - AI 只把判定结果转换为用户易懂的文字，不改变判定状态。
 
 ## 7. 上下文记忆
@@ -236,12 +237,13 @@
 - `ai-common/.../modelusage/TrackedChatClientService.java` 与现有实现：真实模型流。
 - `ai-agent/.../chat/memory/model/BusinessConversationState.java`：结构化上下文。
 - `ConversationStateRecorder`、`ConversationContextResolver` 和现有状态服务：状态写入与解析。
-- 风险规则相关 DTO、Service、Mapper、Entity、发布校验及追加式 Flyway 迁移：当前项目尚未发现完整现成能力，需要新增最小实现。
+- `GraphSpec`、风险规则配置 record、发布校验和运行时判定服务：当前项目尚未发现完整现成能力，需要新增最小实现。
+- `WorkflowAnswerTraceRecorder` 与现有 `ai_run_step`：复用现有运行步骤保存风险判定审计，不新增数据库表。
 - `D:/TraeProject/enterprise-vue-admin/src/views/knowledge/AiChat/index.vue`：移除页面卸载即终止的行为。
 - `D:/TraeProject/enterprise-vue-admin/src/api/agentChat.js`：终止接口和流式调用。
 - 前端新增轻量 composable/模块单例以及公共运行提示组件，准确目录按现有项目结构确定。
 
-数据库结构如需新增风险规则与判定记录，必须新增 Flyway 迁移，不修改已执行迁移文件。实施前先说明表结构风险并由用户确认。
+本方案不修改数据库结构和 Flyway 文件。风险配置随工作流版本快照保存，判定审计复用现有运行步骤表。
 
 ## 13. 验收标准
 
