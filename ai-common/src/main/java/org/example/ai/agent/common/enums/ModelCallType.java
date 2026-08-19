@@ -15,6 +15,13 @@ public enum ModelCallType {
      */
     ANSWER,
     /**
+     * 固定报告的结构化分析。
+     *
+     * 单独记录调用类型，便于统计报告分析成功率和耗时。
+     */
+    REPORT_ANALYSIS,
+
+    /**
      * 工作流回答模型重试。
      *
      * 与ANSWER分开记录，避免正常调用和重试调用
@@ -90,6 +97,7 @@ public enum ModelCallType {
         return switch (this) {
             case ANSWER,
                  ANSWER_RETRY,
+                 REPORT_ANALYSIS,
                  RAG,
                  DIRECT_CHAT -> true;
             default -> false;

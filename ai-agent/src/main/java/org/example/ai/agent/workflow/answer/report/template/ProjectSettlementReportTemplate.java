@@ -39,14 +39,33 @@ public class ProjectSettlementReportTemplate implements ReportTemplate {
     @Override
     public List<ReportSchemaVO.Section> buildSections(JsonNode safeResult) {
         SettlementData data = extractData(safeResult);
-        return List.of(
-                new ReportSchemaVO.Section(
+        List<ReportSchemaVO.Section> sections = new ArrayList<>();
+        sections.add(new ReportSchemaVO.Section(
                         "SETTLEMENT_DETAILS",
                         "项目结算报告",
                         List.of(),
                         List.of(),
                         data.detailRows()
-                ),
+                )
+        );
+
+        /*
+         * 该区块只为可信分析输入提供关键金额。
+         * 结算专用前端仍然读取原有明细区块，不会重复展示该区块。
+         */
+        if (!data.analysisItems().isEmpty()) {
+            sections.add(
+                    new ReportSchemaVO.Section(
+                            "METRICS",
+                            "结算关键金额",
+                            data.analysisItems(),
+                            List.of(),
+                            List.of()
+                    )
+            );
+        }
+
+        sections.add(
                 new ReportSchemaVO.Section(
                         "SETTLEMENT_ATTACHMENTS",
                         "结算附件",
@@ -55,6 +74,8 @@ public class ProjectSettlementReportTemplate implements ReportTemplate {
                         data.attachmentRows()
                 )
         );
+
+        return List.copyOf(sections);
     }
 
     /**
@@ -67,24 +88,21 @@ public class ProjectSettlementReportTemplate implements ReportTemplate {
     private SettlementData extractData(JsonNode safeResult) {
         List<Map<String, Object>> detailRows = new ArrayList<>();
         List<Map<String, Object>> attachmentRows = new ArrayList<>();
+        List<ReportSchemaVO.Item> analysisItems = new ArrayList<>();
         JsonNode outerItems = resolveOuterItems(safeResult);
+
         if (outerItems == null || !outerItems.isArray()) {
-            return new SettlementData(detailRows, attachmentRows);
+            return new SettlementData(detailRows, attachmentRows, analysisItems);
         }
+
         for (int outerIndex = 0; outerIndex < outerItems.size(); outerIndex++) {
             JsonNode outerItem = outerItems.get(outerIndex);
             if (!outerItem.path("success").asBoolean(false)) {
                 continue;
             }
-            collectProjectRows(
-                    outerItem.path("data").path("items"),
-                    outerIndex,
-                    detailRows,
-                    attachmentRows
-            );
+            collectProjectRows(outerItem.path("data").path("items"), outerIndex, detailRows, attachmentRows, analysisItems);
         }
-
-        return new SettlementData(detailRows, attachmentRows);
+        return new SettlementData(detailRows, attachmentRows, analysisItems);
     }
 
     /**
@@ -110,9 +128,7 @@ public class ProjectSettlementReportTemplate implements ReportTemplate {
     /**
      * 提取项目列表和项目结算详情。
      */
-    private void collectProjectRows(JsonNode projectItems,int outerIndex,List<Map<String, Object>> detailRows,
-                                    List<Map<String, Object>> attachmentRows) {
-
+    private void collectProjectRows(JsonNode projectItems, int outerIndex, List<Map<String, Object>> detailRows, List<Map<String, Object>> attachmentRows, List<ReportSchemaVO.Item> analysisItems) {
         if (projectItems == null || !projectItems.isArray()) {
             return;
         }
@@ -135,6 +151,11 @@ public class ProjectSettlementReportTemplate implements ReportTemplate {
                             0,
                             0
                     );
+                    addProjectAnalysisItems(
+                            project,
+                            context,
+                            analysisItems
+                    );
                     Map<String, Object> row =buildProjectFields(project, context);
                     row.put("unitPresent", false);
                     row.put("recordPresent", false);
@@ -143,8 +164,15 @@ public class ProjectSettlementReportTemplate implements ReportTemplate {
                 }
                 continue;
             }
-            collectSettlementRows(project, projectResult.path("data").path("settlementInfos"),
-                    outerIndex, projectIndex, detailRows, attachmentRows);
+            collectSettlementRows(
+                    project,
+                    projectResult.path("data").path("settlementInfos"),
+                    outerIndex,
+                    projectIndex,
+                    detailRows,
+                    attachmentRows,
+                    analysisItems
+            );
         }
     }
 
@@ -157,7 +185,8 @@ public class ProjectSettlementReportTemplate implements ReportTemplate {
             int outerIndex,
             int projectIndex,
             List<Map<String, Object>> detailRows,
-            List<Map<String, Object>> attachmentRows) {
+            List<Map<String, Object>> attachmentRows,
+            List<ReportSchemaVO.Item> analysisItems) {
 
         String projectKey = resolveProjectKey(
                 project,
@@ -186,6 +215,11 @@ public class ProjectSettlementReportTemplate implements ReportTemplate {
                 unitCount,
                 recordCount
         );
+        addProjectAnalysisItems(
+                project,
+                context,
+                analysisItems
+        );
         if (!settlementInfos.isArray() || settlementInfos.isEmpty()) {
             detailRows.add(buildEmptyProjectRow(project, context));
             return;
@@ -204,7 +238,57 @@ public class ProjectSettlementReportTemplate implements ReportTemplate {
             );
         }
     }
+    /**
+     * 为结算报告分析提供项目级可信金额。
+     *
+     * 不从结算明细重复求和，直接使用专用模板已经确认的项目汇总值。
+     */
+    private void addProjectAnalysisItems(
+            JsonNode project,
+            ProjectContext context,
+            List<ReportSchemaVO.Item> target) {
 
+        String projectCode = readText(
+                project,
+                "projectCode"
+        );
+
+        String labelPrefix =
+                projectCode == null || projectCode.isBlank()
+                        ? "项目"
+                        : projectCode.trim();
+
+        addAnalysisItem(
+                target,
+                context.projectKey() + ":contractAmount",
+                labelPrefix + " / 合同金额",
+                context.projectContractAmount()
+        );
+
+        addAnalysisItem(
+                target,
+                context.projectKey() + ":settlementAmount",
+                labelPrefix + " / 结算金额",
+                context.projectSettlementAmount()
+        );
+
+        addAnalysisItem(
+                target,
+                context.projectKey() + ":outputAmount",
+                labelPrefix + " / 计量金额",
+                context.outputAmount()
+        );
+    }
+
+    /**
+     * 空金额不进入分析输入，禁止将缺失数据解释为零。
+     */
+    private void addAnalysisItem(List<ReportSchemaVO.Item> target, String key, String label, BigDecimal value) {
+        if (value == null) {
+            return;
+        }
+        target.add(new ReportSchemaVO.Item(key, label, value, "AMOUNT"));
+    }
     /**
      * 构建一个结算单位下的明细行。
      */
@@ -563,7 +647,8 @@ public class ProjectSettlementReportTemplate implements ReportTemplate {
 
     private record SettlementData(
             List<Map<String, Object>> detailRows,
-            List<Map<String, Object>> attachmentRows) {
+            List<Map<String, Object>> attachmentRows,
+            List<ReportSchemaVO.Item> analysisItems) {
     }
 
     private record ProjectContext(

@@ -33,7 +33,7 @@ public class RequestRateLimitProperties {
     /**
      * Redis限流键前缀。
      */
-    private String keyPrefix = "mc-ai:rate-limit";
+    private String keyPrefix = "mc-ai:rate-limit:";
 
     /**
      * 启动时校验限流配置。

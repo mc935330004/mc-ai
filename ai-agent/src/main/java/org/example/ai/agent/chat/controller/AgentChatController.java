@@ -48,36 +48,17 @@ public class AgentChatController {
          * Agent主体会在线程池中异步执行，
          * 必须在当前请求线程提前捕获可信租户和部门身份。
          */
-        request.setKnowledgeAccessPrincipal(
-                knowledgeAccessContext.getCurrentPrincipal()
-        );
+        request.setKnowledgeAccessPrincipal( knowledgeAccessContext.getCurrentPrincipal());
        //  模型编码由后端严格校验，未配置或已停用时拒绝请求。
-        String modelCode = aiChatSessionService.resolveModelCode(
-                userId,
-                request.getConversationId(),
-                request.getModelCode()
-        );
+        String modelCode = aiChatSessionService.resolveModelCode(userId, request.getConversationId(), request.getModelCode());
         request.setModelCode(modelCode);
-
         //  只取最近少量历史，避免提示词无限增长。
         request.setConversationMemory(aiChatSessionService.buildMemory(userId, request.getConversationId()));
-
         //  先保存用户问题，AI回答完成后再保存助手回答。
-        aiChatSessionService.saveUserMessage(
-                userId,
-                request.getConversationId(),
-                request.getUserQuestion(),
-                modelCode
-        );
-        /*
-         * 请求头只表示客户端能力，
-         * 最终版本仍由服务端灰度策略决定。
-         */
+        aiChatSessionService.saveUserMessage(userId, request.getConversationId(), request.getUserQuestion(), modelCode);
+
         int resolvedVersion = streamVersionResolver.resolve( streamVersion,userId );
-        /*
-         * 协议版本由请求头控制。
-         * 只允许1和2，非法值回退到默认配置。
-         */
+
         request.setStreamVersion(resolvedVersion);
         return agentOrchestrator.chat(request);
     }

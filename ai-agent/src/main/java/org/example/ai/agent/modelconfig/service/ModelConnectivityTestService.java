@@ -32,8 +32,7 @@ import java.util.concurrent.TimeoutException;
 @RequiredArgsConstructor
 public class ModelConnectivityTestService {
 
-    private static final String TEST_PROMPT =
-            "请只回复：模型连接正常";
+    private static final String TEST_PROMPT ="请只回复：模型连接正常";
 
     private static final int TEST_MAX_TOKENS = 32;
 
@@ -49,7 +48,6 @@ public class ModelConnectivityTestService {
 
         long startTime = System.currentTimeMillis();
         ModelRuntimeConfig config = null;
-
         ModelCallContext context = ModelCallContext.builder()
                 .userId(operator)
                 .callType(ModelCallType.MODEL_CONNECTIVITY_TEST)
@@ -72,16 +70,13 @@ public class ModelConnectivityTestService {
                     .user(TEST_PROMPT)
                     .call()
                     .chatResponse();
-
             String responseText = extractResponseText(response);
             if (!StringUtils.hasText(responseText)) {
                 throw new IllegalStateException(
                         "模型没有返回有效测试内容"
                 );
             }
-
             long durationMs =System.currentTimeMillis() - startTime;
-
             String actualModelName = extractModelName(
                     response,
                     config.modelName()

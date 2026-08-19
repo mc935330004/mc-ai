@@ -141,6 +141,61 @@ public class AgentMetrics {
                 .record(Math.max(totalTokens, 0));
     }
 
+    /**
+     * 记录一次AI报告分析尝试。
+     *
+     * success=true表示模型结果已经通过本地解析和可信数据校验。
+     */
+    public void recordReportAnalysisAttempt(
+            boolean success,
+            String reason,
+            long durationMs) {
+
+        String successTag = success ? "true" : "false";
+
+        Counter.builder("agent.report.analysis.attempts")
+                .description("AI报告分析尝试次数")
+                .tag("source", "AI")
+                .tag("success", successTag)
+                .tag("reason", safeTag(reason))
+                .register(meterRegistry)
+                .increment();
+
+        Timer.builder("agent.report.analysis.attempt.duration")
+                .description("AI报告分析尝试耗时")
+                .tag("success", successTag)
+                .tag("reason", safeTag(reason))
+                .register(meterRegistry)
+                .record(
+                        Math.max(durationMs, 0),
+                        TimeUnit.MILLISECONDS
+                );
+    }
+
+    /**
+     * 记录最终可展示的报告分析结果。
+     *
+     * source只允许AI或RULE_FALLBACK，
+     * reason使用固定分类，禁止传入异常原文。
+     */
+    public void recordReportAnalysisCompleted(String source, String reason, long durationMs) {
+        Counter.builder("agent.report.analysis.completed")
+                .description("最终可展示的报告分析数量")
+                .tag("source", safeTag(source))
+                .tag("reason", safeTag(reason))
+                .register(meterRegistry)
+                .increment();
+
+        Timer.builder("agent.report.analysis.completed.duration")
+                .description("报告分析最终完成耗时")
+                .tag("source", safeTag(source))
+                .register(meterRegistry)
+                .record(
+                        Math.max(durationMs, 0),
+                        TimeUnit.MILLISECONDS
+                );
+    }
+
     private String version(int protocolVersion) {
         return protocolVersion == 2 ? "v2" : "v1";
     }

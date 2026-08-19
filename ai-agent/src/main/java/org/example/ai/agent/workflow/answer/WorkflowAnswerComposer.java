@@ -4,17 +4,17 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.example.ai.agent.workflow.answer.analysis.WorkflowReportAnalysisModelService;
 import org.example.ai.agent.chat.entity.AgentRequest;
 import org.example.ai.agent.chat.vo.ReportSchemaVO;
+import org.example.ai.agent.workflow.answer.analysis.ReportAnalysisInput;
+import org.example.ai.agent.workflow.answer.analysis.ReportAnalysisInputBuilder;
 import org.example.ai.agent.workflow.answer.artifact.ResultArtifactService;
-import org.example.ai.agent.workflow.answer.analysis.WorkflowAnswerAnalysisProperties;
 import org.example.ai.agent.workflow.answer.chunk.*;
 import org.example.ai.agent.workflow.answer.trace.WorkflowAnswerTraceRecorder;
 import org.example.ai.agent.workflow.runtime.WorkflowExecutionOutcome;
 import org.springframework.stereotype.Service;
-import com.fasterxml.jackson.databind.JsonNode;
-import java.util.ArrayList;
-import java.util.List;
+
 /**
  * 根据工作流结构化结果生成最终中文回答。
  *
@@ -41,10 +41,8 @@ public class WorkflowAnswerComposer {
     private final WorkflowAnswerSummaryReducer summaryReducer;
     private final WorkflowAnswerTraceRecorder traceRecorder;
     private final ResultArtifactService resultArtifactService;
-    /**
-     * AI 分析速度优化配置，决定快路径阈值。
-     */
-    private final WorkflowAnswerAnalysisProperties analysisProperties;
+    private final ReportAnalysisInputBuilder reportAnalysisInputBuilder;
+    private final WorkflowReportAnalysisModelService reportAnalysisModelService;
     /**
      *  准备基础报告。
      *
@@ -84,145 +82,42 @@ public class WorkflowAnswerComposer {
                 artifactId
         );
     }
+
     /**
-     *  基于已保存 Artifact 生成结构化 AI 分析。
+     * 使用固定报告结构执行一次精简AI分析。
      *
-     *  分块数不超过快路径阈值时走一次性分析（1次模型调用）；
-     *  大数据量仍走"受控并发逐块消费 + 分层汇总"保证覆盖率。
+     * 不再根据分块数量切换多轮分析，
+     * 金额报告统一使用一次模型调用。
      */
     public WorkflowAnswerAnalysisResult analyzeReport(
             AgentRequest request,
-            WorkflowAnswerPreparation preparation) {
-        WorkflowAnswerChunkPlan chunkPlan = preparation.chunkPlan();
-
-        /*
-         * 小数据快路径：
-         * 分块少时直接把全部分块交给模型一次生成结构化分析，
-         * 替代"逐块消费 + 分层汇总"的多轮调用，耗时从10~25秒降到3~8秒。
-         */
-        if (chunkPlan.totalChunks() <= analysisProperties.getLightweightMaxChunks()) {
-            return analyzeLightweight(request, preparation);
-        }
-
-        long chunkStartedAt = System.currentTimeMillis();
-        WorkflowAnswerChunkCoverage coverage =chunkConsumer.consume(
-                        request,
-                        preparation.outcome().runId(),
-                        preparation.fieldSemanticsJson(),
-                        chunkPlan
-                );
-
-        traceRecorder.recordChunkSuccess(
-                preparation.outcome().runId(),
-                chunkPlan,
-                coverage,
-                System.currentTimeMillis() - chunkStartedAt
-        );
-
-        long reductionStartedAt = System.currentTimeMillis();
-
-        WorkflowAnswerReductionResult reduction =summaryReducer.reduceStructured(
-                        request,
-                        preparation.outcome().runId(),
-                        preparation.fieldSemanticsJson(),
-                        coverage
-                );
-
-        if (!reduction.complete(chunkPlan.totalChunks())) {
-            throw new IllegalStateException(
-                    "结构化分析没有覆盖全部数据分块"
+            WorkflowAnswerPreparation preparation,
+            ReportSchemaVO baseReportSchema) {
+        if (preparation == null) {
+            throw new IllegalArgumentException(
+                    "报告准备结果不能为空"
             );
         }
 
-        traceRecorder.recordReductionSuccess(
-                preparation.outcome().runId(),
-                reduction,
-                System.currentTimeMillis() - reductionStartedAt
-        );
+        ReportAnalysisInput input =
+                reportAnalysisInputBuilder.build(
+                        baseReportSchema
+                );
 
-        ReportSchemaVO.Analysis analysis = parseStructuredAnalysis(reduction.finalAnswer());
+        ReportSchemaVO.Analysis analysis =
+                reportAnalysisModelService.analyze(
+                        request,
+                        preparation.outcome().runId(),
+                        input
+                );
+
         return new WorkflowAnswerAnalysisResult(
                 analysis,
                 preparation.artifactId()
         );
     }
 
-    /**
-     * 小数据快路径：一次模型调用生成结构化分析。
-     *
-     * 不逐块消费、不分层汇总，因此不记录分块/汇总遥测，
-     * 仅记录一条轻量分析成功日志。
-     */
-    private WorkflowAnswerAnalysisResult analyzeLightweight(
-            AgentRequest request,
-            WorkflowAnswerPreparation preparation) {
 
-        long startedAt = System.currentTimeMillis();
-        String analysisJson = chunkConsumer.consumeAllInOne(
-                request,
-                preparation.outcome().runId(),
-                preparation.fieldSemanticsJson(),
-                preparation.chunkPlan()
-        );
-        ReportSchemaVO.Analysis analysis = parseStructuredAnalysis(analysisJson);
-        log.info(
-                "轻量分析完成，runId={}，chunks={}，耗时={}ms",
-                preparation.outcome().runId(),
-                preparation.chunkPlan().totalChunks(),
-                System.currentTimeMillis() - startedAt
-        );
-        return new WorkflowAnswerAnalysisResult(
-                analysis,
-                preparation.artifactId()
-        );
-    }
-    /**
-     * 解析并校验模型返回的结构化分析 JSON。
-     */
-    private ReportSchemaVO.Analysis parseStructuredAnalysis(String json) {
-        JsonNode root;
-        try {
-            root = objectMapper.readTree(json);
-        } catch (Exception exception) {
-            throw new IllegalStateException(
-                    "AI分析结果不是合法的结构化JSON",
-                    exception
-            );
-        }
-        if (root == null || !root.isObject()) {
-            throw new IllegalStateException("AI分析结果必须是JSON对象");
-        }
-        ReportSchemaVO.Analysis analysis = new ReportSchemaVO.Analysis(
-                "DONE",
-                root.path("summary").asText("").trim(),
-                readStringList(root.path("highlights")),
-                readStringList(root.path("warnings"))
-        );
-        // 空JSON不能标记为分析完成，统一进入现有FAILED降级链路。
-        if (analysis.summary().isBlank()
-                && analysis.highlights().isEmpty()
-                && analysis.warnings().isEmpty()) {
-            throw new IllegalStateException("AI分析结果没有可展示内容");
-        }
-        return analysis;
-    }
-
-    /**
-     *  读取模型返回的字符串数组。
-     */
-    private List<String> readStringList(JsonNode node) {
-        if (node == null || !node.isArray()) {
-            return List.of();
-        }
-        List<String> values = new ArrayList<>();
-        for (JsonNode item : node) {
-            if (item.isTextual() && !item.asText().isBlank()) {
-                values.add(item.asText().trim());
-            }
-        }
-
-        return List.copyOf(values);
-    }
     /**
      * 根据工作流执行结果生成最终中文回答。
      *

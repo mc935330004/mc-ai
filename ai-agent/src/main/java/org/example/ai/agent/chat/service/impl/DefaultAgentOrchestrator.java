@@ -57,7 +57,10 @@ import org.example.ai.agent.workflow.answer.artifact.ResultArtifactAnalysisResul
 import org.example.ai.agent.workflow.answer.artifact.ResultArtifactAnalysisService;
 import org.example.ai.agent.chat.vo.ReportSchemaVO;
 import org.example.ai.agent.workflow.answer.report.ReportSchemaBuilder;
-
+import org.example.ai.agent.observability.AgentMetrics;
+import org.example.ai.agent.workflow.answer.analysis.ReportAnalysisFallbackService;
+import org.example.ai.agent.workflow.answer.analysis.ReportAnalysisInput;
+import org.example.ai.agent.workflow.answer.analysis.ReportAnalysisInputBuilder;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -152,6 +155,20 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
      */
     private final ReportFollowUpService reportFollowUpService;
     /**
+     * 从基础报告生成可信分析输入。
+     */
+    private final ReportAnalysisInputBuilder reportAnalysisInputBuilder;
+
+    /**
+     * 模型失败时生成通用事实分析。
+     */
+    private final ReportAnalysisFallbackService reportAnalysisFallbackService;
+
+    /**
+     * 记录报告分析成功、失败和兜底指标。
+     */
+    private final AgentMetrics agentMetrics;
+    /**
      * 使用显式构造器注入命名线程池。
      *
      * Executor 类型可能存在多个 Bean，必须使用 Qualifier 指定
@@ -180,8 +197,10 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
             ModelUsageService modelUsageService,
             WorkflowAnswerAnalysisDecider workflowAnswerAnalysisDecider,
             WorkflowAnswerAnalysisProperties analysisProperties,
-            @Qualifier("workflowAnswerAnalysisExecutor") ExecutorService workflowAnswerAnalysisExecutor
-    ) {
+            ReportAnalysisInputBuilder reportAnalysisInputBuilder,
+            ReportAnalysisFallbackService reportAnalysisFallbackService,
+            AgentMetrics agentMetrics,
+            @Qualifier("workflowAnswerAnalysisExecutor") ExecutorService workflowAnswerAnalysisExecutor) {
         this.streamSessionFactory = streamSessionFactory;
         this.knowledgeDocumentQueryService = knowledgeDocumentQueryService;
         this.agentChatExecutor = agentChatExecutor;
@@ -204,6 +223,9 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
         this.workflowAnswerAnalysisDecider = workflowAnswerAnalysisDecider;
         this.analysisProperties = analysisProperties;
         this.workflowAnswerAnalysisExecutor = workflowAnswerAnalysisExecutor;
+        this.reportAnalysisInputBuilder = reportAnalysisInputBuilder;
+        this.reportAnalysisFallbackService = reportAnalysisFallbackService;
+        this.agentMetrics = agentMetrics;
 
     }
     @Override
@@ -987,8 +1009,7 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
      * 最多返回12个字段，必答字段优先。
      */
     private List<FactPreviewVO> buildFactPreview( List<ToolResult> toolResults) {
-        if (toolResults == null
-                || toolResults.isEmpty()) {
+        if (toolResults == null || toolResults.isEmpty()) {
             return List.of();
         }
         return toolResults.stream() .filter(result ->
@@ -1006,11 +1027,8 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                         .build()) .toList();
     }
 
-    private WorkflowExecutionOutcome executeWorkflowQuery(
-            AgentRequest request,
-            AgentStreamSession stream,
-            String runId,
-            IntentResult intentResult) throws Exception {
+    private WorkflowExecutionOutcome executeWorkflowQuery(AgentRequest request,
+                                                          AgentStreamSession stream, String runId, IntentResult intentResult) throws Exception {
 
         WorkflowPlan plan =intentResult.getWorkflowPlan();
         ReportQueryType queryType =intentResult.getQueryType() == null
@@ -1025,58 +1043,42 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                 "thinking",
                 AgentStreamEvent.of(
                         runId,
-                        AgentStreamEventType
-                                .THINKING
-                                .name(),
-                        "正在执行工作流："
-                                + plan.getWorkflowName(),
-                        null
-                )
+                        AgentStreamEventType.THINKING.name(), "正在执行工作流：" + plan.getWorkflowName(),
+                        null)
         );
 
         WorkflowExecutionCommand command =WorkflowExecutionCommand.builder()
                         .runId(runId)
                         .userId(request.getUserId())
-                        .workflowCode(
-                                plan.getWorkflowCode()
-                        )
-                        .expectedVersionId(
-                                plan.getVersionId()
-                        )
+                        .workflowCode(plan.getWorkflowCode())
+                        .expectedVersionId(plan.getVersionId())
                         /*
                          * 这里只允许使用Planner清洗后的input。
                          * 不读取request.extra中的workflowCode或input。
                          */
                         .input(plan.getInput())
-                        .userContext(
-                                request.getPageContext()
-                                        == null
-                                        ? new LinkedHashMap<>()
-                                        : new LinkedHashMap<>(
-                                        request.getPageContext()
-                                )
-                        )
-                        .authorization(
-                                request.getAuthorization()
-                        )
-                        .secureContext(
-                                new LinkedHashMap<>()
-                        )
+                        .userContext(request.getPageContext() == null ? new LinkedHashMap<>()
+                                : new LinkedHashMap<>(request.getPageContext()))
+                        .authorization(request.getAuthorization())
+                        .secureContext(new LinkedHashMap<>())
                         .build();
 
         WorkflowExecutionOutcome outcome =workflowExecutionFacade.execute(command);
 
-        stream.send(
-                "workflow_result",
-                AgentStreamEvent.of(
-                        runId,
-                        AgentStreamEventType.WORKFLOW_RESULT.name(),
-                        outcome.partialSuccess()
-                                ? "工作流执行完成，部分项目查询失败。"
-                                : "工作流执行完成。",
-                        outcome
-                )
-        );
+        stream.send("workflow_result",
+                AgentStreamEvent.of(runId, AgentStreamEventType.WORKFLOW_RESULT.name(),
+                        outcome.success() ? "工作流执行完成。" : "工作流执行失败。", outcome));
+        /*
+         * 工作流执行失败时没有可用于生成报告的基础数据，
+         * 直接返回真实业务错误，禁止继续准备报告或执行分析兜底。
+         */
+        if (!outcome.success()) {
+            String errorMessage =StringUtils.hasText(outcome.errorMessage())? outcome.errorMessage() : "工作流执行失败";
+            log.warn("工作流执行失败，runId={}，workflowCode={}，errorCode={}，errorMessage={}", runId, outcome.workflowCode(), outcome.errorCode(), errorMessage);
+            publishAssistantAnswer(request, stream, runId, "查询失败：" + errorMessage);
+            stream.complete();
+            return outcome;
+        }
         /**
          *  SSE v1 继续使用旧版 Markdown 回答。
          */
@@ -1094,20 +1096,8 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                             .presentationType(presentationType)
                             .presentationTitle(reportTitle)
                             .build();
-            conversationStateRecorder.recordWorkflowResult(
-                    request,
-                    plan,
-                    outcome,
-                    runId,
-                    composeResult.artifactId()
-            );
-            publishAssistantAnswer(
-                    request,
-                    stream,
-                    runId,
-                    composeResult.answer(),
-                    payload
-            );
+            conversationStateRecorder.recordWorkflowResult(request, plan, outcome, runId, composeResult.artifactId());
+            publishAssistantAnswer(request, stream, runId, composeResult.answer(), payload);
             stream.complete();
             return outcome;
         }
@@ -1152,13 +1142,7 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
          * 准备失败时仍允许前端显示内存中的基础报告。
          */
         if (preparation != null) {
-            conversationStateRecorder.recordWorkflowResult(
-                    request,
-                    plan,
-                    outcome,
-                    runId,
-                    preparation.artifactId()
-            );
+            conversationStateRecorder.recordWorkflowResult(request, plan, outcome, runId, preparation.artifactId());
         }
 
         /*
@@ -1166,27 +1150,20 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
          * 1. ANALYSIS_REPORT（用户明确要求分析）——意图强信号，直接异步分析；
          * 2. DATA_QUERY + 判定开启——报告先展示，由模型判定本次数据是否需要分析。
          */
-        boolean decisionEnabled = analysisProperties.isDecisionEnabled()
-                && !analysisRequired;
+        boolean decisionEnabled = analysisProperties.isDecisionEnabled() && !analysisRequired;
 
         if (!analysisRequired && !decisionEnabled) {
-            completeDataQueryReport(
-                    request,
-                    stream,
-                    runId,
-                    baseReportSchema
-            );
+            completeDataQueryReport(request, stream, runId, baseReportSchema);
             return outcome;
         }
+
         if (preparation == null) {
-            sendReportAnalysisFailure(
-                    request,
-                    stream,
-                    runId,
-                    outcome,
-                    baseReportSchema,
-                    new IllegalStateException("报告基础数据准备失败")
-            );
+            if (analysisRequired) {
+                completeReportWithRuleFallback(request, stream, runId, outcome, baseReportSchema,
+                        new IllegalStateException("报告基础数据准备失败"), System.currentTimeMillis());
+            } else {
+                completeDataQueryReport(request, stream, runId, baseReportSchema);
+            }
             return outcome;
         }
         try {
@@ -1203,14 +1180,11 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                     )
             );
         } catch (RuntimeException exception) {
-            sendReportAnalysisFailure(
-                    request,
-                    stream,
-                    runId,
-                    outcome,
-                    baseReportSchema,
-                    exception
-            );
+            if (analysisRequired) {
+                completeReportWithRuleFallback(request, stream, runId, outcome, baseReportSchema, exception, System.currentTimeMillis());
+            } else {
+                completeDataQueryReport(request, stream, runId, baseReportSchema);
+            }
         }
         return outcome;
     }
@@ -1218,12 +1192,8 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
     /**
      * 完成普通数据查询报告。
      */
-    private void completeDataQueryReport(
-            AgentRequest request,
-            AgentStreamSession stream,
-            String runId,
-            ReportSchemaVO reportSchema)
-            throws Exception {
+    private void completeDataQueryReport(AgentRequest request, AgentStreamSession stream,
+                                         String runId, ReportSchemaVO reportSchema) throws Exception {
 
         stream.send(
                 "report_done",
@@ -1233,33 +1203,23 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                         .content("")
                         .data(reportSchema)
                         .presentationType("REPORT")
-                        .presentationTitle(
-                                reportSchema.title()
-                        )
+                        .presentationTitle(reportSchema.title())
                         .build()
         );
 
         /*
          * 报告先完成展示，再追加独立助手追问。
          */
-        publishReportFollowUpPrompt(
-                request,
-                stream,
-                runId
-        );
-
+        publishReportFollowUpPrompt(request, stream, runId);
         stream.complete();
     }
 
     /**
      *  异步生成 AI 结构化分析。
      */
-    private void analyzeWorkflowReportAsync(AgentRequest request,
-                                            AgentStreamSession stream,
-                                            String runId,
-                                            WorkflowExecutionOutcome outcome,
-                                            WorkflowAnswerPreparation preparation,
-                                            ReportSchemaVO baseReportSchema) {
+    private void analyzeWorkflowReportAsync(AgentRequest request, AgentStreamSession stream, String runId,
+                                            WorkflowExecutionOutcome outcome, WorkflowAnswerPreparation preparation, ReportSchemaVO baseReportSchema) {
+        long analysisStartedAt = System.currentTimeMillis();
         try {
             /*
              * DATA_QUERY 且判定开启时，先由模型判定本次数据是否需要分析。
@@ -1272,12 +1232,7 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                         preparation
                 );
                 if (!needAnalysis) {
-                    completeDataQueryReport(
-                            request,
-                            stream,
-                            runId,
-                            baseReportSchema
-                    );
+                    completeDataQueryReport(request, stream, runId, baseReportSchema);
                     return;
                 }
             }
@@ -1290,67 +1245,12 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                             .data(Map.of("status", "RUNNING"))
                             .build()
             );
-            WorkflowAnswerAnalysisResult result = analyzeReportWithTimeout(request, preparation);
-            ReportSchemaVO finalSchema =reportSchemaBuilder.withAnalysis(baseReportSchema,result.analysis());
-            /*
-             * 分析结果先持久化、再推送 SSE 事件：
-             * 客户端在分析期间断开（send 抛断连异常）时，
-             * 数据库仍保存完整分析结果，刷新页面可以从历史消息恢复，
-             * 而不是停留在 PENDING 的“未生成分析”。
-             */
-            ChatTextPayloadVO payload =ChatTextPayloadVO.builder()
-                            .workflow(outcome)
-                            .reportSchema(finalSchema)
-                            .presentationType("REPORT")
-                            .presentationTitle(finalSchema.title())
-                            .build();
-            updateAssistantReportMessage(
-                    request,
-                    stream,
-                    runId,
-                    "基础报告和 AI 分析已生成。",
-                    payload
-            );
-            stream.send(
-                    "report_analysis_delta",
-                    AgentStreamEvent.builder()
-                            .runId(runId)
-                            .type("REPORT_ANALYSIS_DELTA")
-                            .content("")
-                            .data(result.analysis())
-                            .build()
-            );
-            stream.send(
-                    "report_done",
-                    AgentStreamEvent.builder()
-                            .runId(runId)
-                            .type("REPORT_DONE")
-                            .content("")
-                            .data(finalSchema)
-                            .presentationType("REPORT")
-                            .presentationTitle(finalSchema.title())
-                            .build()
-            );
 
-            /*
-             * AI 分析完成后再发送追问，
-             * 避免用户输入框仍被当前请求占用。
-             */
-            publishReportFollowUpPrompt(
-                    request,
-                    stream,
-                    runId
-            );
-            stream.complete();
+            WorkflowAnswerAnalysisResult result = analyzeReportWithTimeout(request, preparation,baseReportSchema);
+            completeAnalyzedReport(request, stream, runId, outcome, baseReportSchema, result.analysis());
+            agentMetrics.recordReportAnalysisCompleted("AI", "NONE", System.currentTimeMillis() - analysisStartedAt);
         } catch (Exception exception) {
-            sendReportAnalysisFailure(
-                    request,
-                    stream,
-                    runId,
-                    outcome,
-                    baseReportSchema,
-                    exception
-            );
+            completeReportWithRuleFallback(request, stream, runId, outcome, baseReportSchema, exception, analysisStartedAt);
         }
     }
     /**
@@ -1361,13 +1261,14 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
      */
     private WorkflowAnswerAnalysisResult analyzeReportWithTimeout(
             AgentRequest request,
-            WorkflowAnswerPreparation preparation) throws Exception {
-
+            WorkflowAnswerPreparation preparation,
+            ReportSchemaVO baseReportSchema) throws Exception {
         Future<WorkflowAnswerAnalysisResult> future =
                 workflowAnswerAnalysisExecutor.submit(
                         () -> workflowAnswerComposer.analyzeReport(
                                 request,
-                                preparation
+                                preparation,
+                                baseReportSchema
                         )
                 );
 
@@ -1386,81 +1287,139 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
             );
         }
     }
+
     /**
-     * AI 分析失败时保留基础报告。
+     * 统一完成AI分析或规则分析结果。
+     *
+     * 先持久化完整报告，再推送SSE事件，
+     * 保证客户端中途断开后刷新页面仍能恢复结果。
      */
-    private void sendReportAnalysisFailure( AgentRequest request,
-                                            AgentStreamSession stream,
-                                            String runId,
-                                            WorkflowExecutionOutcome outcome,
-                                            ReportSchemaVO baseSchema,
-                                            Exception exception) {
+    private void completeAnalyzedReport(AgentRequest request, AgentStreamSession stream, String runId, WorkflowExecutionOutcome outcome, ReportSchemaVO baseSchema, ReportSchemaVO.Analysis analysis) throws Exception {
+        ReportSchemaVO finalSchema = reportSchemaBuilder.withAnalysis(baseSchema, analysis);
+        ChatTextPayloadVO payload = ChatTextPayloadVO.builder()
+                .workflow(outcome)
+                .reportSchema(finalSchema)
+                .presentationType("REPORT")
+                .presentationTitle(finalSchema.title())
+                .build();
+        updateAssistantReportMessage(request, stream, runId, "基础报告和数据分析已生成。", payload);
+
+        stream.send(
+                "report_analysis_delta",
+                AgentStreamEvent.builder()
+                        .runId(runId)
+                        .type("REPORT_ANALYSIS_DELTA")
+                        .content("")
+                        .data(analysis)
+                        .build()
+        );
+
+        stream.send("report_done", AgentStreamEvent.builder()
+                .runId(runId).type("REPORT_DONE").content("").data(finalSchema)
+                .presentationType("REPORT").presentationTitle(finalSchema.title())
+                .build());
+        publishReportFollowUpPrompt(request, stream, runId);
+        stream.complete();
+    }
+
+    /**
+     * 模型、解析或分析准备失败时生成通用事实分析。
+     *
+     * 普通用户不接收模型异常和解析错误，
+     * 真实失败原因只进入日志和监控标签。
+     */
+    private void completeReportWithRuleFallback(AgentRequest request, AgentStreamSession stream, String runId,
+                                                WorkflowExecutionOutcome outcome, ReportSchemaVO baseSchema, Exception exception, long analysisStartedAt) {
+        Throwable rootCause = findRootCause(exception);
         /*
-         * 客户端断开不是分析失败：事件推不出去，数据库也不应被覆盖为 FAILED
-         * （成功路径已先持久化完整分析结果，这里覆盖会丢失）。
-         * 只记日志，静默结束。
+         * 客户端断开不属于分析失败，
+         * 禁止覆盖已经持久化的成功结果。
          */
-        if (exception instanceof AgentClientDisconnectedException) {
-            log.info("客户端连接已断开，AI 分析结果无法推送，runId={}", runId);
+        if (rootCause instanceof AgentClientDisconnectedException) {
+            log.info("客户端连接已断开，报告分析结果无法推送，runId={}", runId);
             return;
         }
-        log.warn("报告分析失败，runId={}，errorType={}",runId,exception.getClass().getSimpleName());
-        ReportSchemaVO.Analysis failedAnalysis =
-                new ReportSchemaVO.Analysis(
-                        "FAILED",
-                        "",
-                        List.of(),
-                        List.of("AI分析失败，基础业务数据仍然可用")
-                );
-        ReportSchemaVO failedSchema =reportSchemaBuilder.withAnalysis(baseSchema,failedAnalysis);
+        String fallbackReason = classifyFallbackReason(rootCause);
+        log.warn(
+                "报告AI分析未完成，使用规则分析兜底，"+ "runId={}，reason={}，errorType={}",
+                runId,
+                fallbackReason,
+                rootCause.getClass().getSimpleName()
+        );
+
         try {
-            stream.send("report_analysis_delta",
-                    AgentStreamEvent.builder()
-                            .runId(runId)
-                            .type("REPORT_ANALYSIS_DELTA")
-                            .content("")
-                            .data(failedAnalysis)
-                            .build()
-            );
-            stream.send("report_done",
-                    AgentStreamEvent.builder()
-                            .runId(runId)
-                            .type("REPORT_DONE")
-                            .content("")
-                            .data(failedSchema)
-                            .presentationType("REPORT")
-                            .presentationTitle(failedSchema.title())
-                            .build()
-            );
-
-            ChatTextPayloadVO payload =ChatTextPayloadVO.builder()
-                            .workflow(outcome)
-                            .reportSchema(failedSchema)
-                            .presentationType("REPORT")
-                            .presentationTitle(failedSchema.title())
-                            .build();
-            updateAssistantReportMessage(
-                    request,
-                    stream,
-                    runId,
-                    "基础报告已生成，但 AI 分析暂时失败。",
-                    payload
-            );
-
-            /*
-             * AI 分析失败不影响基础报告后的业务追问。
-             */
-            publishReportFollowUpPrompt(
-                    request,
-                    stream,
-                    runId
-            );
-
-            stream.complete();
-        } catch (Exception sendException) {
-            stream.error(sendException);
+            ReportAnalysisInput input = reportAnalysisInputBuilder.build(baseSchema);
+            ReportSchemaVO.Analysis fallbackAnalysis = reportAnalysisFallbackService.build(input);
+            completeAnalyzedReport(request, stream, runId, outcome, baseSchema, fallbackAnalysis);
+            agentMetrics.recordReportAnalysisCompleted("RULE_FALLBACK", fallbackReason, System.currentTimeMillis() - analysisStartedAt);
+        } catch (Exception fallbackException) {
+            Throwable fallbackRootCause = findRootCause(fallbackException);
+            if (fallbackRootCause instanceof AgentClientDisconnectedException) {
+                log.info("客户端连接已断开，规则分析结果无法推送，runId={}", runId);
+                return;
+            }
+            log.error("报告规则分析兜底异常，runId={}，errorType={}", runId, fallbackRootCause.getClass().getSimpleName());
+            stream.error(fallbackException);
         }
     }
+
+    /**
+     * 将内部异常转换成低基数监控分类。
+     *
+     * 禁止把异常原文直接作为指标标签。
+     */
+    /**
+     * 将内部异常转换成低基数监控分类。
+     *
+     * 禁止把异常原文直接作为指标标签。
+     */
+    private String classifyFallbackReason(Throwable exception) {
+        if (exception instanceof TimeoutException) {
+            return "TIMEOUT";
+        }
+        String errorType = exception.getClass().getSimpleName();
+        // Jackson解析异常的根异常消息不一定包含“JSON”或“解析”。
+        if (errorType.contains("Json") || errorType.contains("MismatchedInput")) {
+            return "OUTPUT_INVALID";
+        }
+        if ("RejectedExecutionException".equals(errorType)) {
+            return "EXECUTOR_REJECTED";
+        }
+        String message = exception.getMessage();
+        if (StringUtils.hasText(message)) {
+            if (message.contains("基础数据准备")) {
+                return "PREPARATION_FAILED";
+            }
+            if (message.contains("JSON") || message.contains("解析") || message.contains("可信内容") || message.contains("输出")) {
+                return "OUTPUT_INVALID";
+            }
+        }
+        return "MODEL_CALL_FAILED";
+    }
+
+    /**
+     * 获取最底层异常。
+     * 客户端断开异常是业务识别标记，不能继续解包成底层网络异常，
+     * 否则会错误进入规则分析兜底并覆盖已经保存的AI结果。
+     */
+    private Throwable findRootCause(Throwable exception) {
+        if (exception == null) {
+            return new IllegalStateException("未知报告分析异常");
+        }
+
+        Throwable current = exception;
+
+        while (current.getCause() != null && current.getCause() != current) {
+
+            if (current instanceof AgentClientDisconnectedException) {
+                return current;
+            }
+            current = current.getCause();
+        }
+
+        return current;
+    }
+
     /**
      *  仅向 SSE v2 客户端发送结构化基础报告。
      */

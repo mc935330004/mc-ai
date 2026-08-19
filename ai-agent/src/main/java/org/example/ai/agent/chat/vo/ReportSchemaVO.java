@@ -1,5 +1,6 @@
 package org.example.ai.agent.chat.vo;
 
+import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
 
@@ -146,9 +147,44 @@ public record ReportSchemaVO(
      */
     public record Analysis(
             String status,
+            String source,
             String summary,
+            List<KeyAmount> keyAmounts,
             List<String> highlights,
             List<String> warnings) {
+
+        /**
+         * 保留旧的四参数构造方式，兼容已经存在的报告构建代码。
+         */
+        public Analysis(
+                String status,
+                String summary,
+                List<String> highlights,
+                List<String> warnings) {
+
+            this(
+                    status,
+                    null,
+                    summary,
+                    List.of(),
+                    highlights,
+                    warnings
+            );
+        }
+
+        public Analysis {
+            keyAmounts = keyAmounts == null
+                    ? List.of()
+                    : List.copyOf(keyAmounts);
+
+            highlights = highlights == null
+                    ? List.of()
+                    : List.copyOf(highlights);
+
+            warnings = warnings == null
+                    ? List.of()
+                    : List.copyOf(warnings);
+        }
 
         /**
          * 兼容原有根据查询类型创建分析状态的调用。
@@ -203,6 +239,21 @@ public record ReportSchemaVO(
                     List.of()
             );
         }
+    }
+
+    /**
+     * 分析区域中的可信关键金额。
+     *
+     * value 只保存后端报告数据或后端计算结果，
+     * displayValue 用于前端直接展示，禁止使用模型生成的金额覆盖。
+     */
+    public record KeyAmount(
+            String key,
+            String label,
+            BigDecimal value,
+            String displayValue,
+            String format,
+            String emphasis) {
     }
 
     /**

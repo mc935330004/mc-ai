@@ -27,10 +27,7 @@ public class ModelClientFactory {
     public ChatClient create(ModelRuntimeConfig config) {
         ModelApiType apiType = ModelApiType.from(config.apiType());
         if (apiType != ModelApiType.OPENAI_COMPATIBLE) {
-            throw new BusinessException(
-                    400,
-                    "当前模型接口类型尚未实现：" + config.apiType()
-            );
+            throw new BusinessException(400,"当前模型接口类型尚未实现：" + config.apiType());
         }
 
         OpenAiChatOptions options = OpenAiChatOptions.builder()

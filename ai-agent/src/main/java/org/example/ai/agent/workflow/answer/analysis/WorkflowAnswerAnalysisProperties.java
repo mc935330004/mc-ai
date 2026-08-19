@@ -25,13 +25,6 @@ public class WorkflowAnswerAnalysisProperties {
      */
     private boolean decisionEnabled = true;
 
-    /**
-     * 小数据快路径阈值。
-     *
-     * 分块数不超过该值时，一次性调用模型生成结构化分析，
-     * 跳过"逐块消费 + 分层汇总"的多轮调用。
-     */
-    private int lightweightMaxChunks = 3;
 
     /**
      * 分块消费受控并发数。
@@ -61,11 +54,7 @@ public class WorkflowAnswerAnalysisProperties {
                     "ai.workflow.answer.analysis.concurrency必须在1~16之间"
             );
         }
-        if (lightweightMaxChunks < 1) {
-            throw new IllegalStateException(
-                    "ai.workflow.answer.analysis.lightweight-max-chunks必须大于0"
-            );
-        }
+
         if (timeoutSeconds < 5 || timeoutSeconds > 120) {
             throw new IllegalStateException(
                     "ai.workflow.answer.analysis.timeout-seconds必须在5~120之间"
