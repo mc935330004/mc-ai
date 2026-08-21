@@ -125,14 +125,9 @@ public class HeaderCurrentUserProvider implements CurrentUserProvider {
             throw new BusinessException(503,"业务系统用户身份服务暂时不可用");
         }
 
-        JsonNode data =response == null
-                        ? null
-                        : response.path("data");
+        JsonNode data =response == null ? null : response.path("data");
 
-        String userId =data == null ? null
-                        : data.path("sysUser")
-                        .path("username")
-                        .asText(null);
+        String userId =data == null ? null : data.path("sysUser").path("username").asText(null);
 
         if (!StringUtils.hasText(userId)) {
             throw new BusinessException(

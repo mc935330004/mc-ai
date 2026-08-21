@@ -34,4 +34,9 @@ public interface RunTraceService {
      * 绑定本次实际执行的工作流版本。
      */
     void bindWorkflow(String runId,String workflowCode, Long workflowVersionId);
+
+    /**
+     * 标记运行已取消。
+     */
+    void markCancelled(String runId, long totalDurationMs, String reason);
 }

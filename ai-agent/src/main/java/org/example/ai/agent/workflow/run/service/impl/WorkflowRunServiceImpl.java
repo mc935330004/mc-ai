@@ -360,47 +360,21 @@ public class WorkflowRunServiceImpl extends ServiceImpl<WorkflowRunMapper,Workfl
     }
 
     @Override
-    public WorkflowRunDetailVO detailOwned(
-            String runId,
-            String userId) {
+    public WorkflowRunDetailVO detailOwned(String runId, String userId) {
 
-        WorkflowRun run =
-                getRequiredOwned(
-                        runId,
-                        userId
-                );
+        WorkflowRun run = getRequiredOwned(runId, userId);
 
-        List<WorkflowRunItem> items =
-                itemMapper.selectList(
-                        Wrappers
-                                .<WorkflowRunItem>lambdaQuery()
-                                .eq(
-                                        WorkflowRunItem::getRunId,
-                                        runId
-                                )
-                                .orderByAsc(
-                                        WorkflowRunItem::getNodeId
-                                )
-                                .orderByAsc(
-                                        WorkflowRunItem::getItemIndex
-                                )
-                );
+        List<WorkflowRunItem> items = itemMapper.selectList(
+                        Wrappers.<WorkflowRunItem>lambdaQuery()
+                                .eq(WorkflowRunItem::getRunId, runId)
+                                .orderByAsc(WorkflowRunItem::getNodeId)
+                                .orderByAsc(WorkflowRunItem::getItemIndex));
 
-        List<RunStep> steps =
-                runStepMapper.selectList(
-                        Wrappers
-                                .<RunStep>lambdaQuery()
-                                .eq(
-                                        RunStep::getRunId,
-                                        runId
-                                )
-                                .orderByAsc(
-                                        RunStep::getCreatedAt
-                                )
-                                .orderByAsc(
-                                        RunStep::getId
-                                )
-                );
+        List<RunStep> steps = runStepMapper.selectList(
+                        Wrappers.<RunStep>lambdaQuery()
+                                .eq(RunStep::getRunId, runId)
+                                .orderByAsc(RunStep::getCreatedAt)
+                                .orderByAsc(RunStep::getId));
 
         return WorkflowRunDetailVO.builder()
                 .run(run)
@@ -410,23 +384,11 @@ public class WorkflowRunServiceImpl extends ServiceImpl<WorkflowRunMapper,Workfl
     }
 
     @Override
-    public WorkflowRun getRequiredOwned(
-            String runId,
-            String userId) {
+    public WorkflowRun getRequiredOwned(String runId, String userId) {
 
-        WorkflowRun run =
-                runMapper.selectOne(
-                        Wrappers
-                                .<WorkflowRun>lambdaQuery()
-                                .eq(
-                                        WorkflowRun::getRunId,
-                                        runId
-                                )
-                                .eq(
-                                        WorkflowRun::getUserId,
-                                        userId
-                                )
-                );
+        WorkflowRun run = runMapper.selectOne(Wrappers.<WorkflowRun>lambdaQuery()
+                                .eq(WorkflowRun::getRunId, runId)
+                                .eq(WorkflowRun::getUserId, userId));
 
         if (run == null) {
             throw new BusinessException(
@@ -434,7 +396,6 @@ public class WorkflowRunServiceImpl extends ServiceImpl<WorkflowRunMapper,Workfl
                     "工作流运行记录不存在"
             );
         }
-
         return run;
     }
 

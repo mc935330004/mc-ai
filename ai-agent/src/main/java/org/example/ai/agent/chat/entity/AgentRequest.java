@@ -4,6 +4,8 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import jakarta.validation.constraints.NotBlank;
 import lombok.Data;
 import org.example.ai.agent.modules.knowledgebase.security.KnowledgeAccessPrincipal;
+
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 
 import java.util.List;
@@ -135,6 +137,49 @@ public class AgentRequest {
      */
     @JsonIgnore
     private boolean resultAnalysisRequest;
+
+    /**
+     * 上一轮结果中的项目展示顺序，只允许后端注入。
+     */
+    @JsonIgnore
+    private List<String> displayObjectIds = new ArrayList<>();
+
+    /**
+     * 上一轮风险项目，只允许后端注入。
+     */
+    @JsonIgnore
+    private List<String> riskObjectIds = new ArrayList<>();
+
+    /**
+     * 上一轮风险状态未知的项目，只允许后端注入。
+     */
+    @JsonIgnore
+    private List<String> unknownObjectIds = new ArrayList<>();
+
+    /**
+     * 当前聚焦项目，只允许后端通过会话状态解析。
+     */
+    @JsonIgnore
+    private String focusedObjectId;
+
+    /**
+     * 上一轮实际展示方式。
+     */
+    @JsonIgnore
+    private String lastPresentationMode;
+
+    /**
+     * 上一轮风险判定运行编号。
+     */
+    @JsonIgnore
+    private String riskEvaluationRunId;
+
+    /**
+     * 上下文无法唯一确定项目时，直接返回给用户的追问。
+     */
+    @JsonIgnore
+    private String contextClarificationQuestion;
+
     /**
      *  路由和检索优先使用补全问题，用户展示仍使用原始问题。
      */

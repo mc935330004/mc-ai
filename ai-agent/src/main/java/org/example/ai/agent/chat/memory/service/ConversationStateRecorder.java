@@ -6,15 +6,16 @@ import org.example.ai.agent.chat.entity.AgentRequest;
 import org.example.ai.agent.chat.memory.model.BusinessConversationState;
 import org.example.ai.agent.plan.RoutePlan;
 import org.example.ai.agent.tool.ToolResult;
+import org.example.ai.agent.workflow.answer.text.WorkflowTextFacts;
 import org.example.ai.agent.workflow.plan.WorkflowPlan;
 import org.example.ai.agent.workflow.runtime.WorkflowExecutionOutcome;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 import org.example.ai.agent.router.IntentResult;
 import org.example.ai.agent.plan.DynamicCapabilityPlan;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
+
+import java.time.LocalDateTime;
+import java.util.*;
 
 /**
  *  在业务查询成功后生成并保存可复用的会话上下文。
@@ -29,15 +30,14 @@ public class ConversationStateRecorder {
      * 根据报告配置准备通用待追问状态。
      */
     private final ReportFollowUpService reportFollowUpService;
-
+    /**
+     * 会话状态只保存用于指代消解的业务标识。
+     */
+    private static final int MAX_CONTEXT_OBJECTS = 100;
     /**
      *  记录普通能力查询成功后的实际能力和实际调用参数。
      */
-    public void recordToolResult(
-            AgentRequest request,
-            RoutePlan routePlan,
-            String runId,
-            List<ToolResult> toolResults) {
+    public void recordToolResult(AgentRequest request, RoutePlan routePlan, String runId, List<ToolResult> toolResults) {
         ToolResult successfulResult = firstSuccessfulResult(toolResults);
         if (successfulResult == null) {
             return;
@@ -106,70 +106,183 @@ public class ConversationStateRecorder {
     }
 
     /**
-     *  记录查询工作流成功或部分成功后的工作流及输入参数。
+     * 记录工作流查询结果和可复用的结构化上下文。
      */
     public void recordWorkflowResult(
             AgentRequest request,
             WorkflowPlan plan,
             WorkflowExecutionOutcome outcome,
-            String runId,String artifactId) {
+            String runId,
+            String artifactId,
+            WorkflowTextFacts facts,
+            String presentationMode) {
+
         if (outcome == null
                 || (!outcome.success() && !outcome.partialSuccess())) {
             return;
         }
 
+        Map<String, Object> currentInput =
+                copyInput(plan.getInput());
+
+        BusinessConversationState previous =
+                loadPreviousSafely(request);
+
+        boolean sameScope = previous != null && !request.isContextReset() &&
+                Objects.equals(previous.getWorkflowCode(), outcome.workflowCode()) &&
+                Objects.equals(previous.getLastInput(), currentInput);
+
+        List<String> inputObjectIds = extractObjectIdentifiers(currentInput);
+
+        List<String> displayObjectIds = resolveDisplayObjectIds(facts, inputObjectIds, previous, sameScope);
+
+        List<String> riskObjectIds =
+                facts != null ? normalizeObjectIds(facts.riskObjectIds()) : sameScope
+                          ? normalizeObjectIds(previous.getRiskObjectIds())
+                          : List.of();
+
+        List<String> unknownObjectIds = facts != null ? normalizeObjectIds(facts.unknownObjectIds()) : sameScope
+                          ? normalizeObjectIds(previous.getUnknownObjectIds())
+                          : List.of();
+
         BusinessConversationState state = new BusinessConversationState();
+
         state.setRouteType("WORKFLOW_QUERY");
-        state.setBusinessTopic(resolveTopic(
-                outcome.workflowName(),
-                request.getUserQuestion()
-        ));
+        state.setBusinessTopic(resolveTopic(outcome.workflowName(), request.getUserQuestion()));
         state.setWorkflowCode(outcome.workflowCode());
-        state.setWorkflowVersionId(
-                outcome.versionId() != null
-                        ? outcome.versionId()
-                        : plan.getVersionId()
-        );
-        state.setLastInput(copyInput(plan.getInput()));
-        state.setActiveObjectIds(
-                extractObjectIdentifiers(state.getLastInput())
-        );
+        state.setWorkflowVersionId(outcome.versionId() != null ? outcome.versionId() : plan.getVersionId());
+        state.setLastInput(currentInput);
+        state.setActiveObjectIds(displayObjectIds);
+        state.setDisplayObjectIds(displayObjectIds);
+        state.setRiskObjectIds(riskObjectIds);
+        state.setUnknownObjectIds(unknownObjectIds);
+        state.setActiveObjectType(
+                displayObjectIds.isEmpty() ? sameScope ? previous.getActiveObjectType() : null : "PROJECT");
+        state.setFocusedObjectId(resolveFocusedObjectId(previous, displayObjectIds, sameScope));
         state.setLastRunId(
                 StringUtils.hasText(outcome.runId())
                         ? outcome.runId()
                         : runId
         );
-        /*
-         *  
-         * 只保存结果快照ID，不把完整业务数据写入会话状态JSON。
-         */
         state.setResultArtifactId(artifactId);
-        /*
-         * 追问配置不存在或准备失败时返回空，
-         * 不能影响已经成功生成的基础报告。
-         */
-        state.setPendingReportFollowUp(reportFollowUpService.preparePending(
+        state.setAwaitingClarification(false);
+        state.setPendingContextQuestion(null);
+        state.setLastPresentationMode(
+                StringUtils.hasText(presentationMode)
+                        ? presentationMode.trim().toUpperCase()
+                        : null
+        );
+
+        if (facts != null
+                && (!riskObjectIds.isEmpty()
+                || !unknownObjectIds.isEmpty())) {
+            state.setRiskEvaluationRunId(state.getLastRunId());
+        } else if (facts == null && sameScope) {
+            state.setRiskEvaluationRunId(
+                    previous.getRiskEvaluationRunId()
+            );
+        }
+
+        state.setPendingReportFollowUp(
+                reportFollowUpService.preparePending(
                         request,
                         outcome,
-                        artifactId).orElse(null)
+                        artifactId
+                ).orElse(null)
         );
+        state.setUpdatedAt(LocalDateTime.now());
+
         saveSafely(request, state);
+    }
+
+    /**
+     * 安全读取上一轮状态，读取失败不能影响当前业务结果。
+     */
+    private BusinessConversationState loadPreviousSafely(
+            AgentRequest request) {
+
+        try {
+            return conversationStateService.loadState(
+                    request.getUserId(),
+                    request.getConversationId()
+            ).orElse(null);
+        } catch (RuntimeException exception) {
+            log.warn(
+                    "读取上一轮会话状态失败，conversationId={}",
+                    request.getConversationId(),
+                    exception
+            );
+            return null;
+        }
+    }
+
+    /**
+     * 当前结果有项目编码时使用当前结果；
+     * 当前结果无法提取时才保留同一查询范围的旧顺序。
+     */
+    private List<String> resolveDisplayObjectIds(
+            WorkflowTextFacts facts,
+            List<String> inputObjectIds,
+            BusinessConversationState previous,
+            boolean sameScope) {
+
+        List<String> resultObjectIds =
+                facts == null
+                        ? List.of()
+                        : normalizeObjectIds(
+                        facts.displayObjectIds()
+                );
+
+        if (!resultObjectIds.isEmpty()) {
+            return resultObjectIds;
+        }
+
+        if (!inputObjectIds.isEmpty()) {
+            return inputObjectIds;
+        }
+
+        if (sameScope) {
+            return normalizeObjectIds(
+                    previous.getDisplayObjectIds()
+            );
+        }
+
+        return List.of();
+    }
+
+    /**
+     * 单项目结果直接成为聚焦项目；
+     * 多项目结果只保留仍然有效的旧聚焦项目。
+     */
+    private String resolveFocusedObjectId(BusinessConversationState previous, List<String> displayObjectIds, boolean sameScope) {
+        if (displayObjectIds.size() == 1) {
+            return displayObjectIds.get(0);
+        }
+
+        if (sameScope && StringUtils.hasText(previous.getFocusedObjectId()) && displayObjectIds.contains(previous.getFocusedObjectId())) {
+            return previous.getFocusedObjectId();
+        }
+
+        return null;
+    }
+
+    private List<String> normalizeObjectIds(List<String> objectIds) {
+        if (objectIds == null) {
+            return List.of();
+        }
+        return objectIds.stream().filter(StringUtils::hasText).map(String::trim).distinct().limit(MAX_CONTEXT_OBJECTS).toList();
     }
 
     /**
      *  选择第一个成功能力，失败结果不能覆盖有效上下文。
      */
     private ToolResult firstSuccessfulResult(
-            List<ToolResult> toolResults
-    ) {
+            List<ToolResult> toolResults) {
         if (toolResults == null) {
             return null;
         }
-
         return toolResults.stream()
-                .filter(result ->
-                        result != null && result.isSuccess()
-                )
+                .filter(result -> result != null && result.isSuccess())
                 .findFirst()
                 .orElse(null);
     }
@@ -194,19 +307,27 @@ public class ConversationStateRecorder {
     /**
      *  提取项目编码、合同编号等可用于指代消解的业务标识。
      */
-    private List<String> extractObjectIdentifiers(
-            Map<String, Object> input
-    ) {
-        return input.entrySet().stream()
-                .filter(entry ->
-                        isIdentifierField(entry.getKey())
-                                && entry.getValue() != null
-                )
-                .map(entry -> String.valueOf(entry.getValue()))
-                .filter(StringUtils::hasText)
-                .distinct()
-                .limit(10)
-                .toList();
+    /**
+     * 提取项目编码、合同编号等业务标识，同时支持数组参数。
+     */
+    private List<String> extractObjectIdentifiers(Map<String, Object> input) {
+
+        List<String> identifiers = new ArrayList<>();
+        for (Map.Entry<String, Object> entry : input.entrySet()) {
+            if (!isIdentifierField(entry.getKey()) || entry.getValue() == null) {
+                continue;
+            }
+            Object rawValue = entry.getValue();
+            Collection<?> values = rawValue instanceof Collection<?> collection
+                            ? collection
+                            : List.of(rawValue);
+            for (Object value : values) {
+                if (value != null && StringUtils.hasText(String.valueOf(value))) {
+                    identifiers.add(String.valueOf(value).trim());
+                }
+            }
+        }
+        return identifiers.stream().distinct().limit(MAX_CONTEXT_OBJECTS).toList();
     }
 
     /**
@@ -217,7 +338,9 @@ public class ConversationStateRecorder {
         return name.endsWith("id")
                 || name.endsWith("code")
                 || name.endsWith("no")
-                || name.endsWith("name");
+                || name.endsWith("name")
+                || "projectkey".equals(name)
+                || "projectkeys".equals(name);
     }
 
     /**
@@ -235,16 +358,12 @@ public class ConversationStateRecorder {
     /**
      *  状态保存失败不能破坏已经成功的业务查询响应。
      */
-    private void saveSafely(
-            AgentRequest request,
-            BusinessConversationState state
-    ) {
+    private void saveSafely(AgentRequest request, BusinessConversationState state) {
+        if (state.getUpdatedAt() == null) {
+            state.setUpdatedAt(LocalDateTime.now());
+        }
         try {
-            conversationStateService.saveState(
-                    request.getUserId(),
-                    request.getConversationId(),
-                    state
-            );
+            conversationStateService.saveState(request.getUserId(), request.getConversationId(), state);
         } catch (RuntimeException exception) {
             log.warn(
                     "保存会话业务状态失败，conversationId={}，runId={}",

@@ -13,7 +13,7 @@ import org.example.ai.agent.graph.config.CompiledForEachNodeConfig;
 import org.example.ai.agent.graph.model.GraphSpec;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
-
+import org.example.ai.agent.workflow.answer.risk.WorkflowRiskRuleValidator;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -38,7 +38,7 @@ public class WorkflowGraphSnapshotFactory {
     private final GraphSpecParser graphSpecParser;
     private final GraphSpecCompiler graphSpecCompiler;
     private final ReportDefinitionValidator reportDefinitionValidator;
-
+    private final WorkflowRiskRuleValidator workflowRiskRuleValidator;
     /**
      * 分析工作流草稿。
      *
@@ -112,6 +112,11 @@ public class WorkflowGraphSnapshotFactory {
         validateInputSchema(graph.getInputSchema(),errors );
         // 报告定义与工作流一起校验，禁止发布无效字段路径和区块结构。
         errors.addAll(reportDefinitionValidator.validate(graph.getReportDefinition()));
+        /*
+         * 风险规则与工作流一起发布。
+         * 字段不存在、路径错误或类型不兼容时禁止发布。
+         */
+        errors.addAll( workflowRiskRuleValidator.validate(graph));
         GraphCompilationResult compilation =errors.isEmpty()
                         ? graphCompilation
                         : GraphCompilationResult.failure(

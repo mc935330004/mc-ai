@@ -55,37 +55,22 @@ public class ConversationContextRewriteService {
                             .callSequence(1)
                             .build();
 
-            ChatResponse response =
-                    trackedChatClientService.call(
+            ChatResponse response = trackedChatClientService.call(
                             context,
                             buildSystemPrompt(),
-                            buildUserPrompt(
-                                    request,
-                                    state
-                            ),
+                            buildUserPrompt(request, state),
                             ChatOptions.builder()
                                     .temperature(0.0D)
-                                    .topP(0.1D)
-                    );
+                                    .topP(0.1D));
 
-            String content = response.getResult()
-                    .getOutput()
-                    .getText();
+            String content = response.getResult().getOutput().getText();
 
-            ConversationRewriteDecision decision =
-                    objectMapper.readValue(
-                            extractJson(content),
-                            ConversationRewriteDecision.class
-                    );
+            ConversationRewriteDecision decision = objectMapper.readValue(extractJson(content), ConversationRewriteDecision.class);
 
             /*
              * 模型只能返回协议定义的关系类型。
              */
-            if (decision == null || !isSupportedRelation(
-                    decision.relation())
-                    || decision.confidence() == null
-                    || decision.confidence() < 0D
-                    || decision.confidence() > 1D) {
+            if (decision == null || !isSupportedRelation(decision.relation()) || decision.confidence() == null || decision.confidence() < 0D || decision.confidence() > 1D) {
 
                 log.warn(
                         "会话关系分类返回非法结果，conversationId={}，relation={}，confidence={}",
@@ -100,9 +85,7 @@ public class ConversationContextRewriteService {
 
                 return Optional.empty();
             }
-
             return Optional.of(decision);
-
         } catch (Exception exception) {
             log.warn(
                     "会话关系判断失败，conversationId={}，runId={}",
@@ -245,59 +228,25 @@ public class ConversationContextRewriteService {
     private Map<String, Object> buildSafeStateContext(
             BusinessConversationState state) {
 
-        Map<String, Object> context =
-                new LinkedHashMap<>();
-
-        context.put(
-                "businessTopic",
-                state.getBusinessTopic()
-        );
-
-        context.put(
-                "routeType",
-                state.getRouteType()
-        );
-
-        context.put(
-                "activeObjectType",
-                state.getActiveObjectType()
-        );
-
-        context.put(
-                "activeObjectIds",
-                state.getActiveObjectIds()
-        );
-
-        context.put(
-                "lastInput",
-                state.getLastInput()
-        );
-
-        context.put(
-                "hasWorkflow",
-                StringUtils.hasText(
-                        state.getWorkflowCode()
-                )
-        );
-
-        context.put(
-                "hasCapability",
-                StringUtils.hasText(
-                        state.getCapabilityCode()
-                )
-        );
-
+        Map<String, Object> context = new LinkedHashMap<>();
+        context.put("businessTopic", state.getBusinessTopic());
+        context.put("routeType", state.getRouteType());
+        context.put("activeObjectType", state.getActiveObjectType());
+        context.put("activeObjectIds", state.getActiveObjectIds());
+        context.put("lastInput", state.getLastInput());
+        context.put("hasWorkflow", StringUtils.hasText(state.getWorkflowCode()));
+        context.put("hasCapability", StringUtils.hasText(state.getCapabilityCode()));
         /*
          * 分类模型只需要知道是否存在快照，
          * 不需要知道真实artifactId。
          */
-        context.put(
-                "hasResultArtifact",
-                StringUtils.hasText(
-                        state.getResultArtifactId()
-                )
-        );
-
+        context.put("hasResultArtifact", StringUtils.hasText(state.getResultArtifactId()));
+        context.put("displayObjectIds", state.getDisplayObjectIds());
+        context.put("riskObjectIds", state.getRiskObjectIds());
+        context.put("unknownObjectIds", state.getUnknownObjectIds());
+        context.put("focusedObjectId", state.getFocusedObjectId());
+        context.put("lastPresentationMode", state.getLastPresentationMode());
+        context.put("hasRiskEvaluation", StringUtils.hasText(state.getRiskEvaluationRunId()));
         return context;
     }
 

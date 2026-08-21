@@ -59,13 +59,28 @@ public class RunTraceServiceImpl implements RunTraceService {
 
     @Override
     public void markSuccess(String runId, long totalDurationMs) {
+
         RunTrace trace = new RunTrace();
+
         trace.setStatus(RunStatus.SUCCESS);
         trace.setTotalDurationMs(totalDurationMs);
+        trace.setUpdatedAt(LocalDateTime.now());
 
-        // 标记整次运行成功。
-        runTraceMapper.update(trace, new LambdaUpdateWrapper<RunTrace>().eq(RunTrace::getRunId, runId));
-        agentMetrics.recordRun(RunStatus.SUCCESS,totalDurationMs);
+        /*
+         * 只有RUNNING可以转为SUCCESS，
+         * 禁止已取消任务被后续线程覆盖成成功。
+         */
+        int affected = runTraceMapper.update(
+                        trace, new LambdaUpdateWrapper<RunTrace>()
+                                .eq(RunTrace::getRunId, runId)
+                                .eq(RunTrace::getStatus, RunStatus.RUNNING));
+
+        if (affected == 1) {
+            agentMetrics.recordRun(
+                    RunStatus.SUCCESS,
+                    totalDurationMs
+            );
+        }
     }
 
     @Override
@@ -74,12 +89,34 @@ public class RunTraceServiceImpl implements RunTraceService {
         trace.setStatus(RunStatus.FAILED);
         trace.setErrorMessage(errorMessage);
         trace.setTotalDurationMs(totalDurationMs);
-
-        // 标记整次运行失败。
-        runTraceMapper.update(trace, new LambdaUpdateWrapper<RunTrace>().eq(RunTrace::getRunId, runId));
-        agentMetrics.recordRun(RunStatus.FAILED,totalDurationMs);
+        trace.setUpdatedAt(LocalDateTime.now());
+        /*
+         * 已取消任务不能再被覆盖成失败。
+         */
+        int affected = runTraceMapper.update(trace, new LambdaUpdateWrapper<RunTrace>()
+                                .eq(RunTrace::getRunId, runId)
+                                .eq(RunTrace::getStatus, RunStatus.RUNNING));
+        if (affected == 1) {
+            agentMetrics.recordRun(RunStatus.FAILED, totalDurationMs);
+        }
     }
-
+    @Override
+    public void markCancelled(String runId, long totalDurationMs, String reason) {
+        RunTrace trace = new RunTrace();
+        trace.setStatus(RunStatus.CANCELLED);
+        trace.setErrorMessage(reason);
+        trace.setTotalDurationMs(totalDurationMs);
+        trace.setUpdatedAt(LocalDateTime.now());
+        int affected = runTraceMapper.update(trace, new LambdaUpdateWrapper<RunTrace>()
+                                .eq(RunTrace::getRunId, runId)
+                                .eq(RunTrace::getStatus, RunStatus.RUNNING));
+        if (affected == 1) {
+            agentMetrics.recordRun(
+                    RunStatus.CANCELLED,
+                    totalDurationMs
+            );
+        }
+    }
     @Override
     public void bindWorkflow(String runId, String workflowCode, Long workflowVersionId) {
         RunTrace update = new RunTrace();

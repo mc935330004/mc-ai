@@ -211,11 +211,7 @@ public class DefaultTrackedChatClientService implements TrackedChatClientService
     }
 
     @Override
-    public ChatResponse call(
-            ModelCallContext context,
-            String systemPrompt,
-            String userPrompt,
-            ChatOptions.Builder<?> optionsBuilder) {
+    public ChatResponse call(ModelCallContext context, String systemPrompt, String userPrompt, ChatOptions.Builder<?> optionsBuilder) {
 
         List<String> candidates = modelCandidateResolver.resolveCandidates(context,false);
 
@@ -230,20 +226,12 @@ public class DefaultTrackedChatClientService implements TrackedChatClientService
             if (modelFailureTracker.isBlocked(modelCode)) {
                 continue;
             }
-
             attemptSequence++;
-
             ResolvedModelClient resolvedClient =modelClientRegistry.resolveByCode(modelCode);
 
-            ModelCallContext usageContext =
-                    copyResolvedContext(
-                            context,
-                            resolvedClient.modelCode(),
-                            attemptSequence
-                    );
+            ModelCallContext usageContext = copyResolvedContext(context, resolvedClient.modelCode(), attemptSequence);
 
             long startTime = System.currentTimeMillis();
-
             try {
                 ChatResponse response = executeSyncCall(
                         resolvedClient,
@@ -252,15 +240,12 @@ public class DefaultTrackedChatClientService implements TrackedChatClientService
                         optionsBuilder
                 );
 
-                TokenUsageData usage =
-                        tokenUsageExtractor.extract(response);
+                TokenUsageData usage = tokenUsageExtractor.extract(response);
 
-                String actualModelName =
-                        extractModelName(response);
+                String actualModelName = extractModelName(response);
 
                 if (!StringUtils.hasText(actualModelName)) {
-                    actualModelName =
-                            resolvedClient.modelName();
+                    actualModelName = resolvedClient.modelName();
                 }
 
                 recordSuccessSafely(

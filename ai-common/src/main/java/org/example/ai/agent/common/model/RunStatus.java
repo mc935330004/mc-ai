@@ -24,6 +24,11 @@ public final class RunStatus {
     public static final String FAILED = "FAILED";
 
     /**
+     * 用户主动终止或客户端断开。
+     */
+    public static final String CANCELLED = "CANCELLED";
+
+    /**
      * 跳过执行。
      */
     public static final String SKIPPED = "SKIPPED";

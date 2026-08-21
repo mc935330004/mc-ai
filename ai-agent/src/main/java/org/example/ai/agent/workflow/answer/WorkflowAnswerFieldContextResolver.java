@@ -108,9 +108,7 @@ public class WorkflowAnswerFieldContextResolver {
                                 )
                 );
 
-        if (dictionaries == null
-                || dictionaries.isEmpty()) {
-
+        if (dictionaries == null || dictionaries.isEmpty()) {
             /*
              * 工作流包含业务能力却没有发布字段字典时，
              * 不能把无法判断可见性的业务数据直接交给模型。
@@ -120,25 +118,19 @@ public class WorkflowAnswerFieldContextResolver {
             );
         }
 
-        Map<String, WorkflowAnswerFieldContext>
-                visibleFields = new LinkedHashMap<>();
+        Map<String, WorkflowAnswerFieldContext> visibleFields = new LinkedHashMap<>();
 
-        Set<String> hiddenFieldNames =
-                new LinkedHashSet<>();
+        Set<String> hiddenFieldNames = new LinkedHashSet<>();
 
-        for (FieldDictionary dictionary :
-                dictionaries) {
+        for (FieldDictionary dictionary : dictionaries) {
 
             if (dictionary == null) {
                 continue;
             }
 
-            String fieldName =
-                    resolveMachineFieldName(dictionary);
+            String fieldName = resolveMachineFieldName(dictionary);
 
-            if (!StringUtils.hasText(fieldName)
-                    || !returnedFieldNames.contains(
-                    fieldName)) {
+            if (!StringUtils.hasText(fieldName) || !returnedFieldNames.contains(fieldName)) {
                 continue;
             }
 
@@ -176,9 +168,9 @@ public class WorkflowAnswerFieldContextResolver {
                             ? fieldPath
                             : fieldName);
 
-            visibleFields.putIfAbsent(
-                    uniqueKey,
+            visibleFields.putIfAbsent(uniqueKey,
                     new WorkflowAnswerFieldContext(
+                            dictionary.getId(),
                             capabilityCode,
                             fieldName,
                             StringUtils.hasText(
@@ -196,33 +188,19 @@ public class WorkflowAnswerFieldContextResolver {
                              * aggregatable = 0 表示允许聚合；
                              * aggregatable = 1 表示不允许聚合。
                              */
-                            Integer.valueOf(0).equals(
-                                    dictionary.getAggregatable()
-                            )
+                            Integer.valueOf(0).equals(dictionary.getAggregatable())
                     )
             );
         }
-        return new WorkflowAnswerFieldPolicy(
-                List.copyOf(
-                        visibleFields.values()
-                ),
-                hiddenFieldNames
-        );
+        return new WorkflowAnswerFieldPolicy(List.copyOf(visibleFields.values()), hiddenFieldNames);
     }
     /**
      * 递归收集结果对象中出现过的所有字段名称。
      */
-    private Set<String> collectReturnedFieldNames(
-            Object result) {
-
-        JsonNode root =
-                objectMapper.valueToTree(result);
-
-        Set<String> names =
-                new LinkedHashSet<>();
-
+    private Set<String> collectReturnedFieldNames(Object result) {
+        JsonNode root = objectMapper.valueToTree(result);
+        Set<String> names = new LinkedHashSet<>();
         collectNodeFieldNames(root, names);
-
         return names;
     }
 

@@ -10,6 +10,7 @@ package org.example.ai.agent.workflow.answer;
  * 4. 这里只保存允许发送给模型的字段，不包含隐藏字段。
  */
 public record WorkflowAnswerFieldContext(
+        Long fieldId,
         String capabilityCode,
         String fieldName,
         String label,

@@ -63,6 +63,16 @@ public class AgentChatController {
         return agentOrchestrator.chat(request);
     }
 
+    /**
+     * 终止指定会话中正在执行的AI回答。
+     */
+    @PostMapping("/sessions/{conversationId}/runs/{runId}/cancel")
+    public Result<Boolean> cancelRun(@PathVariable String conversationId, @PathVariable String runId) {
+        String userId = currentUserProvider.getRequiredUserId();
+        boolean cancelled = agentOrchestrator.cancel(userId, conversationId, runId);
+        return Result.success(cancelled);
+    }
+
     @GetMapping("/models")
     public Result<List<ChatModelVO>> listModels() {
         String userId =currentUserProvider.getRequiredUserId();

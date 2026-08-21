@@ -243,6 +243,7 @@ public class AiChatSessionServiceImpl implements AiChatSessionService {
                                 visibleContent
                         )
                         .set(
+                                payloadJson != null,
                                 AiChatMessage::getPayloadJson,
                                 payloadJson
                         )

@@ -36,19 +36,11 @@ import java.util.*;
 @RequiredArgsConstructor
 public class ResultArtifactStatisticsService {
 
-    private static final double MIN_CONFIDENCE =
-            0.85D;
+    private static final double MIN_CONFIDENCE = 0.85D;
 
     private static final Set<String>
             SUPPORTED_OPERATIONS =
-            Set.of(
-                    "SUM",
-                    "COUNT",
-                    "COUNT_DISTINCT",
-                    "AVG",
-                    "MIN",
-                    "MAX"
-            );
+            Set.of("SUM", "COUNT", "COUNT_DISTINCT", "AVG", "MIN", "MAX");
 
     private final ObjectMapper objectMapper;
     private final TrackedChatClientService chatClientService;

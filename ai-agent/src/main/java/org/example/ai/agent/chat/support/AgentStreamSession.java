@@ -53,7 +53,18 @@ public class AgentStreamSession {
      */
     private final long startedAt = System.currentTimeMillis();
     private final AtomicBoolean completed = new AtomicBoolean(false);
-
+    /**
+     * 是否已经启动增量文字回答。
+     */
+    private boolean incrementalAnswerStarted;
+    /**
+     * 当前助手消息是否已经写入数据库。
+     */
+    private final AtomicBoolean assistantMessagePersisted =new AtomicBoolean(false);
+    /**
+     * 累计真实流式回答内容。
+     */
+    private final StringBuilder incrementalAnswer =new StringBuilder();
     /**
      * 最终完整 Markdown。
      */
@@ -169,13 +180,8 @@ public class AgentStreamSession {
      * presentationType由后端明确决定，
      * 前端不再检查Markdown内容猜测报告类型。
      */
-    public void publishAnswer(
-            String markdown,
-            String presentationType,
-            String presentationTitle)
-            throws Exception {
+    public void publishAnswer(String markdown, String presentationType, String presentationTitle) throws Exception {
         finalMarkdown = markdown == null ? "": markdown;
-
         /*
          *  
          * 当前协议只开放REPORT和MARKDOWN。
@@ -287,6 +293,161 @@ public class AgentStreamSession {
                             .build()
             );
         }
+    }
+
+    /**
+     * 开始真正的增量文字回答。
+     *
+     * SSE v2只发送一次ANSWER_START；
+     * SSE v1继续在finishAnswer时发送完整ANSWER。
+     */
+    public synchronized void startAnswer(
+            String presentationType) throws Exception {
+
+        if (completed.get()) {
+            throw new IllegalStateException(
+                    "SSE会话已经结束"
+            );
+        }
+
+        if (incrementalAnswerStarted) {
+            return;
+        }
+
+        incrementalAnswerStarted = true;
+        incrementalAnswer.setLength(0);
+        finalMarkdown = "";
+
+        finalPresentationType =
+                "REPORT".equalsIgnoreCase(presentationType)
+                        ? "REPORT"
+                        : "MARKDOWN";
+
+        finalPresentationTitle = null;
+
+        if (protocolVersion == 1) {
+            return;
+        }
+
+        send(
+                "answer_start",
+                AgentStreamEvent.builder()
+                        .runId(runId)
+                        .type(
+                                AgentStreamEventType
+                                        .ANSWER_START
+                                        .name()
+                        )
+                        .content("")
+                        .presentationType(
+                                finalPresentationType
+                        )
+                        .build()
+        );
+    }
+
+    /**
+     * 追加当前真实到达的模型片段。
+     */
+    public synchronized void appendAnswerDelta(
+            String content) throws Exception {
+
+        if (completed.get()) {
+            throw new IllegalStateException(
+                    "SSE会话已经结束"
+            );
+        }
+
+        if (!incrementalAnswerStarted) {
+            throw new IllegalStateException(
+                    "增量回答尚未开始"
+            );
+        }
+
+        if (content == null || content.isEmpty()) {
+            return;
+        }
+
+        incrementalAnswer.append(content);
+        finalMarkdown = incrementalAnswer.toString();
+
+        if (protocolVersion == 1) {
+            return;
+        }
+
+        send(
+                "answer_delta",
+                AgentStreamEvent.of(
+                        runId,
+                        AgentStreamEventType
+                                .ANSWER_DELTA
+                                .name(),
+                        content,
+                        null
+                )
+        );
+    }
+
+    /**
+     * 完成增量文字回答。
+     *
+     * 该方法只发送最终快照，
+     * ANSWER_DONE和emitter关闭仍由complete()统一处理，
+     * 避免重复发送结束事件。
+     */
+    public synchronized void finishAnswer(String finalContent) throws Exception {
+        if (completed.get()) {
+            return;
+        }
+        if (!incrementalAnswerStarted) {
+            throw new IllegalStateException(
+                    "增量回答尚未开始"
+            );
+        }
+        finalMarkdown = finalContent == null
+                        ? incrementalAnswer.toString()
+                        : finalContent;
+        agentMetrics.recordAnswerLength(protocolVersion, finalMarkdown.length());
+
+        /*
+         * SSE v1保持原来的单个ANSWER事件。
+         */
+        if (protocolVersion == 1) {
+            publishAnswer(finalMarkdown, finalPresentationType, finalPresentationTitle);
+            complete();
+            return;
+        }
+
+        if (properties.isSnapshotEnabled()) {
+            send("answer_snapshot", AgentStreamEvent.builder()
+                            .runId(runId)
+                            .type(
+                                    AgentStreamEventType
+                                            .ANSWER_SNAPSHOT
+                                            .name()
+                            )
+                            .content(finalMarkdown)
+                            .contentLength(
+                                    finalMarkdown.length()
+                            )
+                            .contentHash(
+                                    ContentHashUtils.sha256(
+                                            finalMarkdown
+                                    )
+                            )
+                            .presentationType(
+                                    finalPresentationType
+                            )
+                            .presentationTitle(
+                                    finalPresentationTitle
+                            )
+                            .build()
+            );
+        }
+        /*
+         * complete()是唯一发送ANSWER_DONE的位置。
+         */
+        complete();
     }
 
     /**
@@ -483,7 +644,41 @@ public class AgentStreamSession {
         }
         return isClientDisconnected(throwable.getCause());
     }
+    /**
+     * 获取当前已经累计的文字回答。
+     */
+    public synchronized String getFinalMarkdownSnapshot() {
+        return finalMarkdown;
+    }
 
+    /**
+     * 是否已经进入真实增量回答。
+     */
+    public synchronized boolean
+    hasIncrementalAnswerStarted() {
+        return incrementalAnswerStarted;
+    }
+
+    /**
+     * SSE会话是否已经结束。
+     */
+    public boolean isCompleted() {
+        return completed.get();
+    }
+
+    /**
+     * 标记当前助手消息已经持久化。
+     */
+    public void markAssistantMessagePersisted() {
+        assistantMessagePersisted.set(true);
+    }
+
+    /**
+     * 当前助手消息是否已经持久化。
+     */
+    public boolean isAssistantMessagePersisted() {
+        return assistantMessagePersisted.get();
+    }
     /**
      * 客户端或容器提前关闭连接。
      */

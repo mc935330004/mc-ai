@@ -147,7 +147,7 @@ app:
       enabled: true
       default-requests-per-minute: 120
       expensive-requests-per-minute: 20
-      key-prefix: mc-ai:rate-limit
+      key-prefix: mc-ai:rate-limit:${RATE_LIMIT_KEY_PREFIX:}
     answer:
       # 标准事实模型开关，紧急回滚时可设为false
       structured-enabled: true
@@ -254,8 +254,6 @@ ai:
         # 是否启用模型判定：DATA_QUERY 报告由模型判断是否需要 AI 分析。
         # false 时回退旧逻辑，只按 queryType 决定（ANALYSIS_REPORT 才分析）。
         decision-enabled: true
-        # 小数据快路径阈值：分块数不超过该值时一次性生成分析（1次模型调用）。
-        lightweight-max-chunks: 3
         # 分块消费受控并发数，限制同时调用模型的请求数量。
         concurrency: 4
         # 分析总超时秒数，超时后保留基础业务报告。

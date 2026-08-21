@@ -14,6 +14,11 @@ import org.example.ai.agent.workflow.answer.chunk.WorkflowAnswerReduceException;
 import org.example.ai.agent.workflow.answer.chunk.WorkflowAnswerReductionResult;
 import org.example.ai.agent.workflow.runtime.WorkflowExecutionOutcome;
 import org.springframework.stereotype.Component;
+import org.example.ai.agent.workflow.answer.risk.WorkflowRiskEvaluation;
+
+import java.util.Comparator;
+import java.util.List;
+import java.util.Objects;
 
 /**
  * 工作流大模型回答链路记录器。
@@ -29,11 +34,21 @@ import org.springframework.stereotype.Component;
 @RequiredArgsConstructor
 public class WorkflowAnswerTraceRecorder {
 
-    public static final String CHUNK_STEP_TYPE =
-            "WORKFLOW_ANSWER_CHUNKS";
+    public static final String CHUNK_STEP_TYPE = "WORKFLOW_ANSWER_CHUNKS";
 
-    public static final String REDUCTION_STEP_TYPE =
-            "WORKFLOW_ANSWER_REDUCE";
+    public static final String REDUCTION_STEP_TYPE = "WORKFLOW_ANSWER_REDUCE";
+    /**
+     * 工作流确定性风险判定。
+     */
+    public static final String RISK_EVALUATION_STEP_TYPE = "WORKFLOW_RISK_EVALUATION";
+
+    /**
+     * 单次运行最多保存的风险审计明细。
+     *
+     * 优先保存命中和未知结果，
+     * 防止大量正常项目撑大ai_run_step。
+     */
+    private static final int MAX_RISK_AUDIT_ITEMS = 200;
     /**
      * 工作流业务结果准备完成。
      *
@@ -265,75 +280,144 @@ public class WorkflowAnswerTraceRecorder {
     }
 
     /**
+     * 记录确定性风险判定结果。
+     *
+     * 只保存规则编码、对象编码、判定状态和安全证据，
+     * 不保存原始接口响应。
+     */
+    public void recordRiskEvaluation(String runId, Long workflowVersionId, List<WorkflowRiskEvaluation> evaluations, long durationMs) {
+        List<WorkflowRiskEvaluation> safeEvaluations = evaluations == null ? List.of() : evaluations.stream().filter(Objects::nonNull).toList();
+
+        long matchedCount = countStatus(safeEvaluations, WorkflowRiskEvaluation.Status.MATCHED);
+        long notMatchedCount = countStatus(safeEvaluations, WorkflowRiskEvaluation.Status.NOT_MATCHED);
+        long unknownCount = countStatus(safeEvaluations, WorkflowRiskEvaluation.Status.UNKNOWN);
+
+        /*
+         * 命中风险和未知风险优先写入审计，
+         * 正常项目数量过多时允许截断普通明细。
+         */
+        List<RiskEvaluationAuditItem> auditItems = safeEvaluations.stream()
+                        .sorted(Comparator.comparingInt(item -> auditPriority(item.status())))
+                        .limit(MAX_RISK_AUDIT_ITEMS)
+                        .map(this::toAuditItem)
+                        .toList();
+
+        RiskEvaluationTraceData traceData =
+                new RiskEvaluationTraceData(
+                        workflowVersionId,
+                        safeEvaluations.size(),
+                        matchedCount,
+                        notMatchedCount,
+                        unknownCount,
+                        safeEvaluations.size() > auditItems.size(),
+                        auditItems
+                );
+        recordSafely(runId, RISK_EVALUATION_STEP_TYPE, "工作流风险规则判定", "answer/risk", "SUCCESS", traceData, null, durationMs);
+    }
+
+    /**
+     * 记录风险判定执行失败。
+     *
+     * 只记录固定安全错误，不保存异常堆栈和业务数据。
+     */
+    public void recordRiskEvaluationFailure(String runId, Long workflowVersionId, long durationMs) {
+
+        RiskEvaluationTraceData traceData = new RiskEvaluationTraceData(workflowVersionId, 0, 0, 0, 0, false, List.of());
+        recordSafely(
+                runId,
+                RISK_EVALUATION_STEP_TYPE,
+                "工作流风险规则判定",
+                "answer/risk",
+                "FAILED",
+                traceData,
+                "风险规则判定失败",
+                durationMs
+        );
+    }
+
+    private long countStatus(List<WorkflowRiskEvaluation> evaluations, WorkflowRiskEvaluation.Status status) {
+        return evaluations.stream().filter(item -> item.status() == status).count();
+    }
+
+    private int auditPriority(WorkflowRiskEvaluation.Status status) {
+
+        if (status == WorkflowRiskEvaluation.Status.MATCHED) {
+            return 0;
+        }
+
+        if (status == WorkflowRiskEvaluation.Status.UNKNOWN) {
+            return 1;
+        }
+        return 2;
+    }
+
+    private RiskEvaluationAuditItem toAuditItem(WorkflowRiskEvaluation evaluation) {
+        List<RiskEvaluationEvidence> evidence =
+                evaluation.evidence()
+                        .stream()
+                        .limit(20)
+                        .map(item -> new RiskEvaluationEvidence(safeAuditText(item.fieldName(), 100),
+                                        safeAuditText(item.label(), 100),
+                                        safeAuditText(item.displayValue(), 120)))
+                        .toList();
+
+        return new RiskEvaluationAuditItem(
+                safeAuditText(evaluation.ruleCode(), 64),
+                evaluation.severity() == null ? null : evaluation.severity().name(),
+                safeAuditText(evaluation.objectId(), 100),
+                evaluation.status() == null ? "UNKNOWN" : evaluation.status().name(),
+                safeAuditText(evaluation.reason(), 300),
+                evidence
+        );
+    }
+    private String safeAuditText(String value, int maxLength) {
+
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        String normalized = value.trim()
+                .replace("\r", " ")
+                .replace("\n", " ");
+        return normalized.substring(0, Math.min(normalized.length(), maxLength)
+        );
+    }
+
+    /**
      * 遥测记录必须失败开放。
      *
      * 即使数据库暂时无法写入运行步骤，
      * 也不能让已经成功生成的业务回答失败。
      */
-    private void recordSafely(
-            String runId,
-            String stepType,
-            String stepName,
-            String executionPath,
-            String status,
-            Object output,
-            String errorMessage,
-            long durationMs) {
-
-        if (runId == null
-                || runId.isBlank()) {
+    private void recordSafely(String runId, String stepType, String stepName, String executionPath,
+                              String status, Object output, String errorMessage, long durationMs) {
+        if (runId == null || runId.isBlank()) {
             return;
         }
-
         try {
-            RunStep step =
-                    new RunStep();
+            RunStep step = new RunStep();
 
             step.setRunId(runId);
-
-            step.setStepNo(
-                    nextStepNo(runId)
-            );
-
+            step.setStepNo(nextStepNo(runId));
             step.setStepType(stepType);
             step.setStepName(stepName);
-            step.setExecutionPath(
-                    executionPath
-            );
+            step.setExecutionPath(executionPath);
 
             /*
              * P2遥测不需要输入JSON。
              * 避免开发人员以后误把分块原文放入inputJson。
              */
             step.setInputJson(null);
-
-            step.setOutputJson(
-                    writeJson(output)
-            );
-
+            step.setOutputJson(writeJson(output));
             step.setStatus(status);
-
-            step.setErrorMessage(
-                    truncateSafeError(
-                            errorMessage
-                    )
-            );
-
-            step.setDurationMs(
-                    Math.max(
-                            0L,
-                            durationMs
-                    )
-            );
-
+            step.setErrorMessage(truncateSafeError(errorMessage));
+            step.setDurationMs(Math.max(0L, durationMs));
             runStepMapper.insert(step);
         } catch (Exception exception) {
             log.warn(
                     "工作流回答遥测写入失败，runId={}，stepType={}，errorType={}",
                     runId,
                     stepType,
-                    exception.getClass()
-                            .getSimpleName()
+                    exception.getClass().getSimpleName()
             );
         }
     }
@@ -342,58 +426,66 @@ public class WorkflowAnswerTraceRecorder {
      * 读取该运行当前最大步骤号，并在其后追加P2步骤。
      */
     private int nextStepNo(String runId) {
-        RunStep latestStep =
-                runStepMapper.selectOne(
-                        Wrappers
+        RunStep latestStep = runStepMapper.selectOne(Wrappers
                                 .<RunStep>lambdaQuery()
-                                .eq(
-                                        RunStep::getRunId,
-                                        runId
-                                )
-                                .select(
-                                        RunStep::getStepNo
-                                )
-                                .orderByDesc(
-                                        RunStep::getStepNo
-                                )
-                                .last("LIMIT 1")
-                );
+                                .eq(RunStep::getRunId, runId)
+                                .select(RunStep::getStepNo)
+                                .orderByDesc(RunStep::getStepNo)
+                                .last("LIMIT 1"));
 
-        if (latestStep == null
-                || latestStep.getStepNo() == null) {
+        if (latestStep == null || latestStep.getStepNo() == null) {
             return 1;
         }
-
         return latestStep.getStepNo() + 1;
     }
 
-    private String writeJson(Object value)
-            throws JsonProcessingException {
-
-        return objectMapper.writeValueAsString(
-                value
-        );
+    private String writeJson(Object value) throws JsonProcessingException {
+        return objectMapper.writeValueAsString(value);
     }
 
     /**
      * 前端只需要安全业务错误，不保存第三方模型异常详情。
      */
-    private String truncateSafeError(
-            String errorMessage) {
+    private String truncateSafeError(String errorMessage) {
 
-        if (errorMessage == null
-                || errorMessage.isBlank()) {
+        if (errorMessage == null || errorMessage.isBlank()) {
             return null;
         }
+        String normalized = errorMessage.trim();
 
-        String normalized =
-                errorMessage.trim();
+        return normalized.length() <= 500 ? normalized : normalized.substring(0, 500);
+    }
+    /**
+     * 风险判定步骤输出。
+     */
+    private record RiskEvaluationTraceData(
+            Long workflowVersionId,
+            int totalCount,
+            long matchedCount,
+            long notMatchedCount,
+            long unknownCount,
+            boolean truncated,
+            List<RiskEvaluationAuditItem> items) {
+    }
 
-        return normalized.length() <= 500
-                ? normalized
-                : normalized.substring(
-                        0,
-                        500
-                );
+    /**
+     * 单个对象的风险审计摘要。
+     */
+    private record RiskEvaluationAuditItem(
+            String ruleCode,
+            String severity,
+            String objectId,
+            String status,
+            String reason,
+            List<RiskEvaluationEvidence> evidence) {
+    }
+
+    /**
+     * 安全字段证据。
+     */
+    private record RiskEvaluationEvidence(
+            String fieldName,
+            String label,
+            String displayValue) {
     }
 }

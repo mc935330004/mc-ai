@@ -9,6 +9,7 @@ import org.example.ai.agent.chat.entity.AgentStreamEvent;
 import org.example.ai.agent.chat.memory.model.ReportFollowUpDecision;
 import org.example.ai.agent.chat.memory.service.ReportFollowUpService;
 import org.example.ai.agent.chat.service.AgentOrchestrator;
+import org.example.ai.agent.chat.support.ActiveAgentRunRegistry;
 import org.example.ai.agent.chat.vo.ChatTextPayloadVO;
 import org.example.ai.agent.common.enums.ReportQueryType;
 import org.example.ai.agent.modelusage.service.ModelUsageService;
@@ -61,15 +62,17 @@ import org.example.ai.agent.observability.AgentMetrics;
 import org.example.ai.agent.workflow.answer.analysis.ReportAnalysisFallbackService;
 import org.example.ai.agent.workflow.answer.analysis.ReportAnalysisInput;
 import org.example.ai.agent.workflow.answer.analysis.ReportAnalysisInputBuilder;
+import org.example.ai.agent.common.enums.WorkflowPresentationMode;
+import org.example.ai.agent.workflow.answer.presentation.WorkflowAnswerPolicyResolver;
+import org.example.ai.agent.workflow.answer.text.WorkflowTextAnswerService;
+import org.example.ai.agent.workflow.answer.text.WorkflowTextFactBuilder;
+import org.example.ai.agent.workflow.answer.text.WorkflowTextFacts;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.Executor;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
+import java.util.concurrent.*;
+
 @Slf4j
 @Service
 public class DefaultAgentOrchestrator implements AgentOrchestrator {
@@ -87,6 +90,23 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
      */
     private final ResultArtifactAnalysisService resultArtifactAnalysisService;
     private final WorkflowAnswerComposer workflowAnswerComposer;
+    /**
+     * 解析工作流发布版本中的回答展示策略。
+     */
+    private final WorkflowAnswerPolicyResolver workflowAnswerPolicyResolver;
+
+    /**
+     * 构建普通文字回答的确定性事实。
+     */
+    private final WorkflowTextFactBuilder workflowTextFactBuilder;
+    /**
+     * 管理当前进程内正在运行的聊天任务。
+     */
+    private final ActiveAgentRunRegistry activeAgentRunRegistry;
+    /**
+     * 执行工作流真实流式文字回答。
+     */
+    private final WorkflowTextAnswerService workflowTextAnswerService;
     /**
      * 意图路由器。
      *
@@ -200,6 +220,10 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
             ReportAnalysisInputBuilder reportAnalysisInputBuilder,
             ReportAnalysisFallbackService reportAnalysisFallbackService,
             AgentMetrics agentMetrics,
+            WorkflowAnswerPolicyResolver workflowAnswerPolicyResolver,
+            WorkflowTextFactBuilder workflowTextFactBuilder,
+            WorkflowTextAnswerService workflowTextAnswerService,
+            ActiveAgentRunRegistry activeAgentRunRegistry,
             @Qualifier("workflowAnswerAnalysisExecutor") ExecutorService workflowAnswerAnalysisExecutor) {
         this.streamSessionFactory = streamSessionFactory;
         this.knowledgeDocumentQueryService = knowledgeDocumentQueryService;
@@ -226,20 +250,36 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
         this.reportAnalysisInputBuilder = reportAnalysisInputBuilder;
         this.reportAnalysisFallbackService = reportAnalysisFallbackService;
         this.agentMetrics = agentMetrics;
+        this.workflowAnswerPolicyResolver = workflowAnswerPolicyResolver;
+        this.workflowTextFactBuilder = workflowTextFactBuilder;
+        this.workflowTextAnswerService = workflowTextAnswerService;
+        this.activeAgentRunRegistry = activeAgentRunRegistry;
 
     }
     @Override
     public SseEmitter chat(AgentRequest request) {
-        // 每次请求生成唯一 runId，后续 Trace / RunOps 可以用它串联整条执行链路。
         String runId = UUID.randomUUID().toString().replace("-", "");
         AgentStreamSession stream = streamSessionFactory.create(runId, request.getStreamVersion());
-        /*
-         * 使用受控线程池执行Agent任务，
-         * 不再使用ForkJoinPool.commonPool。
-         */
-        agentChatExecutor.execute(() -> doChat(request, stream, runId));
+
+        FutureTask<Void> task =new FutureTask<>(() -> {
+                    doChat(request, stream, runId);
+                    return null;
+                });
+        activeAgentRunRegistry.register(runId, request.getUserId(), request.getConversationId(), task);
+        try {
+            agentChatExecutor.execute(task);
+        } catch (RuntimeException exception) {
+            activeAgentRunRegistry.remove(runId);
+            stream.error(exception);
+        }
         return stream.getEmitter();
     }
+
+    @Override
+    public boolean cancel(String userId, String conversationId, String runId) {
+        return activeAgentRunRegistry.cancel(runId, userId, conversationId);
+    }
+
     /**
      * 真正执行 Agent 聊天逻辑。
      *
@@ -263,19 +303,24 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
             );
             //  runId 用于记录上下文改写模型的调用链路。
             String contextualQuestion =conversationContextResolver.resolve(request,runId );
-
+            ensureRunActive();
             request.setContextualQuestion(contextualQuestion);
+            /*
+             * 多项目指代无法唯一确定时直接追问，
+             * 禁止把“这个项目”重新交给普通工作流路由。
+             */
+            if (StringUtils.hasText(request.getContextClarificationQuestion())) {
+                publishAssistantAnswer(request, stream, runId, request.getContextClarificationQuestion());
+                stream.complete();
+                runTraceService.markSuccess(runId, System.currentTimeMillis() - startTime);
+                return;
+            }
             /*
              *  纯“清除上下文”命令不需要进入工作流、
              * 能力模块或 RAG，直接返回确定性结果。
              */
             if (request.isContextReset()&& !StringUtils.hasText(contextualQuestion)) {
-                publishAssistantAnswer(
-                        request,
-                        stream,
-                        runId,
-                        "当前会话上下文已清除。"
-                );
+                publishAssistantAnswer(request, stream, runId, "当前会话上下文已清除。");
                 runTraceService.markSuccess(runId,System.currentTimeMillis() - startTime);
                 stream.complete();
                 return;
@@ -296,10 +341,7 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                         followUpDecision
                 );
 
-                runTraceService.markSuccess(
-                        runId,
-                        System.currentTimeMillis() - startTime
-                );
+                runTraceService.markSuccess(runId, System.currentTimeMillis() - startTime);
                 return;
             }
             /*
@@ -307,7 +349,6 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
              */
             if (request.isResultAnalysisRequest()) {
                 runTraceService.updateRouteType(runId,RouteType.RESULT_ANALYSIS );
-
                 /*
                  * 模型识别为结果分析，
                  * 但当前会话没有可复用快照时，
@@ -316,42 +357,25 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                  * 禁止继续匹配其他工作流或者能力接口。
                  */
                 if (!StringUtils.hasText(request.getResultArtifactId())) {
-
-                    publishAssistantAnswer(
-                            request,
-                            stream,
-                            runId,
+                    publishAssistantAnswer(request, stream, runId,
                             "当前会话没有可复用的查询结果。"
                                     + "请先查询需要分析的业务数据，"
-                                    + "然后再进行汇总、统计、筛选或对比。"
-                    );
+                                    + "然后再进行汇总、统计、筛选或对比。");
 
-                    runTraceService.markSuccess(runId,
-                            System.currentTimeMillis()- startTime);
+                    runTraceService.markSuccess(runId, System.currentTimeMillis()- startTime);
                     stream.complete();
                     return;
                 }
-
                 stream.send("thinking",
-                        AgentStreamEvent.of(
-                                runId,
-                                AgentStreamEventType
-                                        .THINKING
-                                        .name(),
-                                "正在分析上一轮查询结果。",
-                                null
-                        )
+                        AgentStreamEvent.of(runId, AgentStreamEventType.THINKING.name(), "正在分析上一轮查询结果。", null)
                 );
-                executeResultAnalysis(
-                        request,
-                        stream,
-                        runId
-                );
-
+                executeResultAnalysis(request, stream, runId);
+                ensureRunActive();
                 runTraceService.markSuccess(runId,System.currentTimeMillis()- startTime);
                 return;
             }
             IntentResult intentResult =intentRouter.route(request, runId);
+            ensureRunActive();
             //  更新路由类型。
             runTraceService.updateRouteType(runId, intentResult.getRouteType());
             // 推送路由结果，方便前端展示和后端排查。
@@ -459,12 +483,8 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
 
             if (intentResult.getRouteType() == RouteType.WORKFLOW_QUERY) {
 
-                WorkflowExecutionOutcome outcome = executeWorkflowQuery(
-                                request,
-                                stream,
-                                runId,
-                                intentResult );
-
+                WorkflowExecutionOutcome outcome = executeWorkflowQuery(request, stream, runId, intentResult );
+                ensureRunActive();
                 long duration =System.currentTimeMillis() - startTime;
 
                 if (outcome.success()) {
@@ -507,6 +527,7 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
              */
             if (intentResult.getRouteType() == RouteType.RAG_ONLY) {
                 executeRagOnly(request, stream, runId, routePlan);
+                ensureRunActive();
                 runTraceService.markSuccess(runId, System.currentTimeMillis() - startTime);
                 return;
             }
@@ -528,30 +549,192 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
             }
             // BUSINESS_QUERY / MIXED_QUERY / STATISTIC_QUERY 走工具执行链路。
             executeToolPlan(request, stream, runId, routePlan);
+            ensureRunActive();
             runTraceService.markSuccess(runId, System.currentTimeMillis() - startTime);
 
         } catch (Exception exception) {
+            long duration = System.currentTimeMillis() - startTime;
             /*
-             * 客户端断开（刷新/关闭/取消）不是业务失败：
-             * 不发送错误事件，避免容器 onError 二次通知产生 ERROR 日志。
+             * 用户主动终止优先于普通异常判断。
              */
-            if (exception instanceof AgentClientDisconnectedException) {
-                log.debug("SSE客户端已断开，静默收尾，runId={}", runId);
-                runTraceService.markFailed(
-                        runId,
-                        System.currentTimeMillis() - startTime,
-                        "客户端连接已断开"
-                );
+            if (isRunCancelled(exception)) {
+                /*
+                 * 清除中断标志，允许当前线程完成
+                 * 状态和部分回答的持久化收尾。
+                 */
+                Thread.interrupted();
+                handleRunCancellation(request, stream, runId, duration);
                 return;
             }
-            runTraceService.markFailed(
-                    runId,
-                    System.currentTimeMillis() - startTime,
-                    exception.getMessage()
-            );
-            // Session 统一发送 ERROR 并关闭连接，避免重复完成同一个 SseEmitter。
+            AgentClientDisconnectedException disconnected = findClientDisconnected(exception);
+            if (disconnected != null) {
+                log.debug("SSE客户端已断开，静默收尾，runId={}", runId);
+                runTraceService.markCancelled(runId, duration, "客户端连接已断开");
+                return;
+            }
+            runTraceService.markFailed(runId, duration, exception.getMessage());
             stream.error(exception);
+
+        } finally {
+            /*
+             * 无论成功、失败、取消还是客户端断开，
+             * 都必须移除活动任务。
+             */
+            activeAgentRunRegistry.remove(runId);
         }
+    }
+
+    /**
+     * 用户主动终止后的统一收尾。
+     */
+    private void handleRunCancellation(
+            AgentRequest request,
+            AgentStreamSession stream,
+            String runId,
+            long duration) {
+
+        runTraceService.markCancelled(
+                runId,
+                duration,
+                "用户主动终止"
+        );
+
+        if (stream.isCompleted()) {
+            return;
+        }
+
+        String notice =
+                "\n\n回答已由用户终止。";
+
+        try {
+            if (stream.hasIncrementalAnswerStarted()) {
+
+                String partial =
+                        stream.getFinalMarkdownSnapshot();
+
+                String finalContent =
+                        StringUtils.hasText(partial)
+                                ? partial + notice
+                                : notice.trim();
+
+                stream.appendAnswerDelta(notice);
+
+                /*
+                 * 正常回答可能已经在极短时间窗口内完成持久化。
+                 * 已保存则更新，未保存则新增。
+                 */
+                if (stream.isAssistantMessagePersisted()) {
+                    aiChatSessionService
+                            .updateAssistantReportMessage(
+                                    request.getUserId(),
+                                    request.getConversationId(),
+                                    runId,
+                                    finalContent,
+                                    request.getModelCode(),
+                                    null
+                            );
+                } else {
+                    aiChatSessionService
+                            .saveAssistantMessage(
+                                    request.getUserId(),
+                                    request.getConversationId(),
+                                    finalContent,
+                                    runId,
+                                    request.getModelCode(),
+                                    "TEXT",
+                                    null
+                            );
+
+                    stream.markAssistantMessagePersisted();
+                }
+
+                stream.finishAnswer(finalContent);
+                return;
+            }
+
+            /*
+             * 尚未开始增量输出时保存一条明确终止消息。
+             */
+            publishAssistantAnswer(
+                    request,
+                    stream,
+                    runId,
+                    "回答已由用户终止。"
+            );
+
+            stream.complete();
+
+        } catch (AgentClientDisconnectedException exception) {
+            log.debug(
+                    "终止任务时客户端已经断开，runId={}",
+                    runId
+            );
+        } catch (Exception exception) {
+            log.warn(
+                    "终止任务收尾失败，runId={}，errorType={}",
+                    runId,
+                    exception.getClass().getSimpleName()
+            );
+
+            stream.connectionClosed();
+        }
+    }
+
+    /**
+     * 检查当前线程是否已收到主动终止信号。
+     */
+    private void ensureRunActive() {
+        if (Thread.currentThread().isInterrupted()) {
+            throw new CancellationException(
+                    "回答已由用户终止"
+            );
+        }
+    }
+
+    /**
+     * 判断异常链中是否包含主动终止信号。
+     */
+    private boolean isRunCancelled(
+            Throwable throwable) {
+
+        if (Thread.currentThread().isInterrupted()) {
+            return true;
+        }
+
+        Throwable current = throwable;
+
+        while (current != null) {
+            if (current instanceof CancellationException
+                    || current instanceof InterruptedException) {
+                return true;
+            }
+
+            if (current.getCause() == current) {
+                break;
+            }
+
+            current = current.getCause();
+        }
+
+        return false;
+    }
+
+    /**
+     * 查找客户端断开异常。
+     */
+    private AgentClientDisconnectedException findClientDisconnected(Throwable throwable) {
+        Throwable current = throwable;
+        while (current != null) {
+            if (current instanceof AgentClientDisconnectedException disconnected) {
+                return disconnected;
+            }
+            if (current.getCause() == current) {
+                break;
+            }
+            current = current.getCause();
+        }
+
+        return null;
     }
 
     /**
@@ -566,23 +749,10 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
 
         switch (decision.status()) {
             case CANCELLED, CLARIFY -> {
-                publishAssistantAnswer(
-                        request,
-                        stream,
-                        runId,
-                        decision.message()
-                );
-
+                publishAssistantAnswer(request, stream, runId, decision.message());
                 stream.complete();
             }
-
-            case READY -> executeReadyReportFollowUp(
-                    request,
-                    stream,
-                    runId,
-                    decision
-            );
-
+            case READY -> executeReadyReportFollowUp(request, stream, runId, decision);
             case NONE -> throw new IllegalStateException(
                     "无追问状态不能进入追问执行逻辑"
             );
@@ -920,7 +1090,7 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                 "ACTION_FORM",
                 objectMapper.writeValueAsString(form)
         );
-
+        stream.markAssistantMessagePersisted();
         stream.send(
                 "action_form",
                 AgentStreamEvent.of(
@@ -1096,9 +1266,31 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                             .presentationType(presentationType)
                             .presentationTitle(reportTitle)
                             .build();
-            conversationStateRecorder.recordWorkflowResult(request, plan, outcome, runId, composeResult.artifactId());
+            conversationStateRecorder.recordWorkflowResult(request, plan, outcome, runId, composeResult.artifactId(), null, "REPORT".equals(presentationType)
+                            ? "REPORT" : "ANSWER");
             publishAssistantAnswer(request, stream, runId, composeResult.answer(), payload);
             stream.complete();
+            return outcome;
+        }
+        /*
+         * SSE v2根据发布版本的presentationMode决定展示方式。
+         *
+         * 策略解析失败时保持旧报表行为，
+         * 禁止因为配置读取异常误切换展示方式。
+         */
+        WorkflowPresentationMode presentationDecision = WorkflowPresentationMode.REPORT;
+
+        try {
+            presentationDecision = workflowAnswerPolicyResolver
+                            .resolve(outcome)
+                            .decide(request.getEffectiveQuestion());
+        } catch (RuntimeException exception) {
+            log.warn("工作流回答展示策略解析失败，"
+                            + "保持原报表展示，runId={}，"
+                            + "workflowCode={}，errorType={}", runId, outcome.workflowCode(), exception.getClass().getSimpleName());
+        }
+        if (presentationDecision == WorkflowPresentationMode.ANSWER) {
+            executeWorkflowTextAnswer(request, stream, runId, plan, outcome);
             return outcome;
         }
         // 基础报告准备失败时仍允许发送降级基础报告。
@@ -1136,13 +1328,15 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                 objectMapper.writeValueAsString(basePayload)
         );
         sendReportBaseIfV2(stream,runId,baseReportSchema);
-
-        /*
-         * Artifact 准备成功后保存可复用上下文。
-         * 准备失败时仍允许前端显示内存中的基础报告。
-         */
         if (preparation != null) {
-            conversationStateRecorder.recordWorkflowResult(request, plan, outcome, runId, preparation.artifactId());
+            WorkflowTextFacts contextFacts = null;
+            try {
+                // 上下文事实构建失败不能影响已经生成的基础报告。
+                contextFacts = workflowTextFactBuilder.build(preparation);
+            } catch (RuntimeException exception) {
+                log.warn("报告会话上下文事实构建失败，runId={}，workflowCode={}，errorType={}", runId, outcome.workflowCode(), exception.getClass().getSimpleName(), exception);
+            }
+            conversationStateRecorder.recordWorkflowResult(request, plan, outcome, runId, preparation.artifactId(), contextFacts, "REPORT");
         }
 
         /*
@@ -1151,12 +1345,10 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
          * 2. DATA_QUERY + 判定开启——报告先展示，由模型判定本次数据是否需要分析。
          */
         boolean decisionEnabled = analysisProperties.isDecisionEnabled() && !analysisRequired;
-
         if (!analysisRequired && !decisionEnabled) {
             completeDataQueryReport(request, stream, runId, baseReportSchema);
             return outcome;
         }
-
         if (preparation == null) {
             if (analysisRequired) {
                 completeReportWithRuleFallback(request, stream, runId, outcome, baseReportSchema,
@@ -1166,28 +1358,55 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
             }
             return outcome;
         }
-        try {
-            // 固定异步任务使用的准备结果，避免 Lambda 捕获可变变量。
-            final WorkflowAnswerPreparation asyncPreparation = preparation;
-            agentChatExecutor.execute(() ->
-                    analyzeWorkflowReportAsync(
-                            request,
-                            stream,
-                            runId,
-                            outcome,
-                            asyncPreparation,
-                            baseReportSchema
-                    )
-            );
-        } catch (RuntimeException exception) {
-            if (analysisRequired) {
-                completeReportWithRuleFallback(request, stream, runId, outcome, baseReportSchema, exception, System.currentTimeMillis());
-            } else {
-                completeDataQueryReport(request, stream, runId, baseReportSchema);
-            }
-        }
+        /*
+         * 当前方法本身已经运行在agentChatExecutor中，
+         * 不能再次脱离主聊天任务提交异步任务，
+         * 否则用户无法终止后续报表分析。
+         */
+        analyzeWorkflowReportAsync(request, stream, runId, outcome, preparation, baseReportSchema);
         return outcome;
     }
+
+    /**
+     * 执行工作流普通文字回答。
+     *
+     * 本方法不创建ReportSchema，
+     * 也不发送REPORT_BASE、REPORT_ANALYSIS或REPORT_DONE。
+     */
+    private void executeWorkflowTextAnswer(AgentRequest request, AgentStreamSession stream, String runId, WorkflowPlan plan, WorkflowExecutionOutcome outcome) throws Exception {
+
+        WorkflowAnswerPreparation preparation;
+        try {
+            preparation = workflowAnswerComposer.prepare(request, outcome, "ANSWER");
+        } catch (RuntimeException exception) {
+
+            log.warn("工作流文字回答安全数据准备失败，"
+                            + "runId={}，workflowCode={}，"
+                            + "errorType={}",
+                    runId,
+                    outcome.workflowCode(),
+                    exception.getClass().getSimpleName()
+            );
+
+            /*
+             * 安全投影失败时不能把原始业务数据发给模型。
+             */
+            publishAssistantAnswer(request, stream, runId,
+                    "查询已经完成，但字段展示策略加载失败。"
+                            + "为保护业务数据，本次未生成详细回答，"
+                            + "请管理员检查字段字典发布状态。");
+            stream.complete();
+            return;
+        }
+        WorkflowTextFacts facts = workflowTextFactBuilder.build(preparation);
+        /*
+         * 在模型调用前保存Artifact上下文。
+         * 即使模型失败，下一轮仍可继续基于本次结果追问。
+         */
+        conversationStateRecorder.recordWorkflowResult(request, plan, outcome, runId, preparation.artifactId(), facts, "ANSWER");
+        workflowTextAnswerService.streamAnswer(request, stream, runId, facts);
+    }
+
 
     /**
      * 完成普通数据查询报告。
@@ -1218,7 +1437,8 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
      *  异步生成 AI 结构化分析。
      */
     private void analyzeWorkflowReportAsync(AgentRequest request, AgentStreamSession stream, String runId,
-                                            WorkflowExecutionOutcome outcome, WorkflowAnswerPreparation preparation, ReportSchemaVO baseReportSchema) {
+                                            WorkflowExecutionOutcome outcome, WorkflowAnswerPreparation preparation,
+                                            ReportSchemaVO baseReportSchema) throws Exception{
         long analysisStartedAt = System.currentTimeMillis();
         try {
             /*
@@ -1250,41 +1470,72 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
             completeAnalyzedReport(request, stream, runId, outcome, baseReportSchema, result.analysis());
             agentMetrics.recordReportAnalysisCompleted("AI", "NONE", System.currentTimeMillis() - analysisStartedAt);
         } catch (Exception exception) {
+            if (isRunCancelled(exception)) {
+                Thread.interrupted();
+                completeCancelledReport(request, stream, runId, baseReportSchema);
+                throw new CancellationException("回答已由用户终止");
+            }
             completeReportWithRuleFallback(request, stream, runId, outcome, baseReportSchema, exception, analysisStartedAt);
         }
     }
+
     /**
-     * 带超时保护的分析调用。
-     *
-     * 分析任务提交到独立线程池执行，超过配置秒数即取消，
-     * 确保 30 秒内一定返回：要么返回分析结果，要么走失败降级保留基础报告。
+     * 报表分析取消后保留基础报告。
      */
-    private WorkflowAnswerAnalysisResult analyzeReportWithTimeout(
-            AgentRequest request,
-            WorkflowAnswerPreparation preparation,
-            ReportSchemaVO baseReportSchema) throws Exception {
-        Future<WorkflowAnswerAnalysisResult> future =
-                workflowAnswerAnalysisExecutor.submit(
-                        () -> workflowAnswerComposer.analyzeReport(
-                                request,
-                                preparation,
-                                baseReportSchema
-                        )
+    private void completeCancelledReport(AgentRequest request, AgentStreamSession stream, String runId,
+                                         ReportSchemaVO baseReportSchema) throws Exception {
+        /*
+         * payloadJson传null，
+         * AiChatSessionServiceImpl会保留已有ReportSchema。
+         */
+        aiChatSessionService.updateAssistantReportMessage(
+                        request.getUserId(),
+                        request.getConversationId(),
+                        runId,
+                        "基础报告已生成，AI分析已由用户终止。",
+                        request.getModelCode(),
+                        null
                 );
 
+        stream.markAssistantMessagePersisted();
+        stream.send("report_done",
+                AgentStreamEvent.builder()
+                        .runId(runId)
+                        .type("REPORT_DONE")
+                        .content("AI分析已由用户终止，基础报告仍然有效。")
+                        .data(baseReportSchema)
+                        .presentationType("REPORT")
+                        .presentationTitle(baseReportSchema.title())
+                        .build()
+        );
+        stream.complete();
+    }
+
+    /**
+     * 带超时保护的报告分析调用。
+     */
+    private WorkflowAnswerAnalysisResult analyzeReportWithTimeout(AgentRequest request, WorkflowAnswerPreparation preparation, ReportSchemaVO baseReportSchema) throws Exception {
+
+        Future<WorkflowAnswerAnalysisResult> future = workflowAnswerAnalysisExecutor.submit(
+                        () -> workflowAnswerComposer.analyzeReport(request, preparation, baseReportSchema));
+
         try {
-            return future.get(
-                    analysisProperties.getTimeoutSeconds(),
-                    TimeUnit.SECONDS
-            );
-        } catch (TimeoutException exception) {
+            return future.get(analysisProperties.getTimeoutSeconds(), TimeUnit.SECONDS);
+        } catch (InterruptedException exception) {
+            /*
+             * 用户主动终止主聊天任务时，
+             * 同时取消独立线程池中的报告分析任务。
+             */
             future.cancel(true);
-            throw new IllegalStateException(
-                    "AI分析超过"
-                            + analysisProperties.getTimeoutSeconds()
-                            + "秒未完成，已保留基础业务报告",
-                    exception
-            );
+            Thread.currentThread().interrupt();
+            throw exception;
+        } catch (TimeoutException exception) {
+            /*
+             * 分析超时只取消内部分析任务，
+             * 不能中断主聊天线程，否则会被误判为用户主动终止。
+             */
+            future.cancel(true);
+            throw new IllegalStateException("AI分析超过" + analysisProperties.getTimeoutSeconds() + "秒未完成，已保留基础业务报告", exception);
         }
     }
 
@@ -1530,7 +1781,7 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                         ? null
                         : objectMapper.writeValueAsString(payload)
         );
-
+        stream.markAssistantMessagePersisted();
         /*
          * 在完成事件中同时返回首选模型和实际成功模型。
          */
@@ -1572,18 +1823,11 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                         ? null
                         : objectMapper.writeValueAsString(payload)
         );
-
-        stream.setAnswerModelResult(
-                request.getModelCode(),
-                effectiveModelCode
-        );
-
-        stream.publishAnswer(
-                visibleAnswer,
-                payload == null
+        stream.markAssistantMessagePersisted();
+        stream.setAnswerModelResult(request.getModelCode(), effectiveModelCode);
+        stream.publishAnswer(visibleAnswer, payload == null
                         ? "MARKDOWN"
-                        : payload.getPresentationType(),
-                payload == null
+                        : payload.getPresentationType(), payload == null
                         ? null
                         : payload.getPresentationTitle()
         );
@@ -1595,7 +1839,6 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
         if (!StringUtils.hasText(answer)) {
             return "";
         }
-
         StringBuilder result = new StringBuilder();
         boolean skippingInternalSection = false;
 
@@ -1606,7 +1849,6 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                 skippingInternalSection = true;
                 continue;
             }
-
             //  分隔线只负责结束内部区段，不需要保留。
             if (skippingInternalSection && trimmed.matches("^-{3,}$")) {
                 skippingInternalSection = false;

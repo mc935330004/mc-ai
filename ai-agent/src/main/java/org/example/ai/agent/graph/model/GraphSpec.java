@@ -7,7 +7,9 @@ import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
 import com.fasterxml.jackson.databind.JsonNode;
+import org.example.ai.agent.common.enums.WorkflowPresentationMode;
 import org.example.ai.agent.graph.model.report.ReportDefinitionSpec;
+import org.example.ai.agent.graph.model.risk.WorkflowRiskRuleSpec;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -45,6 +47,22 @@ public class GraphSpec {
      * 嵌套ForEach子图可以为空。
      */
     private String name;
+    /**
+     * 工作流默认展示方式。
+     *
+     * 旧工作流没有该字段时保持 null，
+     * 运行时继续按 REPORT 兼容。
+     */
+    private WorkflowPresentationMode presentationMode;
+
+    /**
+     * 随工作流版本发布的风险判定规则。
+     *
+     * 旧工作流没有该配置时使用空集合，
+     * 不影响原有工作流执行。
+     */
+    @Builder.Default
+    private List<WorkflowRiskRuleSpec> riskRules = new ArrayList<>();
 
     @Builder.Default
     private List<GraphNodeSpec> nodes =new ArrayList<>();

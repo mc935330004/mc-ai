@@ -43,36 +43,73 @@ public class WorkflowAnswerComposer {
     private final ResultArtifactService resultArtifactService;
     private final ReportAnalysisInputBuilder reportAnalysisInputBuilder;
     private final WorkflowReportAnalysisModelService reportAnalysisModelService;
+
     /**
-     *  准备基础报告。
-     *
-     * 该方法只执行安全字段过滤、分块和 Artifact 保存，
-     * 不调用大模型。
+     * 准备固定报告基础数据。
      */
-    public WorkflowAnswerPreparation prepareReport(AgentRequest request,WorkflowExecutionOutcome outcome) {
+    public WorkflowAnswerPreparation prepareReport(AgentRequest request, WorkflowExecutionOutcome outcome) {
+        return prepare(request, outcome, "REPORT");
+    }
+
+    /**
+     * 准备工作流回答所需的安全数据。
+     *
+     * 报表和文字回答共用：
+     * 1. 字段展示策略；
+     * 2. 隐藏字段过滤；
+     * 3. 安全数据分块；
+     * 4. ResultArtifact 保存。
+     *
+     * 两条链路只共用安全数据，不共用展示结构。
+     */
+    public WorkflowAnswerPreparation prepare(
+            AgentRequest request,
+            WorkflowExecutionOutcome outcome,
+            String presentationType) {
+
         if (outcome == null) {
             throw new IllegalArgumentException("工作流执行结果不能为空");
         }
+
         if (!outcome.success()) {
             throw new IllegalStateException("工作流执行失败");
         }
+
+        String normalizedPresentationType =
+                "ANSWER".equalsIgnoreCase(presentationType)
+                        ? "ANSWER"
+                        : "REPORT";
+
         traceRecorder.recordWorkflowResult(
                 outcome.runId(),
                 outcome,
-                "REPORT"
+                normalizedPresentationType
         );
-        WorkflowAnswerFieldPolicy fieldPolicy =fieldContextResolver.resolvePolicy(outcome);
-        WorkflowAnswerModelPayload modelPayload =answerPayloadFactory.create(
+
+        WorkflowAnswerFieldPolicy fieldPolicy = fieldContextResolver.resolvePolicy(outcome);
+
+        /*
+         * 只能使用经过隐藏字段过滤后的安全结果。
+         * 禁止文字回答重新读取原始工作流响应。
+         */
+        WorkflowAnswerModelPayload modelPayload =
+                answerPayloadFactory.create(
                         outcome,
-                        fieldPolicy.hiddenFieldNames() );
+                        fieldPolicy.hiddenFieldNames()
+                );
         String fieldSemanticsJson = writeJson(fieldPolicy.visibleFields());
         WorkflowAnswerChunkPlan chunkPlan = chunkPlanner.plan(modelPayload);
+        /*
+         * 文字回答同样保存 Artifact，
+         * 后续追问仍然可以使用上一轮安全结果。
+         */
         String artifactId = resultArtifactService.save(
                         request,
                         outcome,
                         fieldPolicy,
                         chunkPlan
                 );
+
         return new WorkflowAnswerPreparation(
                 outcome,
                 fieldPolicy,

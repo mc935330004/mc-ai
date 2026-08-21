@@ -57,13 +57,8 @@ public class WorkflowRunController {
     @GetMapping("/detail/{runId}")
     public Result<WorkflowRunDetailVO> detail(
             @PathVariable String runId) {
-
         return Result.success(
-                runService.detailOwned(
-                        runId,
-                        currentUserProvider
-                                .getRequiredUserId()
-                )
+                runService.detailOwned(runId, currentUserProvider.getRequiredUserId())
         );
     }
 
