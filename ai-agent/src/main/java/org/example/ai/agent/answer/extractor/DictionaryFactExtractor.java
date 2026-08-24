@@ -69,7 +69,6 @@ public class DictionaryFactExtractor {
                     if (!isRequired(field)) {
                         continue;
                     }
-
                     facts.add(buildFact( capabilityCode,field, resolved,true,
                             "VALUE_NULL"));
                     continue;
@@ -81,9 +80,7 @@ public class DictionaryFactExtractor {
 
         return facts.stream().sorted((left, right) -> {
                     int leftOrder = left.getDisplayOrder() == null ? 0: left.getDisplayOrder();
-
                     int rightOrder = right.getDisplayOrder() == null ? 0 : right.getDisplayOrder();
-
                     return Integer.compare(leftOrder, rightOrder);
                 }) .toList();
     }
@@ -114,19 +111,14 @@ public class DictionaryFactExtractor {
                     normalizeCollectionPath( latestRecordPath )));
             return;
         }
-
         if (current == null|| current.isMissingNode()) {
             return;
         }
-
         String segment = segments[segmentIndex];
         boolean arraySegment =segment.endsWith("[]");
-
         String fieldName = arraySegment ? segment.substring( 0, segment.length() - 2 ) : segment;
-
         JsonNode child = current.path(fieldName);
         String childPath = currentPath + "." + fieldName;
-
         if (!arraySegment) {
             resolveRecursive( child,segments,segmentIndex + 1,
                     childPath,
@@ -140,7 +132,6 @@ public class DictionaryFactExtractor {
         for (int index = 0;index < child.size(); index++) {
             JsonNode arrayItem = child.get(index);
             String recordPath = childPath + "[" + index + "]";
-
             resolveRecursive( arrayItem, segments,
                     segmentIndex + 1,recordPath, recordPath,result);
         }
@@ -190,11 +181,7 @@ public class DictionaryFactExtractor {
             return;
         }
 
-        ResolvedValue resolved = new ResolvedValue(
-                        null,
-                        null,
-                        null );
-
+        ResolvedValue resolved = new ResolvedValue(null, null, null );
         facts.add(buildFact(capabilityCode,field,resolved,true,reason));
     }
 
@@ -219,15 +206,12 @@ public class DictionaryFactExtractor {
         if (field == null) {
             return "";
         }
-
         if (StringUtils.hasText(field.getCnName())) {
             return field.getCnName();
         }
-
         if (StringUtils.hasText(field.getName())) {
             return field.getName();
         }
-
         return field.getPath();
     }
 
@@ -244,7 +228,6 @@ public class DictionaryFactExtractor {
         if (!StringUtils.hasText(recordPath)) {
             return null;
         }
-
         return recordPath.replaceAll("\\[\\d+]","[]");
     }
 
