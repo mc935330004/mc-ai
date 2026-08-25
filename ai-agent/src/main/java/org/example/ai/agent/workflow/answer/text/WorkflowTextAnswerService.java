@@ -4,21 +4,28 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.example.ai.agent.chat.entity.AgentRequest;
+import org.example.ai.agent.chat.protocol.block.TextBlock;
+import org.example.ai.agent.chat.protocol.response.AiResponse;
+import org.example.ai.agent.chat.protocol.response.ResponseMeta;
 import org.example.ai.agent.chat.service.AiChatSessionService;
 import org.example.ai.agent.chat.support.AgentClientDisconnectedException;
 import org.example.ai.agent.chat.support.AgentStreamSession;
 import org.example.ai.agent.common.enums.ModelCallType;
+import org.example.ai.agent.common.enums.protocol.BlockSource;
+import org.example.ai.agent.common.enums.protocol.BlockStatus;
 import org.example.ai.agent.common.modelusage.ModelCallContext;
 import org.example.ai.agent.common.modelusage.TrackedChatClientService;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
+
 import java.util.concurrent.CancellationException;
+
 /**
- * 使用真正的模型Flux生成工作流文字回答。
+ * 工作流文字回答服务。
  *
- * 后端确定性事实先展示，
- * 模型只负责解释和建议。
+ * 业务事实立即展示，
+ * AI只负责补充解释和建议。
  */
 @Slf4j
 @Service
@@ -42,48 +49,64 @@ public class WorkflowTextAnswerService {
             """;
 
     private static final String MODEL_UNAVAILABLE_TEXT =
-            "\n\n智能分析暂时不可用，"
-                    + "以上业务数据和确定性事实仍然有效。";
+            "智能分析暂时不可用，以上业务数据和确定性事实仍然有效。";
+
+    private static final String CANCELLED_TEXT =
+            "回答已由用户终止。";
 
     private final ObjectMapper objectMapper;
     private final TrackedChatClientService chatClientService;
     private final AiChatSessionService aiChatSessionService;
 
     /**
-     * 发送文字形式的工作流回答。
+     * 发送工作流文字回答。
      */
     public void streamAnswer(
             AgentRequest request,
             AgentStreamSession stream,
             String runId,
+            String workflowCode,
+            String artifactId,
             WorkflowTextFacts facts) throws Exception {
 
         if (facts == null
                 || !StringUtils.hasText(
-                        facts.deterministicMarkdown()
-                )) {
+                facts.deterministicMarkdown())) {
+
             throw new IllegalArgumentException(
                     "工作流确定性事实不能为空"
             );
         }
 
-        StringBuilder completeAnswer =
-                new StringBuilder(
+        /*
+         * 业务事实不等待模型，
+         * 查询完成后立即作为完整区块展示。
+         */
+        stream.startChatResponse();
+
+        stream.publishResponseBlock(
+                new TextBlock(
+                        "business_facts",
+                        "查询结果",
+                        0,
+                        BlockStatus.READY,
+                        BlockSource.BUSINESS,
                         facts.deterministicMarkdown()
-                );
+                )
+        );
+
+        /*
+         * AI分析使用独立TEXT区块进行真实流式输出。
+         */
+        stream.startTextResponse(
+                "ai_analysis",
+                "智能分析",
+                10,
+                BlockSource.AI
+        );
 
         StringBuilder modelAnswer =
                 new StringBuilder();
-
-        stream.startAnswer("MARKDOWN");
-
-        /*
-         * 业务事实优先展示。
-         * 即使模型连接失败，用户也不会长时间看到空白页面。
-         */
-        stream.appendAnswerDelta(
-                facts.deterministicMarkdown()
-        );
 
         ModelCallContext context =
                 ModelCallContext.builder()
@@ -99,14 +122,7 @@ public class WorkflowTextAnswerService {
         String userPrompt =
                 buildUserPrompt(request, facts);
 
-        boolean modelContentReceived = false;
-
         try {
-            /*
-             * 使用toIterable逐块消费Flux。
-             * 每个ChatResponse到达后立即发送给前端，
-             * 不是等待完整回答后再人工切块。
-             */
             for (ChatResponse response
                     : chatClientService
                     .stream(
@@ -126,93 +142,68 @@ public class WorkflowTextAnswerService {
                     continue;
                 }
 
-                if (!modelContentReceived) {
-
-                    /*
-                     * 模型说明直接承接确定性业务事实，
-                     * 不再插入生硬的“智能说明”标题。
-                     */
-                    String paragraphSeparator =
-                            "\n\n";
-
-                    completeAnswer.append(
-                            paragraphSeparator
-                    );
-
-                    stream.appendAnswerDelta(
-                            paragraphSeparator
-                    );
-
-                    modelContentReceived = true;
-                }
-
                 modelAnswer.append(delta);
-                completeAnswer.append(delta);
-                stream.appendAnswerDelta(delta);
+                stream.appendTextResponse(delta);
             }
 
-            /*
-             * 模型正常结束但没有返回可见文本，
-             * 同样视为分析不可用。
-             */
-            if (!modelContentReceived) {
-                completeAnswer.append(
-                        MODEL_UNAVAILABLE_TEXT
-                );
-
-                stream.appendAnswerDelta(
-                        MODEL_UNAVAILABLE_TEXT
-                );
+            if (!StringUtils.hasText(modelAnswer)) {
+                modelAnswer.append(MODEL_UNAVAILABLE_TEXT);
+                stream.appendTextResponse(MODEL_UNAVAILABLE_TEXT);
             }
 
         } catch (RuntimeException exception) {
-
             AgentClientDisconnectedException disconnected =
                     findClientDisconnected(exception);
 
             if (disconnected != null) {
                 throw disconnected;
             }
+
             if (isRunCancelled(exception)) {
+                finishCancelledAnswer(
+                        request,
+                        stream,
+                        runId,
+                        workflowCode,
+                        artifactId,
+                        facts,
+                        modelAnswer
+                );
+
                 CancellationException cancelled =
-                        new CancellationException(
-                                "回答已由用户终止"
-                        );
+                        new CancellationException(CANCELLED_TEXT);
 
                 cancelled.initCause(exception);
                 throw cancelled;
             }
+
             log.warn(
-                    "工作流文字分析失败，保留确定性事实，"
-                            + "runId={}，errorType={}",
+                    "工作流文字分析失败，保留确定性事实，runId={}，errorType={}",
                     runId,
                     exception.getClass().getSimpleName()
             );
 
-            completeAnswer.append(
-                    MODEL_UNAVAILABLE_TEXT
-            );
+            // 模型已经输出部分内容时，增加段落间隔，避免降级提示与正文粘连
+            String unavailableNotice =
+                    StringUtils.hasText(modelAnswer)
+                            ? "\n\n" + MODEL_UNAVAILABLE_TEXT
+                            : MODEL_UNAVAILABLE_TEXT;
 
-            stream.appendAnswerDelta(
-                    MODEL_UNAVAILABLE_TEXT
-            );
+            modelAnswer.append(unavailableNotice);
+            stream.appendTextResponse(unavailableNotice);
         }
 
-        String finalAnswer =
-                completeAnswer.toString().trim();
+        String analysisText = modelAnswer.toString().trim();
+
+        stream.finishTextResponse(analysisText);
+        stream.setResponseDataComplete(facts.dataComplete());
+        stream.setResponseMeta(buildResponseMeta(workflowCode, artifactId, request.getModelCode()));
+        AiResponse finalResponse = stream.getChatResponseAccumulator().complete();
+        String finalAnswer = buildStoredAnswer(facts.deterministicMarkdown(), analysisText);
 
         /*
-         * 当前流式模型调用没有自动切换备用模型，
-         * 因此成功模型与请求模型保持一致。
-         */
-        stream.setAnswerModelResult(
-                request.getModelCode(),
-                request.getModelCode()
-        );
-
-        /*
-         * 先保存完整消息，再发送最终完成事件。
-         * 页面刷新后仍能恢复本次文字回答。
+         * 先保存完整Block响应，
+         * 再发送RESPONSE_DONE。
          */
         aiChatSessionService.saveAssistantMessage(
                 request.getUserId(),
@@ -221,17 +212,115 @@ public class WorkflowTextAnswerService {
                 runId,
                 request.getModelCode(),
                 "TEXT",
-                null
+                objectMapper.writeValueAsString(
+                        finalResponse
+                )
         );
-        stream.markAssistantMessagePersisted();
-        stream.finishAnswer(finalAnswer);
+        stream.finishChatResponse();
+    }
+
+    /**
+     * 用户终止模型流时保存当前部分结果。
+     */
+    private void finishCancelledAnswer(
+            AgentRequest request,
+            AgentStreamSession stream,
+            String runId,
+            String workflowCode,
+            String artifactId,
+            WorkflowTextFacts facts,
+            StringBuilder modelAnswer) throws Exception {
+
+        String analysisText =
+                StringUtils.hasText(modelAnswer)
+                        ? modelAnswer.toString().trim()
+                        + "\n\n"
+                        + CANCELLED_TEXT
+                        : CANCELLED_TEXT;
+
+        stream.finishTextResponse(analysisText);
+        stream.setResponseDataComplete(
+                facts.dataComplete()
+        );
+
+        stream.setResponseMeta(
+                buildResponseMeta(
+                        workflowCode,
+                        artifactId,
+                        request.getModelCode()
+                )
+        );
+
+        AiResponse cancelledResponse =
+                stream.getChatResponseAccumulator()
+                        .cancel();
+
+        String finalAnswer =
+                buildStoredAnswer(
+                        facts.deterministicMarkdown(),
+                        analysisText
+                );
+
+        aiChatSessionService.saveAssistantMessage(
+                request.getUserId(),
+                request.getConversationId(),
+                finalAnswer,
+                runId,
+                request.getModelCode(),
+                "TEXT",
+                objectMapper.writeValueAsString(
+                        cancelledResponse
+                )
+        );
+        stream.cancelChatResponse();
+    }
+
+    /**
+     * 创建回答运行信息。
+     */
+    private ResponseMeta buildResponseMeta(
+            String workflowCode,
+            String artifactId,
+            String modelCode) {
+
+        return new ResponseMeta(
+                workflowCode,
+                artifactId,
+                modelCode,
+                modelCode,
+                false,
+                0,
+                0,
+                0,
+                0,
+                0,
+                false
+        );
+    }
+
+    /**
+     * 创建数据库中的纯文字内容。
+     *
+     * content继续用于会话记忆，
+     * payloadJson用于恢复完整Block。
+     */
+    private String buildStoredAnswer(
+            String businessFacts,
+            String analysisText) {
+
+        if (!StringUtils.hasText(analysisText)) {
+            return businessFacts.trim();
+        }
+
+        return (
+                businessFacts.trim()
+                        + "\n\n"
+                        + analysisText.trim()
+        ).trim();
     }
 
     /**
      * 构造精简模型输入。
-     *
-     * getEffectiveQuestion已经包含现有会话上下文补全结果，
-     * 不再把完整历史消息重复发送给模型。
      */
     private String buildUserPrompt(
             AgentRequest request,
@@ -256,9 +345,7 @@ public class WorkflowTextAnswerService {
     }
 
     /**
-     * 兼容两类模型流式协议：
-     * 1. 每次只返回当前片段；
-     * 2. 每次返回截至当前的累计文本。
+     * 兼容模型返回增量文本或累计文本。
      */
     private String extractDelta(
             ChatResponse response,
@@ -266,7 +353,9 @@ public class WorkflowTextAnswerService {
 
         if (response == null
                 || response.getResult() == null
-                || response.getResult().getOutput() == null) {
+                || response.getResult()
+                .getOutput() == null) {
+
             return "";
         }
 
@@ -284,6 +373,7 @@ public class WorkflowTextAnswerService {
 
         if (StringUtils.hasText(previous)
                 && current.startsWith(previous)) {
+
             return current.substring(
                     previous.length()
             );
@@ -293,17 +383,24 @@ public class WorkflowTextAnswerService {
     }
 
     /**
-     * 从Reactor异常包装中找回客户端断开标记。
+     * 从异常包装中查找客户端断开异常。
      */
-    private AgentClientDisconnectedException findClientDisconnected(Throwable throwable) {
+    private AgentClientDisconnectedException
+    findClientDisconnected(Throwable throwable) {
+
         Throwable current = throwable;
+
         while (current != null) {
-            if (current instanceof AgentClientDisconnectedException disconnected) {
+            if (current
+                    instanceof AgentClientDisconnectedException disconnected) {
+
                 return disconnected;
             }
+
             if (current.getCause() == current) {
                 break;
             }
+
             current = current.getCause();
         }
 
@@ -311,22 +408,31 @@ public class WorkflowTextAnswerService {
     }
 
     /**
-     * 判断模型流是否因用户主动终止而结束。
+     * 判断模型流是否被用户主动终止。
      */
-    private boolean isRunCancelled(Throwable throwable) {
+    private boolean isRunCancelled(
+            Throwable throwable) {
+
         if (Thread.currentThread().isInterrupted()) {
             return true;
         }
+
         Throwable current = throwable;
+
         while (current != null) {
-            if (current instanceof CancellationException || current instanceof InterruptedException) {
+            if (current instanceof CancellationException
+                    || current instanceof InterruptedException) {
+
                 return true;
             }
+
             if (current.getCause() == current) {
                 break;
             }
+
             current = current.getCause();
         }
+
         return false;
     }
 }

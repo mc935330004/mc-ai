@@ -29,6 +29,8 @@ import org.springframework.core.task.TaskRejectedException;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+import java.util.concurrent.CancellationException;
+import java.util.function.Consumer;
 
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
@@ -142,79 +144,74 @@ public class KnowledgeDocumentQueryService {
         return emitter;
     }
 
-    private void doStreamQuery( KnowledgeDocumentQueryRequest request,
-                                SseEmitter emitter,
-                                ModelCallContext modelCallContext,
-                                KnowledgeAccessPrincipal principal,
-                                AtomicBoolean active) {
+    /**
+     * 执行知识库流式查询。
+     *
+     * 复用统一查询逻辑，避免普通查询和SSE查询维护两套RAG代码。
+     */
+    private void doStreamQuery(KnowledgeDocumentQueryRequest request, SseEmitter emitter,
+                               ModelCallContext modelCallContext, KnowledgeAccessPrincipal principal, AtomicBoolean active) {
+
         if (!active.get()) {
             return;
         }
-        long start = System.currentTimeMillis();
-        String question = normalizeQuestion(request);
-        int topK = normalizeTopK(request);
-        double minScore = normalizeMinScore(request);
-        StringBuilder answerBuilder = new StringBuilder();
+
         try {
-            if (!StringUtils.hasText(question)) {
-                throw new BusinessException(ErrorCode.BAD_REQUEST, "问题不能为空");
-            }
-            List<Document> hits = retrieveHits(
+            KnowledgeDocumentQueryResponse response = query(
                     request,
-                    question,
-                    topK,
-                    minScore,
-                    principal
+                    modelCallContext,
+                    "",
+                    principal,
+                    content -> {
+                        if (!active.get()) {
+                            throw new CancellationException("知识库流式查询已终止");
+                        }
+
+                        sendEvent(
+                                emitter,
+                                "message",
+                                content
+                        );
+                    }
             );
-            if (hits.isEmpty()) {
-                saveQueryLog(principal,question, NO_RESULT_RESPONSE, topK, minScore, "NO_RESULT", null, start);
-                sendEvent(emitter, "message", NO_RESULT_RESPONSE);
-                sendEvent(emitter, "references", List.of());
-                sendEvent(emitter, "done", "[DONE]");
-                completeStream(emitter, active);
+
+            if (!active.get()) {
                 return;
             }
 
-            trackedChatClientService.stream(
-                            modelCallContext,
-                            buildSystemPrompt(),
-                            buildUserPrompt(question, buildContext(hits), ""))
-                    .map(this::extractStreamContent)
-                    .filter(StringUtils::hasText)
-                    .doOnNext(content -> {
-                        if (StringUtils.hasText(content)) {
-                            answerBuilder.append(content);
-                            sendEvent(emitter, "message", content);
-                        }
-                    }).doOnComplete(() -> {
-                        String answer = answerBuilder.toString().trim();
-                        KnowledgeQueryLog queryLog = saveQueryLog(
-                                principal,
-                                question,
-                                StringUtils.hasText(answer) ? answer : NO_RESULT_RESPONSE,
-                                topK,
-                                minScore,
-                                "SUCCESS",
-                                null,
-                                start
-                        );
-                        saveQueryReferences(queryLog.getId(), hits);
-                        sendEvent(emitter, "references", buildReferences(hits));
-                        sendEvent(emitter, "done", "[DONE]");
-                        completeStream(emitter, active);
-                    })
-                    .blockLast();
-        } catch (Exception e) {
+            sendEvent(
+                    emitter,
+                    "references",
+                    response.references()
+            );
+
+            sendEvent(
+                    emitter,
+                    "done",
+                    "[DONE]"
+            );
+
+            completeStream(
+                    emitter,
+                    active
+            );
+
+        } catch (Exception exception) {
             if (!active.compareAndSet(true, false)) {
                 log.debug(
-                        "知识库流式查询已取消，不再记录失败日志，errorType={}",
-                        e.getClass().getSimpleName()
+                        "知识库流式查询已取消，不再发送失败事件，errorType={}",
+                        exception.getClass().getSimpleName()
                 );
                 return;
             }
-            saveQueryLog(principal,question, null, topK, minScore, "FAILED", e.getMessage(), start);
-            sendEventQuietly(emitter, "error", truncate(e.getMessage()));
-            emitter.completeWithError(e);
+
+            sendEventQuietly(
+                    emitter,
+                    "error",
+                    truncate(exception.getMessage())
+            );
+
+            emitter.completeWithError(exception);
         }
     }
 
@@ -282,31 +279,55 @@ public class KnowledgeDocumentQueryService {
         );
     }
 
+
     /**
-     * 使用请求线程提前捕获的可信身份执行知识库问答。
-     *
-     * 该入口供Agent异步编排调用，避免在线程池中读取HttpServletRequest。
+     * 使用可信身份执行知识库问答。
      */
     public KnowledgeDocumentQueryResponse query(
             KnowledgeDocumentQueryRequest request,
             ModelCallContext modelCallContext,
             String conversationMemory,
             KnowledgeAccessPrincipal principal) {
+        return query(
+                request,
+                modelCallContext,
+                conversationMemory,
+                principal,
+                null
+        );
+    }
+
+    /**
+     * 使用可信身份执行可增量输出的知识库问答。
+     *
+     * deltaConsumer不为空时，每获得一段模型内容就立即通知调用方。
+     * 方法最终仍返回完整回答和引用，兼容现有普通查询调用。
+     */
+    public KnowledgeDocumentQueryResponse query(KnowledgeDocumentQueryRequest request,
+                                                ModelCallContext modelCallContext, String conversationMemory, KnowledgeAccessPrincipal principal, Consumer<String> deltaConsumer) {
 
         validatePrincipal(principal);
+
+
         long start = System.currentTimeMillis();
         String question = normalizeQuestion(request);
         int topK = normalizeTopK(request);
         double minScore = normalizeMinScore(request);
+
         try {
             if (!StringUtils.hasText(question)) {
-                throw new BusinessException( ErrorCode.BAD_REQUEST, "问题不能为空" );
+                throw new BusinessException(
+                        ErrorCode.BAD_REQUEST,
+                        "问题不能为空"
+                );
             }
-            //  上下文追问使用历史信息补全检索语义，向量模型仍使用固定配置。
+
+            // 只有存在上下文指代时才使用会话记忆补全检索问题
             String retrievalQuestion = buildRetrievalQuestion(
                     question,
                     conversationMemory
             );
+
             List<Document> hits = retrieveHits(
                     request,
                     retrievalQuestion,
@@ -316,49 +337,111 @@ public class KnowledgeDocumentQueryService {
             );
 
             if (hits.isEmpty()) {
-                saveQueryLog(principal, question, NO_RESULT_RESPONSE, topK,
-                        minScore, "NO_RESULT",
-                        null, start);
-                return new KnowledgeDocumentQueryResponse(NO_RESULT_RESPONSE, List.of());
+                saveQueryLog(
+                        principal,
+                        question,
+                        NO_RESULT_RESPONSE,
+                        topK,
+                        minScore,
+                        "NO_RESULT",
+                        null,
+                        start
+                );
+
+                if (deltaConsumer != null) {
+                    deltaConsumer.accept(NO_RESULT_RESPONSE);
+                }
+
+                return new KnowledgeDocumentQueryResponse(
+                        NO_RESULT_RESPONSE,
+                        List.of()
+                );
             }
 
-            ChatResponse response = trackedChatClientService.call(
-                    modelCallContext,
-                    buildSystemPrompt(),
-                    buildUserPrompt(
-                            question,
-                            buildContext(hits),
-                            conversationMemory
-                    )
-            );
+            StringBuilder answerBuilder = new StringBuilder();
 
-            String answer = response.getResult().getOutput().getText();
-            KnowledgeQueryLog queryLog = saveQueryLog(principal,question,
+            trackedChatClientService.stream(
+                            modelCallContext,
+                            buildSystemPrompt(),
+                            buildUserPrompt(
+                                    question,
+                                    buildContext(hits),
+                                    conversationMemory
+                            )
+                    )
+                    .map(this::extractStreamContent)
+                    .filter(StringUtils::hasText)
+                    .doOnNext(content -> {
+                        String delta = normalizeModelDelta(
+                                content,
+                                answerBuilder
+                        );
+
+                        if (!StringUtils.hasText(delta)) {
+                            return;
+                        }
+
+                        answerBuilder.append(delta);
+
+                        if (deltaConsumer != null) {
+                            deltaConsumer.accept(delta);
+                        }
+                    })
+                    .blockLast();
+
+            String answer = answerBuilder.toString().trim();
+
+            if (!StringUtils.hasText(answer)) {
+                answer = NO_RESULT_RESPONSE;
+
+                if (deltaConsumer != null) {
+                    deltaConsumer.accept(answer);
+                }
+            }
+
+            KnowledgeQueryLog queryLog = saveQueryLog(
+                    principal,
+                    question,
                     answer,
                     topK,
                     minScore,
                     "SUCCESS",
                     null,
-                    start );
+                    start
+            );
 
-            saveQueryReferences(queryLog.getId(), hits);
+            saveQueryReferences(
+                    queryLog.getId(),
+                    hits
+            );
 
             return new KnowledgeDocumentQueryResponse(
-                    StringUtils.hasText(answer)
-                            ? answer.trim()
-                            : NO_RESULT_RESPONSE,
-                    buildReferences(hits) );
+                    answer,
+                    buildReferences(hits)
+            );
+
         } catch (Exception exception) {
-            saveQueryLog(principal,question,
-                    null,
-                    topK,
-                    minScore,
-                    "FAILED",
-                    exception.getMessage(),
-                    start );
+            /*
+             * 用户主动终止或线程中断不记录成模型调用失败，
+             * 避免调用监控产生错误的失败数据。
+             */
+            if (!isQueryCancelled(exception)) {
+                saveQueryLog(
+                        principal,
+                        question,
+                        null,
+                        topK,
+                        minScore,
+                        "FAILED",
+                        exception.getMessage(),
+                        start
+                );
+            }
+
             throw exception;
         }
     }
+
     /**
      *  为包含代词或省略信息的追问补充最近会话，
      * 这里只改变检索文本，不切换或动态配置向量模型。
@@ -727,5 +810,50 @@ public class KnowledgeDocumentQueryService {
         return response.getResult()
                 .getOutput()
                 .getText();
+    }
+
+    /**
+     * 兼容模型返回增量文本或累计文本。
+     */
+    private String normalizeModelDelta(
+            String current,
+            StringBuilder accumulatedAnswer) {
+
+        if (!StringUtils.hasText(current)) {
+            return "";
+        }
+
+        String previous = accumulatedAnswer.toString();
+
+        if (StringUtils.hasText(previous)
+                && current.startsWith(previous)) {
+
+            return current.substring(
+                    previous.length()
+            );
+        }
+
+        return current;
+    }
+
+    /**
+     * 判断知识库查询是否由用户主动终止。
+     */
+    private boolean isQueryCancelled(Throwable throwable) {
+        if (Thread.currentThread().isInterrupted()) {
+            return true;
+        }
+        Throwable current = throwable;
+
+        while (current != null) {
+            if (current instanceof CancellationException || current instanceof InterruptedException) {
+                return true;
+            }
+            if (current.getCause() == current) {
+                break;
+            }
+            current = current.getCause();
+        }
+        return false;
     }
 }

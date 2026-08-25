@@ -115,24 +115,10 @@ app:
     stream:
       # 单次SSE连接最长保留3分钟
       timeout-ms: 180000
-      # 最终Markdown每个增量事件建议字符数
-      chunk-size: 200
-      # 默认保持v1，前端适配完成后再调整为2
-      default-version: 1
-      # v2必须发送最终快照，用于前端完整性修复
-      snapshot-enabled: true
       # Agent异步执行线程池配置
       executor-core-size: 4
       executor-max-size: 16
       executor-queue-capacity: 200
-      # SSE v2总开关，false时全部回退v1
-      v2-enabled: true
-      # v2灰度比例，生产环境从5开始
-      v2-rollout-percentage: 100
-      # 强制进入v2的用户，使用英文逗号分隔
-      v2-allow-users: ""
-      # 强制回退v1的用户
-      v2-deny-users: ""
     # 模型API Key使用独立主密钥加密，不能和SSO会话密钥共用。
     model-security:
       # 当前AES-256主密钥，只允许通过环境变量提供，禁止设置代码默认值。

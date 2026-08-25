@@ -75,14 +75,6 @@ public class AgentRequest {
     @JsonIgnore
     private KnowledgeAccessPrincipal knowledgeAccessPrincipal;
 
-    /**
-     * SSE 协议版本。
-     *
-     * 该字段只能由 Controller 根据请求头写入，
-     * 不允许客户端通过 JSON 请求体直接伪造。
-     */
-    @JsonIgnore
-    private Integer streamVersion;
 
     /**
      *  前端选择的大模型编码，只允许后端配置中的模型。

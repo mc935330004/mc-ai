@@ -7,7 +7,6 @@ import org.example.ai.agent.chat.dto.ChatSessionModelDTO;
 import org.example.ai.agent.chat.entity.AgentRequest;
 import org.example.ai.agent.chat.service.AgentOrchestrator;
 import org.example.ai.agent.chat.service.AiChatSessionService;
-import org.example.ai.agent.chat.support.AgentStreamVersionResolver;
 import org.example.ai.agent.chat.vo.ChatMessageVO;
 import org.example.ai.agent.chat.vo.ChatModelVO;
 import org.example.ai.agent.chat.vo.ChatSessionVO;
@@ -27,39 +26,48 @@ public class AgentChatController {
 
     private final AgentOrchestrator agentOrchestrator;
     private final CurrentUserProvider currentUserProvider;
-    private final AgentStreamVersionResolver streamVersionResolver;
     private final AiChatSessionService aiChatSessionService;
     private final KnowledgeAccessContext knowledgeAccessContext;
     /**
-     * 流式聊天入口。
-     * 1：兼容旧前端。
-     * 2：使用新版增量SSE协议。
+     * 统一流式聊天入口。
+     *
+     * 后端只提供当前统一协议，
+     * 不再根据请求头切换旧版本。
      */
     @PostMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public SseEmitter streamChat(@Valid @RequestBody AgentRequest request,
-                                 @RequestHeader(value = "X-Agent-Stream-Version",required = false ) Integer streamVersion) {
-        // 忽略请求体中的 userId，只使用服务端解析出的登录用户
+    public SseEmitter streamChat( @Valid @RequestBody AgentRequest request) {
         // 用户身份只能从服务端认证上下文读取。
         String userId = currentUserProvider.getRequiredUserId();
         request.setUserId(userId);
-        // 用户身份与认证信息只能由服务端从请求头读取
+        // 认证信息只允许由服务端注入。
         request.setAuthorization(currentUserProvider.getRequiredAuthorization());
         /*
-         * Agent主体会在线程池中异步执行，
-         * 必须在当前请求线程提前捕获可信租户和部门身份。
+         * Agent会在线程池中执行，
+         * 必须提前保存可信租户和部门身份。
          */
-        request.setKnowledgeAccessPrincipal( knowledgeAccessContext.getCurrentPrincipal());
-       //  模型编码由后端严格校验，未配置或已停用时拒绝请求。
-        String modelCode = aiChatSessionService.resolveModelCode(userId, request.getConversationId(), request.getModelCode());
+        request.setKnowledgeAccessPrincipal(knowledgeAccessContext.getCurrentPrincipal());
+
+        // 模型编码必须来自后台已经启用的模型配置。
+        String modelCode = aiChatSessionService.resolveModelCode(
+                        userId,
+                        request.getConversationId(),
+                        request.getModelCode()
+                );
         request.setModelCode(modelCode);
-        //  只取最近少量历史，避免提示词无限增长。
-        request.setConversationMemory(aiChatSessionService.buildMemory(userId, request.getConversationId()));
-        //  先保存用户问题，AI回答完成后再保存助手回答。
-        aiChatSessionService.saveUserMessage(userId, request.getConversationId(), request.getUserQuestion(), modelCode);
-
-        int resolvedVersion = streamVersionResolver.resolve( streamVersion,userId );
-
-        request.setStreamVersion(resolvedVersion);
+        // 只注入受控数量的历史上下文。
+        request.setConversationMemory(
+                aiChatSessionService.buildMemory(
+                        userId,
+                        request.getConversationId()
+                )
+        );
+        // 先保存用户问题，助手回答完成后再保存回答。
+        aiChatSessionService.saveUserMessage(
+                userId,
+                request.getConversationId(),
+                request.getUserQuestion(),
+                modelCode
+        );
         return agentOrchestrator.chat(request);
     }
 

@@ -31,31 +31,6 @@ public enum AgentStreamEventType {
      * 已提取核心业务事实。
      */
     FACTS,
-
-    /**
-     * 最终回答即将开始。
-     */
-    ANSWER_START,
-
-    /**
-     * 最终回答增量内容。
-     */
-    ANSWER_DELTA,
-
-    /**
-     * 最终完整 Markdown 快照。
-     */
-    ANSWER_SNAPSHOT,
-
-    /**
-     * 最终回答发送完成。
-     */
-    ANSWER_DONE,
-
-    /**
-     * RAG 引用来源。
-     */
-    REFERENCES,
     /**
      * WRITE参数收集表单。
      */

@@ -19,7 +19,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 @Component
 public class AgentMetrics {
-
+    private static final String STREAM_VERSION = "v3";
     private final MeterRegistry meterRegistry;
 
     /**
@@ -37,67 +37,60 @@ public class AgentMetrics {
     }
 
     /**
-     * 记录 SSE 连接建立。
+     * 记录SSE连接建立。
      */
-    public void recordSseOpened(int protocolVersion) {
+    public void recordSseOpened() {
         activeSseConnections.incrementAndGet();
         Counter.builder("agent.sse.connections")
                 .description("Agent SSE连接数量")
                 .tag("action", "opened")
-                .tag("version", version(protocolVersion))
+                .tag("version", STREAM_VERSION)
                 .register(meterRegistry)
                 .increment();
     }
 
     /**
-     * 记录 SSE 连接关闭。
+     * 记录SSE连接关闭。
      */
-    public void recordSseClosed( int protocolVersion,String reason ) {
+    public void recordSseClosed(String reason) {
         activeSseConnections.updateAndGet(
                 value -> Math.max(value - 1, 0)
         );
-
         Counter.builder("agent.sse.connections")
                 .tag("action", "closed")
-                .tag("version", version(protocolVersion))
+                .tag("version", STREAM_VERSION)
                 .tag("reason", safeTag(reason))
                 .register(meterRegistry)
                 .increment();
     }
 
     /**
-     * 记录 SSE 事件数量。
+     * 记录SSE事件。
      */
-    public void recordSseEvent( int protocolVersion, String eventType) {
+    public void recordSseEvent(String eventType) {
         Counter.builder("agent.sse.events")
                 .description("Agent SSE事件数量")
-                .tag("version", version(protocolVersion))
+                .tag("version", STREAM_VERSION)
                 .tag("type", safeTag(eventType))
                 .register(meterRegistry)
                 .increment();
     }
 
     /**
-     * 记录最终回答字符数。
-     */
-    public void recordAnswerLength(int protocolVersion,int contentLength) {
-        DistributionSummary.builder("agent.answer.length")
-                .description("Agent最终回答字符数")
-                .baseUnit("characters")
-                .tag("version", version(protocolVersion))
-                .register(meterRegistry)
-                .record(Math.max(contentLength, 0));
-    }
-
-    /**
      * 记录首个有效内容耗时。
      */
-    public void recordFirstContentDuration(int protocolVersion,long durationMs) {
-        Timer.builder("agent.answer.first.content.duration")
+    public void recordFirstContentDuration(long durationMs) {
+
+        Timer.builder(
+                        "agent.answer.first.content.duration"
+                )
                 .description("Agent首个有效内容耗时")
-                .tag("version", version(protocolVersion))
+                .tag("version", STREAM_VERSION)
                 .register(meterRegistry)
-                .record(Math.max(durationMs, 0),TimeUnit.MILLISECONDS);
+                .record(
+                        Math.max(durationMs, 0),
+                        TimeUnit.MILLISECONDS
+                );
     }
 
     /**
@@ -194,10 +187,6 @@ public class AgentMetrics {
                         Math.max(durationMs, 0),
                         TimeUnit.MILLISECONDS
                 );
-    }
-
-    private String version(int protocolVersion) {
-        return protocolVersion == 2 ? "v2" : "v1";
     }
 
     private String safeTag(String value) {
