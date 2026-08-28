@@ -5,42 +5,29 @@ import org.springframework.util.StringUtils;
 
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Future;
 
 /**
- * 保存当前进程内正在执行的Agent聊天任务。
- *
- * 只负责运行中任务协调，
- * 不保存聊天内容和业务数据。
+ * 管理当前进程内的活动聊天任务，不保存业务数据。
  */
 @Component
 public class ActiveAgentRunRegistry {
 
     private final ConcurrentHashMap<String, ActiveRun> activeRuns = new ConcurrentHashMap<>();
-
     /**
-     * 注册正在执行的聊天任务。
+     * 注册会话，任务尚未开始执行时也能接收取消请求。
      */
-    public void register(String runId, String userId, String conversationId, Future<?> task) {
-
+    public void register(String runId, String userId, String conversationId, AgentStreamSession stream) {
         if (!StringUtils.hasText(runId)
                 || !StringUtils.hasText(userId)
                 || !StringUtils.hasText(conversationId)
-                || task == null) {
-            throw new IllegalArgumentException(
-                    "活动任务注册参数不能为空"
-            );
+                || stream == null) {
+            throw new IllegalArgumentException("活动任务注册参数不能为空");
         }
 
-        ActiveRun previous =
-                activeRuns.putIfAbsent(
-                        runId,
-                        new ActiveRun(
-                                userId,
-                                conversationId,
-                                task
-                        )
-                );
+        ActiveRun previous = activeRuns.putIfAbsent(
+                runId,
+                new ActiveRun(userId, conversationId, stream)
+        );
 
         if (previous != null) {
             throw new IllegalStateException(
@@ -50,52 +37,44 @@ public class ActiveAgentRunRegistry {
     }
 
     /**
-     * 终止当前用户指定会话中的任务。
-     *
-     * userId、conversationId、runId必须同时匹配，
-     * 禁止只根据runId终止其他用户的任务。
+     * 校验任务归属后申请取消。
+     * 返回 true 表示已接受取消，不表示取消快照已经保存完成。
      */
     public boolean cancel(
             String runId,
             String userId,
             String conversationId) {
 
-        ActiveRun activeRun =
-                activeRuns.get(runId);
-
-        if (activeRun == null) {
+        if (!StringUtils.hasText(runId)) {
             return false;
         }
 
-        if (!Objects.equals(
-                activeRun.userId(),
-                userId
-        )) {
+        ActiveRun activeRun = activeRuns.get(runId);
+
+        if (activeRun == null
+                || !Objects.equals(activeRun.userId(), userId)
+                || !Objects.equals(activeRun.conversationId(), conversationId)) {
             return false;
         }
 
-        if (!Objects.equals(
-                activeRun.conversationId(),
-                conversationId
-        )) {
-            return false;
-        }
-
-        /*
-         * 先以CAS方式移除，保证同一个任务只能成功取消一次。
-         */
-        if (!activeRuns.remove(
-                runId,
-                activeRun
-        )) {
-            return false;
-        }
-
-        return activeRun.task().cancel(true);
+        return activeRun.stream().requestCancellation();
     }
 
     /**
-     * 聊天任务正常完成、失败或取消后清理。
+     * 判断任务是否仍在当前进程运行，同时校验用户和会话归属。
+     */
+    public boolean isActive(String runId, String userId, String conversationId) {
+        if (!StringUtils.hasText(runId)) {
+            return false;
+        }
+        ActiveRun activeRun = activeRuns.get(runId);
+        return activeRun != null
+                && Objects.equals(activeRun.userId(), userId)
+                && Objects.equals(activeRun.conversationId(), conversationId);
+    }
+
+    /**
+     * 仅在任务执行结束或提交失败时移除。
      */
     public void remove(String runId) {
         if (StringUtils.hasText(runId)) {
@@ -106,6 +85,6 @@ public class ActiveAgentRunRegistry {
     private record ActiveRun(
             String userId,
             String conversationId,
-            Future<?> task) {
+            AgentStreamSession stream) {
     }
 }

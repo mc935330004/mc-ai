@@ -6,13 +6,13 @@ import org.example.ai.agent.chat.entity.AgentRequest;
 import org.example.ai.agent.chat.memory.model.BusinessConversationState;
 import org.example.ai.agent.plan.RoutePlan;
 import org.example.ai.agent.tool.ToolResult;
-import org.example.ai.agent.workflow.answer.text.WorkflowTextFacts;
 import org.example.ai.agent.workflow.plan.WorkflowPlan;
 import org.example.ai.agent.workflow.runtime.WorkflowExecutionOutcome;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 import org.example.ai.agent.router.IntentResult;
 import org.example.ai.agent.plan.DynamicCapabilityPlan;
+import org.example.ai.agent.answer.text.BusinessTextFacts;
 
 import java.time.LocalDateTime;
 import java.util.*;
@@ -114,7 +114,7 @@ public class ConversationStateRecorder {
             WorkflowExecutionOutcome outcome,
             String runId,
             String artifactId,
-            WorkflowTextFacts facts,
+            BusinessTextFacts facts,
             String presentationMode) {
 
         if (outcome == null
@@ -221,7 +221,7 @@ public class ConversationStateRecorder {
      * 当前结果无法提取时才保留同一查询范围的旧顺序。
      */
     private List<String> resolveDisplayObjectIds(
-            WorkflowTextFacts facts,
+            BusinessTextFacts facts,
             List<String> inputObjectIds,
             BusinessConversationState previous,
             boolean sameScope) {

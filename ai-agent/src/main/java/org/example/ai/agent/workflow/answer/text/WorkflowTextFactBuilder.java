@@ -3,475 +3,409 @@ package org.example.ai.agent.workflow.answer.text;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
-import org.example.ai.agent.capability.invocation.runtime.SimpleJsonPathReader;
-import org.example.ai.agent.graph.model.risk.WorkflowRiskRuleSpec;
+import lombok.extern.slf4j.Slf4j;
+import org.example.ai.agent.answer.extractor.DictionaryFactExtractor;
+import org.example.ai.agent.answer.model.AnswerFact;
+import org.example.ai.agent.answer.model.FactValueCandidate;
+import org.example.ai.agent.answer.model.UnifiedFactSet;
+import org.example.ai.agent.answer.text.BusinessTextFacts;
+import org.example.ai.agent.answer.text.SafeModelInputBuilder;
+import org.example.ai.agent.common.enums.FactSourceType;
+import org.example.ai.agent.tool.FieldMeta;
 import org.example.ai.agent.workflow.answer.WorkflowAnswerFieldContext;
 import org.example.ai.agent.workflow.answer.WorkflowAnswerModelPayload;
 import org.example.ai.agent.workflow.answer.WorkflowAnswerPreparation;
-import org.springframework.stereotype.Service;
-import org.springframework.util.StringUtils;
-import lombok.extern.slf4j.Slf4j;
+import org.example.ai.agent.workflow.answer.calculation.WorkflowCalculationFactService;
 import org.example.ai.agent.workflow.answer.risk.WorkflowRiskEvaluation;
 import org.example.ai.agent.workflow.answer.risk.WorkflowRiskRuleEvaluator;
 import org.example.ai.agent.workflow.answer.trace.WorkflowAnswerTraceRecorder;
+import org.springframework.stereotype.Service;
+import org.springframework.util.StringUtils;
 
-import java.util.*;
-import java.math.BigDecimal;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 
 /**
- * 从安全工作流结果中生成确定性事实。
+ * 将工作流嵌套结果转换为统一事实集合。
  *
- * 大模型不负责统计金额，也不负责决定业务事实。
+ * 本类只负责：
+ * 1. 定位字段字典对应的数据；
+ * 2. 生成统一事实；
+ * 3. 执行风险规则并生成规则事实；
+ * 4. 准备安全模型输入。
+ *
+ * 不负责生成 Markdown、HTML、统计结论或页面布局。
  */
 @Slf4j
 @Service
 @RequiredArgsConstructor
 public class WorkflowTextFactBuilder {
 
-    private static final int MAX_CORE_FACTS = 8;
-    private static final int MAX_AGGREGATES = 6;
-
+    private static final Set<String> FOREACH_META_FIELDS =
+            Set.of(
+                    "index",
+                    "status",
+                    "errorCode",
+                    "errorMessage",
+                    "durationMs",
+                    "success"
+            );
+    private final WorkflowCalculationFactService calculationFactService;
     private final ObjectMapper objectMapper;
-    private final SimpleJsonPathReader jsonPathReader;
+    private final DictionaryFactExtractor factExtractor;
     private final WorkflowRiskRuleEvaluator riskRuleEvaluator;
     private final WorkflowAnswerTraceRecorder traceRecorder;
-    /**
-     * FOREACH 单项执行结果中的系统字段。
-     * 当业务字段也叫 status 时，只排除 items[].status，
-     * 不排除 items[].item.status。
-     */
-    private static final Set<String> FOREACH_ITEM_META_FIELDS = Set.of(
-            "index",
-            "status",
-            "errorCode",
-            "errorMessage",
-            "durationMs",
-            "success"
-    );
+    private final SafeModelInputBuilder safeModelInputBuilder;
 
     /**
-     * 构建普通文字回答所需的可信事实。
+     * 构建工作流统一事实上下文。
      */
-    public WorkflowTextFacts build(
-            WorkflowAnswerPreparation preparation) {
-
-        if (preparation == null) {
-            throw new IllegalArgumentException(
-                    "工作流回答准备结果不能为空"
-            );
+    public BusinessTextFacts build(WorkflowAnswerPreparation preparation) {
+        if (preparation == null || preparation.internalPayload() == null) {
+            throw new IllegalArgumentException("工作流回答准备结果不能为空");
         }
 
-        WorkflowAnswerModelPayload payload =
-                preparation.modelPayload();
+        WorkflowAnswerModelPayload payload = preparation.internalPayload();
+        List<WorkflowAnswerFieldContext> fields =
+                preparation.fieldPolicy() == null
+                        ? List.of()
+                        : preparation.fieldPolicy().internalFields();
 
-        JsonNode resultRoot =
-                objectMapper.valueToTree(
-                        payload.result()
-                );
-
-        List<WorkflowAnswerFieldContext> visibleFields =
-                preparation.fieldPolicy()
-                        .visibleFields();
-
-        /*
-         * 一次性展开安全结果中的全部叶子字段。
-         * 支持普通结果、MERGE 和多层 FOREACH。
-         */
-        List<LeafValue> leaves =
-                new ArrayList<>();
-
-        collectLeafValues(
-                resultRoot,
-                new ArrayList<>(),
-                leaves
+        Set<String> displayObjectIds = new LinkedHashSet<>();
+        UnifiedFactSet extracted = extractBusinessFields(
+                objectMapper.valueToTree(payload.result()),
+                fields,
+                displayObjectIds
         );
 
-        /*
-         * 只有机器字段名在字段字典中唯一时，
-         * 才允许使用字段名进行路径回退。
-         */
-        Map<String, Integer> fieldNameCounts =
-                new LinkedHashMap<>();
+        // 普通查询继续执行原有公式计算和风险规则。
+        List<AnswerFact> calculatedFacts =
+                calculationFactService.calculate(preparation);
+        RiskResult riskResult = evaluateRisk(preparation);
 
-        for (WorkflowAnswerFieldContext field :
-                visibleFields) {
+        List<AnswerFact> allFacts = new ArrayList<>(extracted.facts());
+        allFacts.addAll(calculatedFacts);
+        allFacts.addAll(riskResult.facts());
 
-            if (!StringUtils.hasText(
-                    field.fieldName())) {
+        long totalCount = resolveRecordCount(payload, extracted);
+        boolean calculationComplete =
+                calculatedFacts.stream().noneMatch(AnswerFact::isMissing);
+        boolean dataComplete = resolveDataComplete(payload)
+                && extracted.dataComplete()
+                && calculationComplete;
+
+        UnifiedFactSet factSet =
+                new UnifiedFactSet(allFacts, dataComplete, totalCount);
+        Map<String, Object> safeModelInput =
+                buildSafeModelInput(factSet, riskResult);
+
+        return new BusinessTextFacts(
+                factSet,
+                List.copyOf(displayObjectIds),
+                riskResult.riskObjectIds(),
+                riskResult.unknownObjectIds(),
+                safeModelInput
+        );
+    }
+
+    /**
+     * 从已校验的快照恢复业务事实。
+     * 不重新查询业务系统，也不重新执行公式和风险规则。
+     */
+    public UnifiedFactSet buildSnapshot(
+            WorkflowAnswerModelPayload payload,
+            List<WorkflowAnswerFieldContext> fields,
+            boolean sourceComplete) {
+
+        if (payload == null) {
+            throw new IllegalArgumentException("快照业务数据不能为空");
+        }
+
+        UnifiedFactSet extracted = extractBusinessFields(
+                objectMapper.valueToTree(payload.result()),
+                fields == null ? List.of() : fields,
+                new LinkedHashSet<>()
+        );
+
+        boolean dataComplete = sourceComplete
+                && resolveDataComplete(payload)
+                && extracted.dataComplete();
+
+        return new UnifiedFactSet(
+                extracted.facts(),
+                dataComplete,
+                resolveRecordCount(payload, extracted)
+        );
+    }
+
+    /**
+     * 提取真实业务字段，并为已有记录补充必答字段的缺失标记。
+     */
+    private UnifiedFactSet extractBusinessFields(JsonNode resultRoot, List<WorkflowAnswerFieldContext> fields, Set<String> displayObjectIds) {
+        List<LeafValue> leaves = new ArrayList<>();
+        List<LeafValue> objects = new ArrayList<>();
+        collectLeaves(resultRoot, List.of(), "$", null, leaves, objects);
+
+        Map<String, Integer> fieldNameCounts = countFieldNames(fields);
+        List<FactValueCandidate> candidates = new ArrayList<>();
+
+        Set<String> recordPaths = new LinkedHashSet<>();
+        boolean scalarRecord = false;
+        for (WorkflowAnswerFieldContext field : fields) {
+            if (field == null || !StringUtils.hasText(field.fieldName())) {
+                continue;
+            }
+            FieldMeta fieldMeta = toFieldMeta(field);
+            List<String> expectedPath = parseFieldPath(field.fieldPath());
+            List<LeafValue> matches;
+            if (field.requiredOutput()) {
+                // 从真实父对象读取，可以识别“这条记录缺少该字段”。
+                matches = findRequiredValues(objects, field);
+
+                if (matches.isEmpty()) {
+                    // 必答字段只允许完整路径匹配，不猜测其它集合的同名字段。
+                    matches = leaves.stream()
+                            .filter(leaf ->
+                                    endsWith(leaf.pathTokens(), expectedPath))
+                            .toList();
+                }
+            } else {
+                matches = findMatches(leaves, field, fieldNameCounts);
+            }
+
+            if (matches.isEmpty()) {
+                // 非集合字段保留缺失事实，但不能把它计算为一条真实记录。
+                if (field.requiredOutput() && !expectedPath.contains("[]")) {
+                    candidates.add(new FactValueCandidate(
+                            field.capabilityCode(),
+                            fieldMeta,
+                            null,
+                            null,
+                            null,
+                            true,
+                            "PATH_NOT_FOUND",
+                            FactSourceType.RAW
+                    ));
+                }
                 continue;
             }
 
-            fieldNameCounts.merge(
+            for (LeafValue match : matches) {
+                JsonNode value = match.value();
+                String missingReason = null;
+
+                if (value == null || value.isMissingNode()) {
+                    missingReason = "PATH_NOT_FOUND";
+                } else if (value.isNull()) {
+                    missingReason = "VALUE_NULL";
+                } else if (value.isContainerNode()) {
+                    // 字段只接受标量，不能把整个对象或数组作为展示值。
+                    missingReason = "VALUE_NOT_SCALAR";
+                }
+
+                boolean missing = missingReason != null;
+
+                if (missing && !field.requiredOutput()) {
+                    continue;
+                }
+
+                candidates.add(new FactValueCandidate(
+                        field.capabilityCode(),
+                        fieldMeta,
+                        value,
+                        match.recordPath(),
+                        normalizeCollectionPath(match.recordPath()),
+                        missing,
+                        missingReason,
+                        FactSourceType.RAW
+                ));
+
+                // 只统计绑定到真实对象的记录，缺失字段本身不制造记录。
+                if (StringUtils.hasText(match.recordPath())) {
+                    recordPaths.add(match.recordPath());
+                } else {
+                    scalarRecord = true;
+                }
+
+                if (!missing && isProjectIdentifier(field)) {
+                    addObjectId(displayObjectIds, value);
+                }
+            }
+        }
+
+        UnifiedFactSet extracted = factExtractor.extractCandidates(candidates);
+        long actualCount = recordPaths.isEmpty() && scalarRecord
+                ? 1
+                : recordPaths.size();
+
+        return new UnifiedFactSet(
+                extracted.facts(),
+                extracted.dataComplete(),
+                Math.max(extracted.totalCount(), actualCount)
+        );
+    }
+
+    /**
+     * 在已存在的父对象中读取必答字段，保留每条记录的路径。
+     */
+    private List<LeafValue> findRequiredValues(List<LeafValue> objects, WorkflowAnswerFieldContext field) {
+        List<String> path = parseFieldPath(field.fieldPath());
+
+        if (path.isEmpty() || "[]".equals(path.get(path.size() - 1))) {
+            return List.of();
+        }
+        String childName = path.get(path.size() - 1);
+        List<String> parentPath = path.subList(0, path.size() - 1);
+
+        // 根字段交给原有叶子路径匹配，避免误认工作流外层包装对象。
+        if (parentPath.isEmpty()) {
+            return List.of();
+        }
+        List<LeafValue> values = new ArrayList<>();
+        for (LeafValue parent : objects) {
+            if (!endsWith(parent.pathTokens(), parentPath)) {
+                continue;
+            }
+            List<String> actualTokens = new ArrayList<>(parent.pathTokens());
+            actualTokens.add(childName);
+            values.add(new LeafValue(
+                    List.copyOf(actualTokens),
+                    parent.value().path(childName),
+                    parent.actualPath() + "." + childName,
+                    parent.recordPath()
+            ));
+        }
+
+        return values;
+    }
+
+    /**
+     * 统计机器字段名在当前工作流中出现的次数。
+     */
+    private Map<String, Integer> countFieldNames(
+            List<WorkflowAnswerFieldContext> fields) {
+
+        Map<String, Integer> counts =
+                new LinkedHashMap<>();
+
+        for (WorkflowAnswerFieldContext field : fields) {
+
+            if (field == null
+                    || !StringUtils.hasText(
+                    field.fieldName())) {
+
+                continue;
+            }
+
+            counts.merge(
                     field.fieldName().trim(),
                     1,
                     Integer::sum
             );
         }
 
-        Map<String, String> coreFacts =
-                new LinkedHashMap<>();
-
-        Map<String, String> aggregates =
-                new LinkedHashMap<>();
-
-        Set<String> displayObjectIds =
-                new LinkedHashSet<>();
-
-        int observedValueCount = 0;
-
-        for (WorkflowAnswerFieldContext field :
-                visibleFields) {
-
-            if (!StringUtils.hasText(
-                    field.fieldName())) {
-                continue;
-            }
-
-            String fieldName =
-                    field.fieldName().trim();
-
-            List<JsonNode> values =
-                    readFieldValues(
-                            leaves,
-                            field,
-                            fieldNameCounts.getOrDefault(
-                                    fieldName,
-                                    0
-                            )
-                    );
-
-            if (values.isEmpty()) {
-                continue;
-            }
-
-            List<String> distinctValues =
-                    distinctScalarValues(values);
-
-            observedValueCount =
-                    Math.max(
-                            observedValueCount,
-                            distinctValues.size()
-                    );
-
-            if (isProjectIdentifier(field)) {
-                displayObjectIds.addAll(
-                        distinctValues
-                );
-            }
-
-            String label =
-                    resolveLabel(field);
-
-            /*
-             * 金额等聚合字段只有在结果结构路径唯一时
-             * 才会进入这里，禁止重复累加列表和详情金额。
-             */
-            if (field.aggregatable()
-                    && aggregates.size()
-                    < MAX_AGGREGATES) {
-
-                BigDecimal sum =
-                        sumNumericValues(values);
-
-                if (sum != null) {
-                    aggregates.putIfAbsent(
-                            label,
-                            formatNumber(sum)
-                    );
-                }
-
-                continue;
-            }
-
-            /*
-             * 单项目或所有记录值一致时展示核心事实。
-             * 多项目不同项目名称不会全部堆到页面上。
-             */
-            if (distinctValues.size() == 1
-                    && coreFacts.size()
-                    < MAX_CORE_FACTS) {
-
-                coreFacts.putIfAbsent(
-                        label,
-                        distinctValues.get(0)
-                );
-            }
-        }
-
-        int recordCount =
-                resolveRecordCount(
-                        payload,
-                        observedValueCount
-                );
-
-        boolean dataComplete =
-                resolveDataComplete(payload);
-
-        RiskSummary riskSummary =
-                evaluateRisk(preparation);
-
-        String markdown =
-                renderMarkdown(
-                        preparation,
-                        recordCount,
-                        dataComplete,
-                        coreFacts,
-                        aggregates,
-                        riskSummary
-                );
-
-        Map<String, Object> safeModelInput =
-                new LinkedHashMap<>();
-
-        safeModelInput.put(
-                "queryStatus",
-                "SUCCESS"
-        );
-
-        if (recordCount > 0) {
-            safeModelInput.put(
-                    "recordCount",
-                    recordCount
-            );
-        }
-
-        safeModelInput.put(
-                "dataComplete",
-                dataComplete
-        );
-
-        safeModelInput.put(
-                "coreFacts",
-                coreFacts
-        );
-
-        safeModelInput.put(
-                "aggregates",
-                aggregates
-        );
-
-        /*
-         * 没有配置风险规则时不把空风险信息发送给模型，
-         * 避免模型把注意力放在用户没有询问的内容上。
-         */
-        if (riskSummary.configured()
-                || riskSummary.failed()) {
-
-            safeModelInput.put(
-                    "riskEvaluation",
-                    riskSummary.toSafeModelInput()
-            );
-        }
-
-        return new WorkflowTextFacts(
-                markdown,
-                List.copyOf(displayObjectIds),
-                riskSummary.riskObjectIds(),
-                riskSummary.unknownObjectIds(),
-                safeModelInput,
-                dataComplete
-        );
+        return counts;
     }
 
-
-
     /**
-     * 从完整安全结果中读取字段值。
+     * 优先使用完整字段路径后缀匹配。
      *
-     * 优先按照完整字段路径后缀匹配；
-     * 工作流改变外层结构后，仅在机器字段名唯一时回退。
+     * 完整路径没有匹配结果时，
+     * 只有机器字段名在工作流内唯一才允许回退。
      */
-    private List<JsonNode> readFieldValues(
+    private List<LeafValue> findMatches(
             List<LeafValue> leaves,
             WorkflowAnswerFieldContext field,
-            int fieldNameCount) {
+            Map<String, Integer> fieldNameCounts) {
 
-        List<String> targetTokens =
+        List<String> expectedPath =
                 parseFieldPath(
                         field.fieldPath()
                 );
 
         List<LeafValue> matches =
-                targetTokens.isEmpty()
-                        ? List.of()
-                        : leaves.stream()
-                        .filter(value ->
+                leaves.stream()
+                        .filter(leaf ->
                                 endsWith(
-                                        value.pathTokens(),
-                                        targetTokens
+                                        leaf.pathTokens(),
+                                        expectedPath
                                 )
                         )
                         .toList();
 
-        /*
-         * FOREACH 会改变字段的外层包装。
-         * 只有字段名在当前工作流字段字典中唯一时，
-         * 才允许使用机器字段名回退。
-         */
-        if (matches.isEmpty()
-                && fieldNameCount == 1
-                && StringUtils.hasText(
-                field.fieldName())) {
-
-            String fieldName =
-                    field.fieldName().trim();
-
-            matches =
-                    leaves.stream()
-                            .filter(value ->
-                                    !value.pathTokens()
-                                            .isEmpty()
-                            )
-                            .filter(value ->
-                                    fieldName.equals(
-                                            value.pathTokens()
-                                                    .get(
-                                                            value.pathTokens()
-                                                                    .size() - 1
-                                                    )
-                                    )
-                            )
-                            .filter(value ->
-                                    !isForEachMetaField(
-                                            value
-                                    )
-                            )
-                            .toList();
+        if (!matches.isEmpty()) {
+            return matches;
         }
 
-        if (matches.isEmpty()) {
-            return List.of();
-        }
+        String fieldName =
+                field.fieldName().trim();
 
-        Map<String, List<JsonNode>> valuesByPath =
-                new LinkedHashMap<>();
-
-        for (LeafValue match : matches) {
-
-            String pathKey =
-                    String.join(
-                            ".",
-                            match.pathTokens()
-                    );
-
-            valuesByPath
-                    .computeIfAbsent(
-                            pathKey,
-                            ignored ->
-                                    new ArrayList<>()
-                    )
-                    .add(
-                            match.value()
-                    );
-        }
-
-        /*
-         * 同一个金额字段出现在列表和详情两个区域时，
-         * 不能盲目累加，否则金额会翻倍。
-         */
-        if (field.aggregatable()
-                && valuesByPath.size() != 1) {
-
-            log.warn(
-                    "工作流文字回答跳过多路径聚合字段，"
-                            + "fieldName={}，pathCount={}",
-                    field.fieldName(),
-                    valuesByPath.size()
-            );
+        if (fieldNameCounts.getOrDefault(
+                fieldName,
+                0
+        ) != 1) {
 
             return List.of();
         }
 
-        List<JsonNode> result =
-                new ArrayList<>();
-
-        valuesByPath.values()
-                .forEach(result::addAll);
-
-        return List.copyOf(result);
-    }
-
-    /**
-     * 递归收集最终结果中的叶子字段。
-     *
-     * 数组下标统一表示为 []，
-     * 避免同一个字段因为数组下标不同被识别成不同路径。
-     */
-    private void collectLeafValues(
-            JsonNode node,
-            List<String> path,
-            List<LeafValue> result) {
-
-        if (node == null
-                || node.isMissingNode()) {
-            return;
-        }
-
-        if (node.isObject()) {
-
-            node.fields()
-                    .forEachRemaining(field -> {
-
-                        /*
-                         * displayData 是中文展示副本，
-                         * 文字回答只使用机器字段数据，
-                         * 避免同一业务值被重复采集。
-                         */
-                        if ("displayData".equals(
-                                field.getKey())) {
-                            return;
-                        }
-
-                        List<String> childPath =
-                                new ArrayList<>(path);
-
-                        childPath.add(
-                                field.getKey()
-                        );
-
-                        collectLeafValues(
-                                field.getValue(),
-                                childPath,
-                                result
-                        );
-                    });
-
-            return;
-        }
-
-        if (node.isArray()) {
-
-            for (JsonNode child : node) {
-
-                List<String> childPath =
-                        new ArrayList<>(path);
-
-                childPath.add("[]");
-
-                collectLeafValues(
-                        child,
-                        childPath,
-                        result
-                );
-            }
-
-            return;
-        }
-
-        result.add(
-                new LeafValue(
-                        List.copyOf(path),
-                        node
+        return leaves.stream()
+                .filter(leaf ->
+                        lastPathNameEquals(
+                                leaf,
+                                fieldName
+                        )
                 )
-        );
+                .filter(leaf ->
+                        !isForEachMetaField(leaf)
+                )
+                .toList();
     }
 
     /**
-     * 将字段字典路径转换为可比较的路径片段。
+     * 分别收集叶子字段和父对象，父对象仅用于定位缺失字段。
      */
-    private List<String> parseFieldPath(
-            String fieldPath) {
+    private void collectLeaves(JsonNode node, List<String> pathTokens, String currentPath,
+                               String latestRecordPath, List<LeafValue> result, List<LeafValue> objects) {
+        if (node == null || node.isMissingNode()) {
+            return;
+        }
+        if (node.isObject()) {
+            objects.add(new LeafValue(List.copyOf(pathTokens), node, currentPath, latestRecordPath));
+            var fields = node.fields();
+            while (fields.hasNext()) {
+                var entry = fields.next();
+                // 展示副本不重复进入业务事实。
+                if ("displayData".equals(entry.getKey())) {
+                    continue;
+                }
+                List<String> childTokens = new ArrayList<>(pathTokens);
+                childTokens.add(entry.getKey());
+                collectLeaves(entry.getValue(), childTokens, currentPath + "." + entry.getKey(), latestRecordPath, result, objects);
+            }
+            return;
+        }
+        if (node.isArray()) {
+            for (int index = 0; index < node.size(); index++) {
+                List<String> childTokens = new ArrayList<>(pathTokens);
+                childTokens.add("[]");
+                String recordPath = currentPath + "[" + index + "]";
+                collectLeaves(node.get(index), childTokens, recordPath, recordPath, result, objects);
+            }
+            return;
+        }
+        result.add(new LeafValue(List.copyOf(pathTokens), node, currentPath, latestRecordPath));
+    }
 
+    /**
+     * 将字段字典路径转换为统一路径片段。
+     */
+    private List<String> parseFieldPath(String fieldPath) {
         if (!StringUtils.hasText(fieldPath)) {
             return List.of();
         }
@@ -498,29 +432,29 @@ public class WorkflowTextFactBuilder {
                 continue;
             }
 
-            if (segment.endsWith("[]")) {
-
-                String name =
-                        segment.substring(
-                                0,
-                                segment.length() - 2
-                        );
-
-                if (StringUtils.hasText(name)) {
-                    result.add(name);
-                }
-
-                result.add("[]");
-            } else {
+            if (!segment.endsWith("[]")) {
                 result.add(segment);
+                continue;
             }
+
+            String fieldName =
+                    segment.substring(
+                            0,
+                            segment.length() - 2
+                    );
+
+            if (StringUtils.hasText(fieldName)) {
+                result.add(fieldName);
+            }
+
+            result.add("[]");
         }
 
         return List.copyOf(result);
     }
 
     /**
-     * 判断实际结果路径是否以字段字典路径结尾。
+     * 判断实际路径是否以字段配置路径结尾。
      */
     private boolean endsWith(
             List<String> actual,
@@ -529,6 +463,7 @@ public class WorkflowTextFactBuilder {
         if (expected.isEmpty()
                 || actual.size()
                 < expected.size()) {
+
             return false;
         }
 
@@ -541,10 +476,9 @@ public class WorkflowTextFactBuilder {
              index++) {
 
             if (!Objects.equals(
-                    actual.get(
-                            offset + index
-                    ),
+                    actual.get(offset + index),
                     expected.get(index))) {
+
                 return false;
             }
         }
@@ -553,16 +487,32 @@ public class WorkflowTextFactBuilder {
     }
 
     /**
-     * 排除 FOREACH 单项包装中的系统字段。
-     *
-     * 例如排除 items[].status，
-     * 但保留 items[].item.status。
+     * 判断叶子字段机器名称是否匹配。
+     */
+    private boolean lastPathNameEquals(
+            LeafValue leaf,
+            String fieldName) {
+
+        if (leaf.pathTokens().isEmpty()) {
+            return false;
+        }
+
+        String lastName =
+                leaf.pathTokens().get(
+                        leaf.pathTokens().size() - 1
+                );
+
+        return fieldName.equals(lastName);
+    }
+
+    /**
+     * 排除 FOREACH 单项包装的运行字段。
      */
     private boolean isForEachMetaField(
-            LeafValue value) {
+            LeafValue leaf) {
 
         List<String> path =
-                value.pathTokens();
+                leaf.pathTokens();
 
         if (path.size() < 3) {
             return false;
@@ -579,135 +529,44 @@ public class WorkflowTextFactBuilder {
                         path.get(size - 2)
                 );
 
-        if (!itemEnvelope) {
-            return false;
-        }
-
-        return FOREACH_ITEM_META_FIELDS.contains(
+        return itemEnvelope
+                && FOREACH_META_FIELDS.contains(
                 path.get(size - 1)
         );
     }
 
     /**
-     * 最终结果中的叶子字段及其结构路径。
+     * 将工作流字段上下文转换为统一字段元数据。
      */
-    private record LeafValue(
-            List<String> pathTokens,
-            JsonNode value) {
+    private FieldMeta toFieldMeta(WorkflowAnswerFieldContext field) {
+
+        return FieldMeta.builder()
+                .name(field.fieldName())
+                .fieldCode(field.fieldCode())
+                .cnName(field.label())
+                .path(field.fieldPath())
+                .type(field.fieldType())
+                .format(field.format())
+                .enumMappingJson(field.enumMappingJson())
+                .nullDisplayText(field.nullDisplayText())
+                .meaning(field.meaning())
+                .displayGroup(field.group())
+                .displayOrder(field.displayOrder())
+                .requiredOutput(field.requiredOutput() ? 1 : 0)
+                .modelVisible(field.modelVisible() ? 1 : 0)
+                .userVisible(field.userVisible() ? 1 : 0)
+                .importance(field.importance())
+                .displayComponent(field.displayComponent())
+                .summaryFlag(field.summaryFlag())
+                .unit(field.unit())
+                .precisionScale(field.precisionScale())
+                .valueSource(field.valueSource())
+                .build();
     }
 
-    private List<String> distinctScalarValues(
-            List<JsonNode> values) {
-
-        Set<String> distinct =
-                new LinkedHashSet<>();
-
-        for (JsonNode value : values) {
-
-            String text = formatScalar(value);
-
-            if (StringUtils.hasText(text)) {
-                distinct.add(text);
-            }
-        }
-
-        return List.copyOf(distinct);
-    }
-
-    private String formatScalar(JsonNode value) {
-
-        if (value == null
-                || value.isNull()
-                || value.isContainerNode()) {
-            return null;
-        }
-
-        if (value.isNumber()) {
-            return formatNumber(value.decimalValue());
-        }
-
-        String text = value.asText("").trim();
-
-        if (!StringUtils.hasText(text)) {
-            return null;
-        }
-
-        /*
-         * 防止业务文本破坏 Markdown 展示。
-         */
-        text = text
-                .replace("\r", " ")
-                .replace("\n", " ")
-                .replace("*", "\\*")
-                .replace("|", "\\|");
-
-        return text.substring(
-                0,
-                Math.min(text.length(), 160)
-        );
-    }
-
-    private BigDecimal sumNumericValues(
-            List<JsonNode> values) {
-
-        BigDecimal sum = BigDecimal.ZERO;
-        boolean found = false;
-
-        for (JsonNode value : values) {
-            if (value == null || !value.isNumber()) {
-                continue;
-            }
-
-            sum = sum.add(value.decimalValue());
-            found = true;
-        }
-
-        return found ? sum : null;
-    }
-
-    private String formatNumber(
-            BigDecimal value) {
-
-        return value.stripTrailingZeros()
-                .toPlainString();
-    }
-
-    private int resolveRecordCount(
-            WorkflowAnswerModelPayload payload,
-            int observedValueCount) {
-
-        int batchCount =
-                payload.batches()
-                        .stream()
-                        .mapToInt(
-                                WorkflowAnswerModelPayload.Batch
-                                        ::totalCount
-                        )
-                        .max()
-                        .orElse(0);
-
-        return Math.max(
-                batchCount,
-                observedValueCount
-        );
-    }
-
-    private boolean resolveDataComplete(
-            WorkflowAnswerModelPayload payload) {
-
-        if (!payload.success()
-                || payload.partialSuccess()) {
-            return false;
-        }
-
-        return payload.batches()
-                .stream()
-                .allMatch(batch ->
-                        batch.failureCount() == 0
-                                && batch.partialCount() == 0
-                );
-    }
-
+    /**
+     * 判断字段是否为项目标识。
+     */
     private boolean isProjectIdentifier(
             WorkflowAnswerFieldContext field) {
 
@@ -715,7 +574,7 @@ public class WorkflowTextFactBuilder {
                 field.fieldName() == null
                         ? ""
                         : field.fieldName()
-                                .toLowerCase(Locale.ROOT);
+                        .toLowerCase(Locale.ROOT);
 
         String label =
                 field.label() == null
@@ -728,331 +587,346 @@ public class WorkflowTextFactBuilder {
                 || label.contains("项目编号");
     }
 
-    private String resolveLabel(
-            WorkflowAnswerFieldContext field) {
-
-        if (StringUtils.hasText(field.label())) {
-            return field.label().trim();
-        }
-
-        return field.fieldName();
-    }
-
     /**
-     * 生成面向用户的业务回答。
-     *
-     * 工作流状态、完整性成功等技术信息不作为回答主体。
+     * 收集有效项目标识。
      */
-    private String renderMarkdown(
-            WorkflowAnswerPreparation preparation,
-            int recordCount,
-            boolean dataComplete,
-            Map<String, String> coreFacts,
-            Map<String, String> aggregates,
-            RiskSummary riskSummary) {
+    private void addObjectId(
+            Set<String> objectIds,
+            JsonNode value) {
 
-        if (recordCount <= 0) {
-            return "没有查询到符合条件的项目数据。";
-        }
-
-        StringBuilder markdown =
-                new StringBuilder();
-
-        markdown.append("查询到 **")
-                .append(recordCount)
-                .append(" 条符合条件的项目数据**。");
-
-        if (!dataComplete) {
-            markdown.append(
-                    "\n\n> 部分业务数据未完整返回，"
-                            + "以下内容仅基于当前成功返回的数据。"
-            );
-        }
-
-        if (!coreFacts.isEmpty()) {
-
-            markdown.append(
-                    "\n\n**项目关键信息**\n\n"
-            );
-
-            coreFacts.forEach(
-                    (label, value) ->
-                            markdown.append("- **")
-                                    .append(label)
-                                    .append("：** ")
-                                    .append(value)
-                                    .append("\n")
-            );
-        }
-
-        if (!aggregates.isEmpty()) {
-
-            markdown.append(
-                    "\n**数据汇总**\n\n"
-            );
-
-            aggregates.forEach(
-                    (label, value) ->
-                            markdown.append("- **")
-                                    .append(label)
-                                    .append("合计：** ")
-                                    .append(value)
-                                    .append("\n")
-            );
-        }
-
-        /*
-         * 查询到记录却没有任何业务字段时记录后台告警。
-         * 用户侧不再显示“字段解析失败”等系统术语。
-         */
-        if (coreFacts.isEmpty()
-                && aggregates.isEmpty()) {
-
-            log.warn(
-                    "工作流文字回答未提取到可展示字段，"
-                            + "runId={}，workflowCode={}",
-                    preparation.outcome().runId(),
-                    preparation.outcome()
-                            .workflowCode()
-            );
-
-            markdown.append(
-                    "\n\n当前结果暂时没有可展示的项目明细。"
-            );
-        }
-
-        appendRiskSummary(
-                markdown,
-                riskSummary
-        );
-
-        return markdown.toString().trim();
-    }
-
-    /**
-     * 只有配置了风险规则或规则执行失败时，
-     * 才向用户展示风险信息。
-     */
-    private void appendRiskSummary(
-            StringBuilder markdown,
-            RiskSummary riskSummary) {
-
-        if (riskSummary.failed()) {
-
-            markdown.append(
-                    "\n\n**风险提示**\n\n"
-                            + "- 风险规则本次执行失败，"
-                            + "当前不能据此认定项目没有风险。\n"
-            );
+        if (value == null
+                || value.isNull()
+                || value.isContainerNode()) {
 
             return;
         }
 
-        if (!riskSummary.configured()) {
-            return;
-        }
+        String objectId =
+                value.asText("").trim();
 
-        markdown.append(
-                "\n\n**风险判定**\n\n"
-        );
-
-        markdown.append("- **风险项目：** ")
-                .append(
-                        riskSummary.riskObjectIds()
-                                .size()
-                )
-                .append(" 个\n");
-
-        markdown.append("- **状态未知：** ")
-                .append(
-                        riskSummary.unknownCount()
-                )
-                .append(" 个\n");
-
-        markdown.append("- **未命中风险规则：** ")
-                .append(
-                        riskSummary.normalObjectCount()
-                )
-                .append(" 个\n");
-
-        if (!riskSummary.riskObjectIds()
-                .isEmpty()) {
-
-            markdown.append("- **风险项目编码：** ")
-                    .append(
-                            String.join(
-                                    "、",
-                                    riskSummary.riskObjectIds()
-                                            .stream()
-                                            .limit(10)
-                                            .toList()
-                            )
-                    )
-                    .append("\n");
-        }
-
-        if (!riskSummary.unknownObjectIds()
-                .isEmpty()) {
-
-            markdown.append("- **需要补充数据的项目：** ")
-                    .append(
-                            String.join(
-                                    "、",
-                                    riskSummary.unknownObjectIds()
-                                            .stream()
-                                            .limit(10)
-                                            .toList()
-                            )
-                    )
-                    .append("\n");
+        if (StringUtils.hasText(objectId)) {
+            objectIds.add(objectId);
         }
     }
 
-    private RiskSummary evaluateRisk(WorkflowAnswerPreparation preparation) {
+    /**
+     * 执行风险规则并转为统一事实。
+     */
+    private RiskResult evaluateRisk(WorkflowAnswerPreparation preparation) {
         long startedAt = System.currentTimeMillis();
         try {
             List<WorkflowRiskEvaluation> evaluations = riskRuleEvaluator.evaluate(preparation);
-
-            /*
-             * 空集合表示当前工作流没有启用风险规则，
-             * 不需要生成无意义的审计步骤。
-             */
             if (evaluations.isEmpty()) {
-                return RiskSummary.notConfigured();
+                return RiskResult.empty();
             }
-            traceRecorder.recordRiskEvaluation(preparation.outcome().runId(), preparation.outcome().versionId(), evaluations, System.currentTimeMillis() - startedAt);
-            return summarizeRisk(evaluations);
+            traceRecorder.recordRiskEvaluation(
+                    preparation.outcome().runId(),
+                    preparation.outcome().versionId(),
+                    evaluations,
+                    System.currentTimeMillis() - startedAt
+            );
+            return buildRiskResult(evaluations);
+
         } catch (RuntimeException exception) {
+
             log.warn(
                     "工作流风险规则判定失败，runId={}，workflowCode={}，errorType={}",
                     preparation.outcome().runId(),
                     preparation.outcome().workflowCode(),
-                    exception.getClass().getSimpleName(),
-                    exception
-            );
-            traceRecorder.recordRiskEvaluationFailure(preparation.outcome().runId(),
-                    preparation.outcome().versionId(), System.currentTimeMillis() - startedAt);
-            /*
-             * 判定失败只能标记未知，
-             * 不能错误告诉用户当前项目没有风险。
-             */
-            return RiskSummary.evaluationFailed();
+                    exception.getClass().getSimpleName(), exception);
+            traceRecorder.recordRiskEvaluationFailure(preparation.outcome().runId(), preparation.outcome().versionId(),
+                    System.currentTimeMillis() - startedAt);
+            return RiskResult.failure();
         }
     }
 
-    private RiskSummary summarizeRisk(List<WorkflowRiskEvaluation> evaluations) {
-        List<WorkflowRiskEvaluation> sorted = evaluations.stream()
-                .filter(Objects::nonNull)
-                // 显式指定比较器元素类型，避免泛型被推断为 Object。
-                .sorted(Comparator.comparingInt((WorkflowRiskEvaluation item) -> statusPriority(item.status()))
-                        .thenComparingInt(item -> severityPriority(item.severity()))).toList();
-
-        LinkedHashSet<String> allObjectIds = new LinkedHashSet<>();
-        LinkedHashSet<String> riskObjectIds = new LinkedHashSet<>();
-        LinkedHashSet<String> unknownObjectIds = new LinkedHashSet<>();
-        boolean unknownWithoutObjectId = false;
-        for (WorkflowRiskEvaluation evaluation : sorted) {
-            String objectId = normalizeObjectId(evaluation.objectId());
-
-            if (objectId != null) {
-                allObjectIds.add(objectId);
+    /**
+     * 把规则判定结果转换为事实和对象标识。
+     */
+    private RiskResult buildRiskResult(List<WorkflowRiskEvaluation> evaluations) {
+        List<AnswerFact> facts = new ArrayList<>();
+        Set<String> riskObjectIds = new LinkedHashSet<>();
+        Set<String> unknownObjectIds = new LinkedHashSet<>();
+        int index = 0;
+        for (WorkflowRiskEvaluation evaluation : evaluations) {
+            if (evaluation == null) {
+                continue;
             }
-
+            String objectId = normalizeObjectId(evaluation.objectId());
             if (evaluation.status() == WorkflowRiskEvaluation.Status.MATCHED && objectId != null) {
                 riskObjectIds.add(objectId);
                 unknownObjectIds.remove(objectId);
-                continue;
             }
-            if (evaluation.status() == WorkflowRiskEvaluation.Status.UNKNOWN) {
-                if (objectId == null) {
-                    unknownWithoutObjectId = true;
-                } else if (!riskObjectIds.contains(objectId)) {
-                    unknownObjectIds.add(objectId);
-                }
+            if (evaluation.status() == WorkflowRiskEvaluation.Status.UNKNOWN && objectId != null &&
+                    !riskObjectIds.contains(objectId)) {
+                unknownObjectIds.add(objectId);
             }
+            facts.add(buildRiskFact(evaluation, index));
+            index++;
         }
-
-        int normalObjectCount = Math.max(0, allObjectIds.size() - riskObjectIds.size() - unknownObjectIds.size());
-
-        int unknownCount = unknownObjectIds.size() + (unknownWithoutObjectId ? 1 : 0);
-
-        List<Map<String, Object>> findings =
-                sorted.stream()
-                        .filter(item ->
-                                item.status()
-                                        != WorkflowRiskEvaluation.Status.NOT_MATCHED)
-                        .limit(20)
-                        .map(this::toSafeFinding)
-                        .toList();
-
-        return new RiskSummary(true, false, List.copyOf(riskObjectIds),
-                List.copyOf(unknownObjectIds), unknownCount, normalObjectCount, findings);
+        return new RiskResult(facts, List.copyOf(riskObjectIds), List.copyOf(unknownObjectIds), true, false);
     }
 
-    private Map<String, Object> toSafeFinding(WorkflowRiskEvaluation evaluation) {
+    /**
+     * 创建规则判定事实。
+     */
+    private AnswerFact buildRiskFact(WorkflowRiskEvaluation evaluation, int index) {
+        String objectId =
+                normalizeObjectId(
+                        evaluation.objectId()
+                );
 
-        Map<String, Object> finding = new LinkedHashMap<>();
+        String ruleCode =
+                StringUtils.hasText(
+                        evaluation.ruleCode())
+                        ? evaluation.ruleCode().trim()
+                        : "unknown_rule";
 
-        finding.put("objectId", normalizeObjectId(evaluation.objectId()));
-        finding.put("ruleName", evaluation.ruleName());
-        finding.put("severity", evaluation.severity() == null
+        String recordPath =
+                "$.riskEvaluations["
+                        + index
+                        + "]";
+
+        return AnswerFact.builder()
+                .factKey(
+                        "workflow-risk:"
+                                + ruleCode
+                                + ":"
+                                + (objectId == null
+                                ? index
+                                : objectId)
+                )
+                .capabilityCode("workflow-risk")
+                .fieldCode(ruleCode)
+                .fieldName(ruleCode)
+                .fieldPath(
+                        "$.riskEvaluations[]."
+                                + ruleCode
+                )
+                .label(
+                        StringUtils.hasText(
+                                evaluation.ruleName())
+                                ? evaluation.ruleName()
+                                : ruleCode
+                )
+                .rawValue(
+                        toRiskValue(evaluation)
+                )
+                .formattedValue(
+                        StringUtils.hasText(
+                                evaluation.reason())
+                                ? evaluation.reason()
+                                : statusName(
+                                evaluation.status()
+                        )
+                )
+                .valueType("object")
+                .displayFormat("risk")
+                .meaning("后端风险规则判定结果")
+                .displayGroup("风险判定")
+                .importance("HIGH")
+                .displayComponent("WARNINGS")
+                .summary(false)
+                .displayOrder(10_000 + index)
+                .requiredOutput(false)
+                .modelVisible(true)
+                .userVisible(true)
+                .missing(false)
+                .recordPath(recordPath)
+                .collectionKey(
+                        "workflow-risk:"
+                                + "$.riskEvaluations[]"
+                )
+                .sourceType(
+                        FactSourceType.RULE_EVALUATED
+                )
+                .build();
+    }
+
+    /**
+     * 创建安全的风险事实值。
+     */
+    private Map<String, Object> toRiskValue(
+            WorkflowRiskEvaluation evaluation) {
+
+        Map<String, Object> result =
+                new LinkedHashMap<>();
+
+        result.put(
+                "objectId",
+                normalizeObjectId(
+                        evaluation.objectId()
+                )
+        );
+
+        result.put(
+                "status",
+                statusName(
+                        evaluation.status()
+                )
+        );
+
+        result.put(
+                "severity",
+                evaluation.severity() == null
                         ? null
-                        : evaluation.severity().name());
-        finding.put("status", evaluation.status() == null
-                        ? "UNKNOWN"
-                        : evaluation.status().name());
-        finding.put("reason", evaluation.reason());
+                        : evaluation.severity()
+                        .name()
+        );
 
-        List<Map<String, String>> evidence = evaluation.evidence()
+        result.put(
+                "reason",
+                evaluation.reason()
+        );
+
+        List<Map<String, Object>> evidence =
+                new ArrayList<>();
+
+        for (WorkflowRiskEvaluation.Evidence item :
+                evaluation.evidence()) {
+
+            Map<String, Object> evidenceItem =
+                    new LinkedHashMap<>();
+
+            evidenceItem.put(
+                    "fieldName",
+                    item.fieldName()
+            );
+
+            evidenceItem.put(
+                    "label",
+                    item.label()
+            );
+
+            evidenceItem.put(
+                    "value",
+                    item.displayValue()
+            );
+
+            evidence.add(evidenceItem);
+        }
+
+        result.put("evidence", evidence);
+
+        return result;
+    }
+
+    /**
+     * 创建统一模型输入，并补充工作流风险判定状态。
+     */
+    private Map<String, Object> buildSafeModelInput(UnifiedFactSet factSet, RiskResult riskResult) {
+        Map<String, Object> result = new LinkedHashMap<>(safeModelInputBuilder.build(factSet));
+        if (!riskResult.configured() && !riskResult.failed()) {
+            return result;
+        }
+        Map<String, Object> risk = new LinkedHashMap<>();
+        risk.put("configured", riskResult.configured());
+        risk.put("failed", riskResult.failed());
+        risk.put("riskObjectIds", riskResult.riskObjectIds());
+        risk.put("unknownObjectIds", riskResult.unknownObjectIds());
+        result.put("riskEvaluation", risk);
+        return result;
+    }
+
+    /**
+     * 读取工作流真实记录数量。
+     */
+    private long resolveRecordCount(
+            WorkflowAnswerModelPayload payload,
+            UnifiedFactSet extracted) {
+
+        int batchCount =
+                payload.batches()
                         .stream()
-                        .limit(6)
-                        .map(item -> {
-                            Map<String, String> value = new LinkedHashMap<>();
-                            value.put("label", item.label());
-                            value.put("value", item.displayValue());
-                            return value;
-                        })
-                        .toList();
-        finding.put("evidence", evidence);
-        return finding;
+                        .mapToInt(
+                                WorkflowAnswerModelPayload.Batch
+                                        ::totalCount
+                        )
+                        .max()
+                        .orElse(0);
+
+        return batchCount > 0
+                ? batchCount
+                : extracted.totalCount();
     }
 
-    private int statusPriority(WorkflowRiskEvaluation.Status status) {
-        if (status == WorkflowRiskEvaluation.Status.MATCHED) {
-            return 0;
+    /**
+     * 判断工作流业务数据是否完整。
+     */
+    private boolean resolveDataComplete(
+            WorkflowAnswerModelPayload payload) {
+
+        if (!payload.success()
+                || payload.partialSuccess()) {
+
+            return false;
         }
-        if (status == WorkflowRiskEvaluation.Status.UNKNOWN) {
-            return 1;
-        }
-        return 2;
+
+        return payload.batches()
+                .stream()
+                .allMatch(batch ->
+                        batch.failureCount() == 0
+                                && batch.partialCount() == 0
+                );
     }
 
-    private int severityPriority(WorkflowRiskRuleSpec.RiskSeverity severity) {
-        if (severity == WorkflowRiskRuleSpec.RiskSeverity.HIGH) {
-            return 0;
+    /**
+     * 将记录路径中的真实下标转换为集合路径。
+     */
+    private String normalizeCollectionPath(
+            String recordPath) {
+
+        if (!StringUtils.hasText(recordPath)) {
+            return null;
         }
-        if (severity == WorkflowRiskRuleSpec.RiskSeverity.MEDIUM) {
-            return 1;
-        }
-        return 2;
+
+        return recordPath.replaceAll(
+                "\\[\\d+\\]",
+                "[]"
+        );
     }
 
-    private String normalizeObjectId(String objectId) {
+    private String normalizeObjectId(
+            String objectId) {
+
         return StringUtils.hasText(objectId)
                 ? objectId.trim()
                 : null;
     }
 
-    private record RiskSummary(
-            boolean configured,
-            boolean failed,
+    private String statusName(
+            WorkflowRiskEvaluation.Status status) {
+
+        return status == null
+                ? WorkflowRiskEvaluation.Status.UNKNOWN.name()
+                : status.name();
+    }
+
+    /**
+     * 工作流叶子字段定位结果。
+     */
+    private record LeafValue(
+            List<String> pathTokens,
+            JsonNode value,
+            String actualPath,
+            String recordPath) {
+    }
+
+    /**
+     * 风险规则构建结果。
+     */
+    private record RiskResult(
+            List<AnswerFact> facts,
             List<String> riskObjectIds,
             List<String> unknownObjectIds,
-            int unknownCount,
-            int normalObjectCount,
-            List<Map<String, Object>> findings) {
+            boolean configured,
+            boolean failed) {
 
-        private RiskSummary {
+        private RiskResult {
+            facts = facts == null
+                    ? List.of()
+                    : List.copyOf(facts);
+
             riskObjectIds = riskObjectIds == null
                     ? List.of()
                     : List.copyOf(riskObjectIds);
@@ -1060,33 +934,26 @@ public class WorkflowTextFactBuilder {
             unknownObjectIds = unknownObjectIds == null
                     ? List.of()
                     : List.copyOf(unknownObjectIds);
-
-            findings = findings == null
-                    ? List.of()
-                    : List.copyOf(findings);
         }
 
-        private static RiskSummary notConfigured() {
-            return new RiskSummary(false, false, List.of(),
-                    List.of(), 0, 0, List.of());
-        }
-
-        private static RiskSummary evaluationFailed() {
-            return new RiskSummary(false, true,
-                    List.of(), List.of(), 1, 0, List.of()
+        private static RiskResult empty() {
+            return new RiskResult(
+                    List.of(),
+                    List.of(),
+                    List.of(),
+                    false,
+                    false
             );
         }
 
-        private Map<String, Object> toSafeModelInput() {
-            Map<String, Object> result = new LinkedHashMap<>();
-            result.put("configured", configured);
-            result.put("failed", failed);
-            result.put("riskObjectIds", riskObjectIds);
-            result.put("unknownObjectIds", unknownObjectIds);
-            result.put("unknownCount", unknownCount);
-            result.put("normalObjectCount", normalObjectCount);
-            result.put("findings", findings);
-            return result;
+        private static RiskResult failure() {
+            return new RiskResult(
+                    List.of(),
+                    List.of(),
+                    List.of(),
+                    false,
+                    true
+            );
         }
     }
 }

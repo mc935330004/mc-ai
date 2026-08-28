@@ -5,8 +5,10 @@ import lombok.extern.slf4j.Slf4j;
 import org.example.ai.agent.chat.entity.AgentRequest;
 import org.example.ai.agent.chat.memory.model.BusinessConversationState;
 import org.example.ai.agent.chat.memory.model.ConversationRewriteDecision;
+import org.example.ai.agent.chat.memory.model.ResultStatisticsContext;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
+import org.example.ai.agent.chat.support.ReportRequestDetector;
 
 import java.time.LocalDateTime;
 import java.util.LinkedHashMap;
@@ -27,27 +29,73 @@ public class ConversationContextResolver {
     private final ConversationContextRewriteService rewriteService;
 
     private final ConversationStateService  conversationStateService;
+    /**
+     * 明确引用上一轮查询结果的表达。
+     *
+     * 这里只作为模型分类失败时的确定性兜底，
+     * 其他自然语言仍然交给上下文分类模型判断。
+     */
+    private static final List<String> RESULT_REFERENCE_MARKERS =
+            List.of(
+                    "上面的",
+                    "上述的",
+                    "刚才的",
+                    "上面的数据",
+                    "上面数据",
+                    "上述数据",
+                    "上述结果",
+                    "刚才的数据",
+                    "刚才的结果",
+                    "上一轮数据",
+                    "上一轮结果",
+                    "这些数据",
+                    "这些结果"
+            );
 
     /**
-     * 只有确定性的系统控制命令使用本地规则。
-     *
-     * 不再通过关键词判断汇总、分析或者重新查询。
+     * 可以直接基于上一轮快照处理的问题表达。
      */
-    private static final List<String> RESET_MARKERS =
+    private static final List<String> RESULT_OPERATION_MARKERS =
             List.of(
-                    "不要参考之前的数据",
-                    "不要参考上面的信息",
-                    "忽略之前的内容",
-                    "忽略上面的信息",
-                    "忽略之前",
-                    "忽略上面",
-                    "不参考之前",
-                    "不参考上面",
-                    "清除上下文",
-                    "清空上下文",
-                    "重新开始",
-                    "换个话题"
+                    "多少",
+                    "是什么",
+                    "哪个",
+                    "哪些",
+                    "合计",
+                    "总额",
+                    "总和",
+                    "总计",
+                    "平均",
+                    "最大",
+                    "最小",
+                    "最高",
+                    "最低",
+                    "统计",
+                    "汇总",
+                    "占比",
+                    "排序",
+                    "筛选",
+                    "分析"
             );
+    /**
+     * 用户明确要求丢弃旧业务上下文时，清理旧项目和查询状态。
+     */
+    private static final List<String> RESET_MARKERS = List.of(
+            "不要参考之前的数据",
+            "不要参考上面的信息",
+            "忽略之前的内容",
+            "忽略上面的信息",
+            "忽略之前",
+            "忽略上面",
+            "不参考之前",
+            "不参考上面",
+            "清除上下文",
+            "清空上下文",
+            "重新开始",
+            "换个话题",
+            "换一个项目",
+            "换个项目"
+    );
     private static final List<String> CURRENT_PROJECT_MARKERS =
             List.of("这个项目", "该项目", "刚才这个项目");
 
@@ -62,8 +110,6 @@ public class ConversationContextResolver {
             List.of("这些风险项目", "上述风险项目", "刚才的风险项目");
 
     private static final List<String> RESULT_ANALYSIS_MARKERS = List.of("继续分析", "接着分析", "再分析一下", "为什么有风险", "为什么不规范", "为什么异常");
-
-    private static final List<String> REPORT_MARKERS = List.of("生成完整报表", "生成报表", "完整报表");
 
     private static final List<String> REFRESH_MARKERS = List.of("刷新数据", "重新查询", "重新查一下", "获取最新数据");
 
@@ -152,24 +198,41 @@ public class ConversationContextResolver {
         return null;
     }
     /**
-     * 处理可以唯一确定的项目指代。
+     * 优先处理刷新和报告请求，再判断是否复用旧结果。
      */
-    private String resolveDeterministicReference(
-            AgentRequest request,
-            BusinessConversationState state,
-            String question) {
+    private String resolveDeterministicReference(AgentRequest request, BusinessConversationState state, String question) {
 
+        boolean freshQuery = ReportRequestDetector.isExplicitRequest(question)
+                || containsAny(question, REFRESH_MARKERS);
+
+        // 要求重新查询时，不允许短追问规则提前复用旧统计结果。
+        ResultStatisticsContext statistics = state.getLastStatisticsContext();
+        if (!freshQuery
+                && statistics != null
+                && statistics.matchesArtifact(state.getResultArtifactId())
+                && statistics.resolveShortOperation(question) != null) {
+            applyState(request, state);
+            request.setResultAnalysisRequest(true);
+            return question;
+        }
+
+        if (!freshQuery
+                && isExplicitResultFollowUp(question)
+                && StringUtils.hasText(state.getResultArtifactId())) {
+            applyState(request, state);
+            request.setResultAnalysisRequest(true);
+            return question;
+        }
+
+        // 先解析风险项目编号，再清理旧风险结果，避免丢失查询对象。
         if (containsAny(question, RISK_PROJECT_MARKERS)) {
-            List<String> riskObjectIds =
-                    safeList(state.getRiskObjectIds());
-
-            if (riskObjectIds.isEmpty()) {
+            List<String> targets = safeList(state.getRiskObjectIds());
+            if (targets.isEmpty()) {
                 requestObjectClarification(
                         request,
                         state,
                         question,
-                        "上一轮结果中没有可复用的风险项目，"
-                                + "请明确输入需要查询的项目编码。"
+                        "上一轮结果中没有可复用的风险项目，请明确输入项目编码。"
                 );
                 return null;
             }
@@ -177,97 +240,66 @@ public class ConversationContextResolver {
             String rewritten = replaceMarkers(
                     question,
                     RISK_PROJECT_MARKERS,
-                    "项目编码：" + formatObjectIds(riskObjectIds)
+                    "项目编码：" + formatObjectIds(targets)
             );
-
             return completeDeterministicResolution(
-                    request,
-                    state,
-                    rewritten,
-                    riskObjectIds
+                    request, state, rewritten, targets
             );
         }
 
         if (containsAny(question, FIRST_PROJECT_MARKERS)) {
-            List<String> displayObjectIds =
-                    safeList(state.getDisplayObjectIds());
-
-            if (displayObjectIds.isEmpty()) {
+            List<String> objectIds = safeList(state.getDisplayObjectIds());
+            if (objectIds.isEmpty()) {
                 requestObjectClarification(
                         request,
                         state,
                         question,
-                        "上一轮没有可复用的项目顺序，"
-                                + "请明确输入项目编码。"
+                        "上一轮没有可复用的项目顺序，请明确输入项目编码。"
                 );
                 return null;
             }
 
-            List<String> target =
-                    List.of(displayObjectIds.get(0));
-
+            List<String> targets = List.of(objectIds.get(0));
             String rewritten = replaceMarkers(
                     question,
                     FIRST_PROJECT_MARKERS,
-                    "项目编码：" + target.get(0)
+                    "项目编码：" + targets.get(0)
             );
-
             return completeDeterministicResolution(
-                    request,
-                    state,
-                    rewritten,
-                    target
+                    request, state, rewritten, targets
             );
         }
 
         if (containsAny(question, CURRENT_PROJECT_MARKERS)) {
-            String focusedObjectId =
-                    resolveCurrentObjectId(state);
-
-            if (!StringUtils.hasText(focusedObjectId)) {
+            String objectId = resolveCurrentObjectId(state);
+            if (!StringUtils.hasText(objectId)) {
                 requestObjectClarification(
-                        request,
-                        state,
-                        question,
-                        buildProjectClarification(state)
+                        request, state, question, buildProjectClarification(state)
                 );
                 return null;
             }
 
-            List<String> target =
-                    List.of(focusedObjectId);
-
             String rewritten = replaceMarkers(
                     question,
                     CURRENT_PROJECT_MARKERS,
-                    "项目编码：" + focusedObjectId
+                    "项目编码：" + objectId
             );
-
             return completeDeterministicResolution(
-                    request,
-                    state,
-                    rewritten,
-                    target
+                    request, state, rewritten, List.of(objectId)
             );
         }
 
-        if (containsAny(
-                question,
-                RESULT_ANALYSIS_MARKERS
-        )) {
+        if (freshQuery) {
+            return completeDeterministicResolution(
+                    request, state, question, List.of()
+            );
+        }
+
+        // 没有结果快照时，不能仅凭“继续分析”进入旧结果分析链路。
+        if (containsAny(question, RESULT_ANALYSIS_MARKERS)
+                && StringUtils.hasText(state.getResultArtifactId())) {
             applyState(request, state);
             request.setResultAnalysisRequest(true);
-            return question;
-        }
-
-        if (containsAny(question, REPORT_MARKERS)
-                || containsAny(question, REFRESH_MARKERS)) {
-            /*
-             * 完整报表和刷新属于重新执行上一轮查询，
-             * 不能错误进入上一轮Artifact分析链路。
-             */
-            applyState(request, state);
-            request.setResultAnalysisRequest(false);
             return question;
         }
 
@@ -275,52 +307,62 @@ public class ConversationContextResolver {
     }
 
     /**
-     * 根据问题类型决定复用Artifact还是重新执行查询。
+     * 判断问题是否明确要求处理上一轮查询结果。
+     *
+     * 必须同时包含“上一轮结果指代”和“取值或分析意图”，
+     * 避免把“刚才那个项目的合同信息”错误识别成旧结果统计。
      */
-    private String completeDeterministicResolution(
-            AgentRequest request,
-            BusinessConversationState state,
-            String rewrittenQuestion,
-            List<String> targetObjectIds) {
-
-        if (containsAny(
-                rewrittenQuestion,
-                RESULT_ANALYSIS_MARKERS
-        )) {
-            applyState(request, state);
-            applyObjectContext(
-                    request,
-                    state,
-                    targetObjectIds
-            );
-            request.setResultAnalysisRequest(true);
-            return rewrittenQuestion;
+    private boolean isExplicitResultFollowUp(String question) {
+        if (!StringUtils.hasText(question)) {
+            return false;
         }
+        return containsAny(question, RESULT_REFERENCE_MARKERS)
+                && containsAny(question, RESULT_OPERATION_MARKERS);
+    }
 
-        if (containsAny(rewrittenQuestion, REPORT_MARKERS)
-                || containsAny(
-                rewrittenQuestion,
-                REFRESH_MARKERS
-        )) {
-            applyState(request, state);
-            applyObjectContext(
-                    request,
-                    state,
-                    targetObjectIds
+
+    /**
+     * 查询条件可以复用，但明确重新查询时必须让旧结果快照失效。
+     */
+    private String completeDeterministicResolution(AgentRequest request, BusinessConversationState state, String rewrittenQuestion, List<String> targetObjectIds) {
+
+        boolean freshQuery = ReportRequestDetector.isExplicitRequest(rewrittenQuestion)
+                        || containsAny(rewrittenQuestion, REFRESH_MARKERS);
+        if (freshQuery) {
+            // 保留原查询条件和项目指代，清理依赖旧结果产生的状态。
+            state.setResultArtifactId(null);
+            state.setLastStatisticsContext(null);
+            state.setRiskEvaluationRunId(null);
+            state.setRiskObjectIds(List.of());
+            state.setUnknownObjectIds(List.of());
+            state.setPendingReportFollowUp(null);
+            state.setPendingContextQuestion(null);
+            state.setAwaitingClarification(false);
+            state.setUpdatedAt(LocalDateTime.now());
+
+            // 失效状态必须保存成功，不能吞掉异常后继续使用旧快照。
+            conversationStateService.saveState(
+                    request.getUserId(),
+                    request.getConversationId(),
+                    state
             );
+
+            applyState(request, state);
+            applyObjectContext(request, state, targetObjectIds);
             request.setResultAnalysisRequest(false);
             return rewrittenQuestion;
         }
 
-        /*
-         * “这个项目的合同”等新业务问题只补项目编码，
-         * 不强制复用上一轮工作流，避免路由到错误工作流。
-         */
-        applyObjectContext(
-                request,
-                state,
-                targetObjectIds
-        );
+        if (containsAny(rewrittenQuestion, RESULT_ANALYSIS_MARKERS)
+                && StringUtils.hasText(state.getResultArtifactId())) {
+            applyState(request, state);
+            applyObjectContext(request, state, targetObjectIds);
+            request.setResultAnalysisRequest(true);
+            return rewrittenQuestion;
+        }
+
+        // 查询其他业务时只补项目指代，不强制沿用上一轮工作流。
+        applyObjectContext(request, state, targetObjectIds);
         return rewrittenQuestion;
     }
 
@@ -479,38 +521,20 @@ public class ConversationContextResolver {
      */
     private void applyState(AgentRequest request, BusinessConversationState state) {
 
-        request.setPreviousWorkflowCode(
-                state.getWorkflowCode()
-        );
-        request.setPreviousCapabilityCode(
-                state.getCapabilityCode()
-        );
+        request.setPreviousWorkflowCode(state.getWorkflowCode());
+        request.setPreviousCapabilityCode(state.getCapabilityCode());
+        Map<String, Object> lastInput = state.getLastInput();
+        request.setInheritedInput(lastInput == null ? new LinkedHashMap<>() : new LinkedHashMap<>(lastInput));
+        request.setResultArtifactId(state.getResultArtifactId());
+        ResultStatisticsContext statistics = state.getLastStatisticsContext();
+        // 不把其他快照的统计字段带入本轮请求。
+        request.setLastStatisticsContext(statistics != null && statistics.matchesArtifact(state.getResultArtifactId())
+                        ? statistics
+                        : null);
+        applyObjectContext(request, state, List.of());
 
-        Map<String, Object> lastInput =
-                state.getLastInput();
-
-        request.setInheritedInput(
-                lastInput == null
-                        ? new LinkedHashMap<>()
-                        : new LinkedHashMap<>(lastInput)
-        );
-
-        request.setResultArtifactId(
-                state.getResultArtifactId()
-        );
-
-        applyObjectContext(
-                request,
-                state,
-                List.of()
-        );
-
-        request.setLastPresentationMode(
-                state.getLastPresentationMode()
-        );
-        request.setRiskEvaluationRunId(
-                state.getRiskEvaluationRunId()
-        );
+        request.setLastPresentationMode(state.getLastPresentationMode());
+        request.setRiskEvaluationRunId(state.getRiskEvaluationRunId());
     }
 
     private void applyObjectContext(AgentRequest request, BusinessConversationState state, List<String> targetObjectIds) {
@@ -532,17 +556,21 @@ public class ConversationContextResolver {
         }
     }
 
+    /**
+     * 明确否定切换项目时，不触发项目重置。
+     */
     private boolean isContextReset(String question) {
-        return RESET_MARKERS.stream().anyMatch(question::contains);
+        String candidate = question.replaceAll(
+                "(?:不要|不用|不需要|别|无需|暂不)(?:再)?换(?:一个|个)项目",
+                ""
+        );
+        return RESET_MARKERS.stream().anyMatch(candidate::contains);
     }
 
     /**
-     * 清理当前会话业务状态。
+     * 清理旧业务上下文，不删除聊天记录。
      */
-    private String resetContext(
-            AgentRequest request,
-            String question) {
-
+    private String resetContext(AgentRequest request, String question) {
         conversationStateService.clearState(
                 request.getUserId(),
                 request.getConversationId()
@@ -552,8 +580,9 @@ public class ConversationContextResolver {
         request.setPreviousWorkflowCode(null);
         request.setPreviousCapabilityCode(null);
         request.setResultArtifactId(null);
+        request.setLastStatisticsContext(null);
         request.setResultAnalysisRequest(false);
-        request.setInheritedInput( new LinkedHashMap<>());
+        request.setInheritedInput(new LinkedHashMap<>());
         request.setDisplayObjectIds(List.of());
         request.setRiskObjectIds(List.of());
         request.setUnknownObjectIds(List.of());
@@ -561,7 +590,23 @@ public class ConversationContextResolver {
         request.setLastPresentationMode(null);
         request.setRiskEvaluationRunId(null);
         request.setContextClarificationQuestion(null);
-        return removeResetMarkers(question);
+
+        // 当前请求不再把旧聊天文本作为查询上下文传给模型。
+        request.setConversationMemory(null);
+
+        String remainingQuestion = removeResetMarkers(question);
+
+        // 只说切换项目但未给新条件时，不允许继续查询旧项目。
+        boolean switchingProject = question.contains("换一个项目")
+                || question.contains("换个项目");
+
+        if (switchingProject && !StringUtils.hasText(remainingQuestion)) {
+            request.setContextClarificationQuestion(
+                    "已清除旧项目查询上下文，请提供新的项目编码和要查询的业务信息。"
+            );
+        }
+
+        return remainingQuestion;
     }
 
     /**

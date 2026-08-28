@@ -9,8 +9,11 @@ import org.example.ai.agent.chat.entity.AiChatSession;
 import org.example.ai.agent.chat.mapper.AiChatMessageMapper;
 import org.example.ai.agent.chat.mapper.AiChatSessionMapper;
 import org.example.ai.agent.chat.service.AiChatSessionService;
+import org.example.ai.agent.chat.stream.ResponseChecksumService;
+import org.example.ai.agent.chat.support.ActiveAgentRunRegistry;
 import org.example.ai.agent.chat.vo.ChatMessageVO;
 import org.example.ai.agent.chat.vo.ChatModelVO;
+import org.example.ai.agent.chat.vo.ChatResponseSnapshotVO;
 import org.example.ai.agent.chat.vo.ChatSessionVO;
 import org.example.ai.agent.common.exception.BusinessException;
 import org.example.ai.agent.common.exception.ErrorCode;
@@ -23,7 +26,11 @@ import java.time.LocalDateTime;
 import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 
+import java.util.Objects;
 @Service
 @RequiredArgsConstructor
 public class AiChatSessionServiceImpl implements AiChatSessionService {
@@ -35,6 +42,7 @@ public class AiChatSessionServiceImpl implements AiChatSessionService {
 
     private final AiChatSessionMapper sessionMapper;
     private final AiChatMessageMapper messageMapper;
+    private final ObjectMapper objectMapper;
     /**
      * 统一处理人员授权、默认模型和会话选模。
      */
@@ -44,6 +52,9 @@ public class AiChatSessionServiceImpl implements AiChatSessionService {
      */
     private final ConversationStateService conversationStateService;
     private static final String MESSAGE_TYPE_TEXT = "TEXT";
+    private final ActiveAgentRunRegistry activeAgentRunRegistry;
+    private final ResponseChecksumService responseChecksumService;
+
 
     @Override
     public List<ChatModelVO> listModels(String userId) {
@@ -125,6 +136,75 @@ public class AiChatSessionServiceImpl implements AiChatSessionService {
                     "会话状态已发生变化，请刷新后重试"
             );
         }
+    }
+
+    /**
+     * 按用户、会话、运行和回答标识恢复快照。
+     * 不按最新一条消息猜测，不重新调用工作流或大模型。
+     */
+    @Override
+    public ChatResponseSnapshotVO getResponseSnapshot(String userId, String sessionId, String runId, String responseId) {
+        requireSession(userId, sessionId);
+        if (!StringUtils.hasText(runId)) {
+            throw new BusinessException(
+                    ErrorCode.BAD_REQUEST,
+                    "运行ID不能为空"
+            );
+        }
+
+        String runKey = runId.trim();
+        String responseKey = StringUtils.hasText(responseId) ? responseId.trim() : null;
+
+        /*
+         * 先读取活动状态，再读取数据库。
+         * 避免先查不到快照、随后任务保存并移除登记，
+         * 最后误判为没有可恢复结果。
+         */
+        boolean active = activeAgentRunRegistry.isActive(runKey, userId, sessionId);
+
+        List<AiChatMessage> candidates = messageMapper.selectList(new LambdaQueryWrapper<AiChatMessage>()
+                        .eq(AiChatMessage::getUserId, userId)
+                        .eq(AiChatMessage::getSessionId, sessionId)
+                        .eq(AiChatMessage::getRunId, runKey)
+                        .eq(AiChatMessage::getRole, "ASSISTANT")
+                        .eq(AiChatMessage::getMessageType, MESSAGE_TYPE_TEXT)
+                        .isNotNull(AiChatMessage::getPayloadJson)
+        );
+
+        String documentJson = null;
+        JsonNode document = null;
+        for (AiChatMessage message : candidates) {
+            JsonNode payload = readResponsePayload(message.getPayloadJson());
+            // 数据库查询条件和快照内部身份必须一致。
+            if (!sessionId.equals(payload.path("conversationId").asText())
+                    || !runKey.equals(payload.path("runId").asText())) {
+                throw new BusinessException(
+                        409,
+                        "回答快照与当前会话或运行记录不一致"
+                );
+            }
+
+            if (responseKey != null && !responseKey.equals(payload.path("responseId").asText())) {
+                continue;
+            }
+
+            // 定位不唯一时明确报错，不能随意取第一条或最后一条。
+            if (document != null) {
+                throw new BusinessException(409, "同一次回答存在多份快照，无法安全恢复");
+            }
+            document = payload;
+            documentJson = message.getPayloadJson();
+        }
+        String state;
+        if (document != null && !"RUNNING".equals(document.path("status").asText())) {
+            // 数据库最终状态优先，活动任务可能还在执行收尾。
+            state = "READY";
+        } else {
+            state = active ? "PENDING" : "UNAVAILABLE";
+        }
+
+        String checksum = documentJson == null ? null : responseChecksumService.calculate(documentJson);
+        return new ChatResponseSnapshotVO(state, documentJson, checksum);
     }
 
     @Override
@@ -210,123 +290,216 @@ public class AiChatSessionServiceImpl implements AiChatSessionService {
         saveMessage(userId,sessionId,"ASSISTANT",content,runId, modelCode,messageType,payloadJson);
     }
 
+    /**
+     * 更新同一报告响应，不影响同次运行中的独立追问。
+     */
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public void updateAssistantReportMessage(String userId,
-                                             String sessionId,
-                                             String runId,
-                                             String content,
-                                             String modelCode,
-                                             String payloadJson) {
+    public void updateAssistantReportMessage(String userId, String sessionId, String runId, String content, String modelCode, String payloadJson) {
 
-        if (!StringUtils.hasText(sessionId) || !StringUtils.hasText(runId)) {
-            return;
-        }
-
-        requireSession(userId, sessionId);
-        String visibleContent = content == null ? "" : content;
-        int messageUpdated = messageMapper.update(
-                null,
-                new LambdaUpdateWrapper<AiChatMessage>()
-                        .eq(AiChatMessage::getUserId, userId)
-                        .eq(AiChatMessage::getSessionId, sessionId)
-                        .eq(AiChatMessage::getRole, "ASSISTANT")
-                        .eq(AiChatMessage::getMessageType, MESSAGE_TYPE_TEXT)
-                        .eq(AiChatMessage::getRunId, runId)
-                        .set(
-                                StringUtils.hasText(modelCode),
-                                AiChatMessage::getModelCode,
-                                modelCode
-                        )
-                        .set(
-                                AiChatMessage::getContent,
-                                visibleContent
-                        )
-                        .set(
-                                payloadJson != null,
-                                AiChatMessage::getPayloadJson,
-                                payloadJson
-                        )
-        );
-        if (messageUpdated != 1) {
+        if (!StringUtils.hasText(payloadJson)
+                || !"REPORT".equals(readResponsePayload(payloadJson)
+                .path("mode").asText())) {
             throw new BusinessException(
                     ErrorCode.BAD_REQUEST,
-                    "报告助手消息不存在或已被重复更新"
+                    "报告更新必须提供完整REPORT快照"
             );
         }
 
-        int sessionUpdated = sessionMapper.update(
-                null,
+        saveMessage(
+                userId, sessionId, "ASSISTANT",
+                content, runId, modelCode,
+                MESSAGE_TYPE_TEXT, payloadJson
+        );
+    }
+
+    /**
+     * 保存聊天消息。
+     * 统一回答按响应标识更新，普通消息仍独立插入。
+     */
+    private void saveMessage(String userId, String sessionId, String role, String content, String runId, String modelCode, String messageType, String payloadJson) {
+
+        if (!StringUtils.hasText(sessionId)) {
+            throw new BusinessException(ErrorCode.BAD_REQUEST, "会话ID不能为空");
+        }
+
+        if (!StringUtils.hasText(content) && !StringUtils.hasText(payloadJson)) {
+            return;
+        }
+
+        String type = StringUtils.hasText(messageType)
+                ? messageType : MESSAGE_TYPE_TEXT;
+        String visibleContent = content == null ? "" : content;
+
+        JsonNode response = null;
+        if ("ASSISTANT".equals(role)
+                && MESSAGE_TYPE_TEXT.equals(type)
+                && StringUtils.hasText(payloadJson)) {
+            response = readResponsePayload(payloadJson);
+
+            if (!Objects.equals(runId, response.path("runId").asText())
+                    || !Objects.equals(sessionId,
+                    response.path("conversationId").asText())) {
+                throw new BusinessException(
+                        ErrorCode.BAD_REQUEST,
+                        "回答快照与当前运行或会话不一致"
+                );
+            }
+        }
+
+        // 所有消息写入先锁定同一会话，避免并发检查后重复插入。
+        AiChatSession session = sessionMapper.selectOne(
+                new LambdaQueryWrapper<AiChatSession>()
+                        .eq(AiChatSession::getId, sessionId)
+                        .eq(AiChatSession::getUserId, userId)
+                        .eq(AiChatSession::getDeleted, 0)
+                        .last("FOR UPDATE")
+        );
+
+        if (session == null) {
+            throw new BusinessException(
+                    ErrorCode.BAD_REQUEST,
+                    "会话不存在或无权访问"
+            );
+        }
+
+        AiChatMessage message = null;
+
+        if (response != null) {
+            String responseId = response.path("responseId").asText();
+
+            List<AiChatMessage> candidates = messageMapper.selectList(
+                    new LambdaQueryWrapper<AiChatMessage>()
+                            .eq(AiChatMessage::getUserId, userId)
+                            .eq(AiChatMessage::getSessionId, sessionId)
+                            .eq(AiChatMessage::getRole, "ASSISTANT")
+                            .eq(AiChatMessage::getMessageType, MESSAGE_TYPE_TEXT)
+                            .eq(AiChatMessage::getRunId, runId)
+                            .isNotNull(AiChatMessage::getPayloadJson)
+            );
+
+            for (AiChatMessage candidate : candidates) {
+                JsonNode saved = readResponsePayload(candidate.getPayloadJson());
+
+                if (!responseId.equals(saved.path("responseId").asText())) {
+                    continue;
+                }
+
+                if (message != null) {
+                    throw new BusinessException(
+                            ErrorCode.BAD_REQUEST,
+                            "同一响应存在重复消息，请先处理重复记录"
+                    );
+                }
+
+                if (!response.path("mode").asText()
+                        .equals(saved.path("mode").asText())) {
+                    throw new BusinessException(
+                            ErrorCode.BAD_REQUEST,
+                            "同一响应不能切换CHAT和REPORT模式"
+                    );
+                }
+
+                // 最终快照提交后只接受相同内容重放，禁止被另一份终态或生成中快照覆盖。
+                if (!"RUNNING".equals(saved.path("status").asText()) && !saved.equals(response)) {
+                    throw new BusinessException(ErrorCode.BAD_REQUEST, "该回答已结束，不能覆盖已保存的最终快照");
+                }
+                message = candidate;
+            }
+        }
+
+        boolean inserted = message == null;
+
+        if (inserted) {
+            message = new AiChatMessage();
+            message.setSessionId(sessionId);
+            message.setUserId(userId);
+            message.setRole(role);
+            message.setMessageType(type);
+            message.setRunId(runId);
+            message.setCreatedAt(LocalDateTime.now());
+        }
+
+        String effectiveModelCode = StringUtils.hasText(modelCode)
+                ? modelCode : message.getModelCode();
+
+        // 相同快照重复保存时直接返回，不重复计数。
+        if (!inserted
+                && Objects.equals(message.getContent(), visibleContent)
+                && Objects.equals(message.getPayloadJson(), payloadJson)
+                && Objects.equals(message.getModelCode(), effectiveModelCode)) {
+            return;
+        }
+
+        message.setContent(visibleContent);
+        message.setPayloadJson(payloadJson);
+        message.setModelCode(effectiveModelCode);
+
+        int saved = inserted
+                ? messageMapper.insert(message)
+                : messageMapper.updateById(message);
+
+        if (saved != 1) {
+            throw new BusinessException(ErrorCode.BAD_REQUEST, "聊天消息保存失败");
+        }
+
+        // 更新较早的报告时，不能把会话摘要覆盖成旧消息。
+        AiChatMessage latest = messageMapper.selectOne(
+                new LambdaQueryWrapper<AiChatMessage>()
+                        .eq(AiChatMessage::getUserId, userId)
+                        .eq(AiChatMessage::getSessionId, sessionId)
+                        .orderByDesc(AiChatMessage::getId)
+                        .last("LIMIT 1")
+        );
+
+        String lastContent = latest == null || latest.getContent() == null
+                ? "" : latest.getContent();
+
+        LambdaUpdateWrapper<AiChatSession> update =
                 new LambdaUpdateWrapper<AiChatSession>()
                         .eq(AiChatSession::getId, sessionId)
                         .eq(AiChatSession::getUserId, userId)
                         .eq(AiChatSession::getDeleted, 0)
                         .set(AiChatSession::getLastMessage,
-                                visibleContent.length() > 200
-                                        ? visibleContent.substring(0, 200)
-                                        : visibleContent)
-        );
+                                lastContent.substring(0, Math.min(200, lastContent.length())))
+                        .set(AiChatSession::getUpdatedAt, LocalDateTime.now());
 
-        if (sessionUpdated != 1) {
-            throw new BusinessException(
-                    ErrorCode.BAD_REQUEST,
-                    "会话已删除或无权访问"
-            );
+        if (inserted) {
+            update.setSql("message_count = message_count + 1");
         }
+
+        // 当前会话已加锁；重复摘要可能不产生数据变化，不据此判断保存失败。
+        sessionMapper.update(null, update);
     }
 
-    private void saveMessage( String userId,
-            String sessionId,
-            String role,
-            String content,
-            String runId,
-            String modelCode,
-            String messageType,
-            String payloadJson) {
-
-        if (!StringUtils.hasText(sessionId) || !StringUtils.hasText(content)) {
-            return;
-        }
-
-        //  保存前验证会话属于当前登录用户。
-        requireSession(userId, sessionId);
-
-        AiChatMessage message = new AiChatMessage();
-        message.setSessionId(sessionId);
-        message.setUserId(userId);
-        message.setRole(role);
-        message.setContent(content);
-        message.setMessageType( StringUtils.hasText(messageType)
-                        ? messageType
-                        : MESSAGE_TYPE_TEXT );
-        message.setPayloadJson(payloadJson);
-        message.setRunId(runId);
-        message.setModelCode(modelCode);
-        message.setCreatedAt(LocalDateTime.now());
-
-        messageMapper.insert(message);
-        int updated = sessionMapper.update(
-                null,
-                new LambdaUpdateWrapper<AiChatSession>()
-                        .eq(AiChatSession::getId, sessionId)
-                        .eq(AiChatSession::getUserId, userId)
-                        .eq(AiChatSession::getDeleted, 0)
-                        .set(
-                                AiChatSession::getLastMessage,
-                                content.length() > 200
-                                        ? content.substring(0, 200)
-                                        : content
-                        )
-                        .setSql("message_count = message_count + 1")
-        );
-
-        if (updated != 1) {
-            //  事务会同时回滚已经插入的聊天消息。
+    /**
+     * 只接受当前统一回答协议，不兼容历史协议。
+     */
+    private JsonNode readResponsePayload(String payloadJson) {
+        JsonNode payload;
+        try {
+            payload = objectMapper.readTree(payloadJson);
+        } catch (JsonProcessingException exception) {
             throw new BusinessException(
                     ErrorCode.BAD_REQUEST,
-                    "会话已删除或无权访问"
+                    "回答快照不是有效JSON"
             );
         }
+
+        if (payload == null
+                || !payload.isObject()
+                || !List.of("CHAT", "REPORT")
+                .contains(payload.path("mode").asText())
+                || payload.path("responseId").asText().isBlank()
+                || !List.of("RUNNING", "COMPLETED", "PARTIAL", "FAILED", "CANCELLED")
+                .contains(payload.path("status").asText())) {
+            throw new BusinessException(
+                    ErrorCode.BAD_REQUEST,
+                    "回答快照缺少有效的模式、响应标识或状态"
+            );
+        }
+
+        return payload;
     }
 
     private ChatSessionVO toSessionVO(AiChatSession session) {

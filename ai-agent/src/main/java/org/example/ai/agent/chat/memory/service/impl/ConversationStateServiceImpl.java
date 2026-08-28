@@ -9,6 +9,7 @@ import org.example.ai.agent.chat.mapper.AiChatSessionMapper;
 import org.example.ai.agent.chat.memory.entity.AiConversationState;
 import org.example.ai.agent.chat.memory.mapper.AiConversationStateMapper;
 import org.example.ai.agent.chat.memory.model.BusinessConversationState;
+import org.example.ai.agent.chat.memory.model.ResultStatisticsContext;
 import org.example.ai.agent.chat.memory.service.ConversationStateService;
 import org.example.ai.agent.common.exception.BusinessException;
 import org.example.ai.agent.common.exception.ErrorCode;
@@ -16,6 +17,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
+import java.time.LocalDateTime;
+import java.util.Objects;
 import java.util.Optional;
 
 /**
@@ -112,6 +115,64 @@ public class ConversationStateServiceImpl  implements ConversationStateService {
         stateMapper.delete(new LambdaQueryWrapper<AiConversationState>()
                         .eq(AiConversationState::getSessionId, sessionId)
                         .eq(AiConversationState::getUserId, userId));
+    }
+
+    /**
+     * 在当前会话状态上更新统计记忆。
+     *
+     * 快照身份、上一轮统计身份和数据库版本共同防止并发覆盖。
+     */
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public boolean saveStatisticsContext(String userId, String sessionId, ResultStatisticsContext context, String expectedPreviousRunId) {
+
+        requireSession(userId, sessionId);
+
+        if (context == null || context.fieldIds().isEmpty() || !StringUtils.hasText(context.runId())) {
+            throw new BusinessException(
+                    ErrorCode.BAD_REQUEST,
+                    "统计上下文不完整"
+            );
+        }
+
+        AiConversationState entity = findState(userId, sessionId);
+        if (entity == null) {
+            return false;
+        }
+
+        BusinessConversationState state;
+        try {
+            state = objectMapper.readValue(entity.getStateJson(), BusinessConversationState.class);
+        } catch (JsonProcessingException exception) {
+            throw new BusinessException(
+                    ErrorCode.INTERNAL_ERROR,
+                    "会话业务状态解析失败",
+                    exception
+            );
+        }
+
+        // 用户已经重新查询或切换业务结果时，不写回旧统计。
+        if (state == null || !context.matchesArtifact(state.getResultArtifactId())) {
+            return false;
+        }
+
+        ResultStatisticsContext previous = state.getLastStatisticsContext();
+        String actualPreviousRunId = null;
+
+        if (previous != null && previous.matchesArtifact(state.getResultArtifactId())) {
+            actualPreviousRunId = previous.runId();
+        }
+
+        // 同一快照已经完成了另一轮统计时，不覆盖它的字段记忆。
+        if (!Objects.equals(expectedPreviousRunId, actualPreviousRunId)) {
+            return false;
+        }
+        state.setLastStatisticsContext(context);
+        state.setLastPresentationMode("CHAT");
+        state.setUpdatedAt(LocalDateTime.now());
+        entity.setStateJson(writeState(state));
+        // 使用本次读取的版本更新；冲突时不重试覆盖。
+        return stateMapper.updateById(entity) == 1;
     }
 
     /**

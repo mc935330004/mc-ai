@@ -9,8 +9,11 @@ import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.text.DecimalFormat;
+import java.text.DecimalFormatSymbols;
 import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -44,24 +47,22 @@ public class FactValueFormatter {
             return formatEnumValue(value, field);
         }
         if ("amount".equalsIgnoreCase(displayFormat) && value.isNumber()) {
-            return formatAmount(value.decimalValue());
+            return formatNumber(value.decimalValue(), field.getPrecisionScale(), true);
         }
-
-        if ("percent".equalsIgnoreCase(displayFormat)) {
-            /*
-             * 不自动乘以100。
-             *
-             * 原因：
-             * 无法确定业务接口返回的是 0.72 还是 72，
-             * 字段字典未明确前不能擅自改变业务值。
-             */
-            return value.asText() + "%";
+        if ("percent".equalsIgnoreCase( displayFormat)) {
+            String percentValue = value.isNumber() ? formatNumber(value.decimalValue(),field.getPrecisionScale(),false): value.asText();
+            return percentValue.endsWith("%")
+                    ? percentValue
+                    : percentValue + "%";
         }
 
         if (value.isTextual()) {
             return value.asText();
         }
 
+        if (value.isNumber() && field != null && field.getPrecisionScale() != null) {
+            return formatNumber(value.decimalValue(), field.getPrecisionScale(), false);
+        }
         if (value.isNumber() || value.isBoolean()) {
             return value.asText();
         }
@@ -131,20 +132,36 @@ public class FactValueFormatter {
     }
 
     /**
-     * 金额只增加千位分隔符，不添加未知币种。
+     * 按字段配置确定性格式化数字。
+     *
+     * 不换算金额单位，
+     * 不自动将比例乘以100。
      */
-    private String formatAmount(BigDecimal amount) {
-        DecimalFormat formatter = new DecimalFormat("#,##0.##");
-        return formatter.format(amount);
+    private String formatNumber(BigDecimal value, Integer precisionScale, boolean grouping) {
+        if (precisionScale == null) {
+            if (grouping) {
+                DecimalFormat formatter = new DecimalFormat("#,##0.##", DecimalFormatSymbols.getInstance(Locale.ROOT));
+                return formatter.format(value);
+            }
+            return value.stripTrailingZeros().toPlainString();
+        }
+
+        BigDecimal scaled =value.setScale(precisionScale, RoundingMode.HALF_UP);
+        DecimalFormat formatter = new DecimalFormat(grouping ? "#,##0" : "0", DecimalFormatSymbols.getInstance(Locale.ROOT));
+        formatter.setMinimumFractionDigits(precisionScale);
+        formatter.setMaximumFractionDigits(precisionScale);
+        return formatter.format(scaled);
     }
 
     /**
-     * 获取字段空值展示文本。
+     * 空值只生成展示文本，不改变原始值和计算结果。
      */
     public String nullText(FieldMeta field) {
-        if (field != null && StringUtils.hasText(field.getNullDisplayText() )) {
-            return field.getNullDisplayText();
-        }
-        return "";
+        String type = field == null || field.getType() == null ? "" : field.getType().trim().toLowerCase(Locale.ROOT);
+        return switch (type) {
+            case "number", "integer", "int", "long",
+                 "float", "double", "decimal", "bigdecimal", "numeric" -> "0";
+            default -> "";
+        };
     }
 }

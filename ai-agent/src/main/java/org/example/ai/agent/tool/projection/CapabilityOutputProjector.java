@@ -197,14 +197,14 @@ public class CapabilityOutputProjector {
     }
 
     /**
-     * visible=0 的字段只能供工作流内部使用，
-     * 不能进入前端和大模型展示数据。
+     * userVisible=0的字段只供工作流内部使用，
+     * 不能进入前端展示数据。
      */
     private boolean isDisplayVisible(
             FieldMeta field) {
 
         return field != null
                 && !Integer.valueOf(0)
-                .equals(field.getVisible());
+                .equals(field.getUserVisible());
     }
 }

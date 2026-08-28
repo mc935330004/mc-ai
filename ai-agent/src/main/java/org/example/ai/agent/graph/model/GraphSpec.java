@@ -47,13 +47,6 @@ public class GraphSpec {
      * 嵌套ForEach子图可以为空。
      */
     private String name;
-    /**
-     * 工作流默认展示方式。
-     *
-     * 旧工作流没有该字段时保持 null，
-     * 运行时继续按 REPORT 兼容。
-     */
-    private WorkflowPresentationMode presentationMode;
 
     /**
      * 随工作流版本发布的风险判定规则。
@@ -80,9 +73,19 @@ public class GraphSpec {
     private JsonNode inputSchema;
 
     /**
+     * 工作流默认展示方式。
+     *
+     * 未配置时统一使用智能选择，
+     * 不再保留旧报表兼容模式。
+     */
+    @Builder.Default
+    private WorkflowPresentationMode presentationMode = WorkflowPresentationMode.AUTO;
+
+    /**
      * 当前工作流发布版本使用的固定报告定义。
      *
-     * 不配置时继续使用已有专用模板或通用降级报告。
+     * 只有需要生成完整报表的工作流才需要配置。
+     * 报表内容全部根据该配置生成，不再调用业务专用模板。
      */
     private ReportDefinitionSpec reportDefinition;
 }

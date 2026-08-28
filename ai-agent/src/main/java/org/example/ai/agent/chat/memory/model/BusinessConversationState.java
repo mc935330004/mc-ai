@@ -37,6 +37,12 @@ public class BusinessConversationState {
     private String resultArtifactId;
 
     /**
+     * 最近一次成功统计的字段和运算方式。
+     * 随现有state_json保存，不需要修改表结构。
+     */
+    private ResultStatisticsContext lastStatisticsContext;
+
+    /**
      * 上一轮结果中的项目展示顺序。
      */
     private List<String> displayObjectIds = new ArrayList<>();

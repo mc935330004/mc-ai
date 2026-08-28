@@ -2,7 +2,7 @@ package org.example.ai.agent.tool;
 
 import lombok.Builder;
 import lombok.Data;
-import org.example.ai.agent.answer.model.AnswerFact;
+import org.example.ai.agent.answer.model.UnifiedFactSet;
 
 import java.util.List;
 
@@ -140,10 +140,10 @@ public class ToolResult {
     private Object input;
 
     /**
-     * 根据字段字典从业务响应中提取的标准事实。
+     * 根据字段字典提取的统一事实集合。
      *
-     * AnswerComposer优先使用facts生成最终回答，
-     * 不直接依赖完整raw响应。
+     * 普通能力、分页能力和工作流统一使用该模型，
+     * 禁止再次新增List<AnswerFact>并行字段。
      */
-    private List<AnswerFact> facts;
+    private UnifiedFactSet factSet;
 }

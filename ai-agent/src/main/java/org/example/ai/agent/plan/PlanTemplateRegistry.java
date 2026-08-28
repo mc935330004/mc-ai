@@ -181,37 +181,34 @@ public class PlanTemplateRegistry {
     /**
      * 动态业务查询计划。
      *
-     * 这里不再写死接口，而是让 DynamicCapabilityPlanner 根据用户问题选择已启用能力。
+     * 本计划只负责调用真实业务能力。
+     * 回答规划统一由BusinessTextAnswerService处理。
      */
-    private RoutePlan buildDynamicBusinessPlan(String runId, AgentRequest request, RouteType routeType,
-                                               IntentResult intentResult) {
-        DynamicCapabilityPlan dynamicPlan =  intentResult.getDynamicCapabilityPlan();
+    private RoutePlan buildDynamicBusinessPlan(
+            String runId,
+            AgentRequest request,
+            RouteType routeType,
+            IntentResult intentResult) {
+
+        DynamicCapabilityPlan dynamicPlan = intentResult.getDynamicCapabilityPlan();
+
         if (dynamicPlan == null || !dynamicPlan.isMatched()) {
             throw new IllegalStateException("业务路由缺少有效的动态能力计划");
         }
+
         return RoutePlan.builder()
                 .runId(runId)
                 .routeType(routeType)
                 .userQuestion(request.getUserQuestion())
-                .goal("调用业务系统真实接口查询数据，并根据字段字典生成 Markdown 回答")
-                .steps(List.of(
-                        PlanStep.builder()
-                                .stepNo(1)
-                                .stepType(StepType.BUSINESS_TOOL)
-                                .stepName("调用动态业务能力：" + dynamicPlan.getCapabilityCode())
-                                .capabilityCode(dynamicPlan.getCapabilityCode())
-                                .input(dynamicPlan.getInput())
-                                .outputKey("businessData")
-                                .build(),
-                        PlanStep.builder()
-                                .stepNo(2)
-                                .stepType(StepType.LLM_SUMMARY)
-                                .stepName("根据业务数据和字段字典生成 Markdown 回答")
-                                .inputKeys(List.of("businessData"))
-                                .outputKey("finalAnswer")
-                                .build()
-                ))
-                .build();
+                .goal("调用业务系统真实接口并生成结构化文字回答")
+                .steps(List.of(PlanStep.builder()
+                                        .stepNo(1)
+                                        .stepType(StepType.BUSINESS_TOOL)
+                                        .stepName("调用动态业务能力：" + dynamicPlan.getCapabilityCode())
+                                        .capabilityCode(dynamicPlan.getCapabilityCode())
+                                        .input(dynamicPlan.getInput())
+                                        .outputKey("businessData")
+                                        .build())).build();
     }
 
     /**

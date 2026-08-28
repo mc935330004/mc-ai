@@ -8,12 +8,13 @@ import org.example.ai.agent.chat.vo.ReportSchemaVO;
 import org.example.ai.agent.common.enums.ReportSectionType;
 import org.example.ai.agent.graph.model.ReportFieldBindingSpec;
 import org.example.ai.agent.graph.model.report.ReportSectionSpec;
-import lombok.extern.slf4j.Slf4j;
 import org.example.ai.agent.graph.model.report.ReportCalculationSpec;
-import org.example.ai.agent.graph.model.report.config.ReportMetricCalculationService;
-import org.example.ai.agent.tool.FieldMeta;
 import org.springframework.stereotype.Component;
+import org.example.ai.agent.capability.service.FieldMetadataService;
 import org.springframework.util.StringUtils;
+import org.example.ai.agent.answer.model.AnswerFact;
+import org.example.ai.agent.workflow.answer.calculation.WorkflowCalculationFactService;
+
 import java.util.HashSet;
 import java.util.Set;
 import java.util.ArrayList;
@@ -27,7 +28,6 @@ import java.util.Map;
  *
  * 本类不查询业务接口、不调用大模型、不生成页面代码。
  */
-@Slf4j
 @Component
 @RequiredArgsConstructor
 public class ConfigurableReportSectionBuilder {
@@ -44,10 +44,11 @@ public class ConfigurableReportSectionBuilder {
      * 单个报告区块最多允许的分组数量。
      */
     private static final int MAX_GROUP_COUNT = 500;
+    private final WorkflowCalculationFactService calculationFactService;
     /**
-     * 负责执行核心指标中的结构化计算公式。
+     * 统一转换字段展示元数据。
      */
-    private final ReportMetricCalculationService metricCalculationService;
+    private final FieldMetadataService fieldMetadataService;
 
     public List<ReportSchemaVO.Section> build(ResolvedReportDefinition resolved,JsonNode safeResult) {
 
@@ -221,7 +222,7 @@ public class ConfigurableReportSectionBuilder {
          * 不影响基础信息和表格区块。
          */
         if (section.type() == ReportSectionType.METRICS) {
-            items.addAll(buildCalculationItems(section, safeResult));
+            items.addAll(buildCalculationItems(section, resolved, safeResult));
         }
 
         return new ReportSchemaVO.Section(
@@ -235,33 +236,35 @@ public class ConfigurableReportSectionBuilder {
 
 
     /**
-     * 构建核心指标区块中的自定义计算结果。
+     * 使用统一计算事实构建报告指标。
      *
-     * 单个计算指标执行失败时只返回空值，
-     * 不影响其他指标和报告区块继续生成。
+     * CHAT和REPORT不再分别执行不同的计算逻辑。
      */
-    private List<ReportSchemaVO.Item> buildCalculationItems(ReportSectionSpec section, JsonNode safeResult) {
+    private List<ReportSchemaVO.Item> buildCalculationItems(ReportSectionSpec section, ResolvedReportDefinition resolved, JsonNode safeResult) {
+
         List<ReportSchemaVO.Item> items = new ArrayList<>();
-        for (ReportCalculationSpec calculation : section.calculations()) {
-            Object value = null;
-            try {
-                value = metricCalculationService.calculate(
-                        calculation,
-                        safeResult
-                );
-            } catch (RuntimeException exception) {
-                /*
-                 * 日志只记录配置标识和异常类型，
-                 * 不记录接口返回的实际业务数据。
-                 */
-                log.warn(
-                        "报告计算指标构建失败，sectionTitle={}，calculationKey={}，errorType={}",
-                        section.title(),
-                        calculation.key(),
-                        exception.getClass().getSimpleName()
-                );
-            }
-            items.add(new ReportSchemaVO.Item(calculation.key(), calculation.label(), value, calculation.displayFormat()));
+
+        for (int index = 0; index < section.calculations().size(); index++) {
+            ReportCalculationSpec calculation = section.calculations().get(index);
+            AnswerFact fact = calculationFactService.calculateFact(calculation, resolved, safeResult, "report", section.title(), 1_000 + index);
+
+            Object value = fact.isMissing()
+                            ? fact.getFormattedValue()
+                            : fact.getRawValue();
+
+            String displayFormat =
+                    fact.isMissing()
+                            ? "TEXT"
+                            : fact.getDisplayFormat();
+
+            items.add(
+                    new ReportSchemaVO.Item(
+                            calculation.key(),
+                            calculation.label(),
+                            value,
+                            displayFormat
+                    )
+            );
         }
 
         return List.copyOf(items);
@@ -803,36 +806,8 @@ public class ConfigurableReportSectionBuilder {
         return null;
     }
 
-    private String formatValue(JsonNode value,FieldDictionary dictionary) {
-
-        return valueFormatter.format(value,toFieldMeta(dictionary));
-    }
-
-    private FieldMeta toFieldMeta(FieldDictionary dictionary) {
-        return FieldMeta.builder()
-                .name(dictionary.getFieldName())
-                .cnName(dictionary.getFieldCnName())
-                .path(dictionary.getFieldPath())
-                .type(dictionary.getFieldType())
-                .format(dictionary.getDisplayFormat())
-                .enumMappingJson(
-                        dictionary.getEnumMappingJson()
-                )
-                .meaning(dictionary.getBusinessMeaning())
-                .requiredOutput(
-                        dictionary.getRequiredOutput()
-                )
-                .visible(dictionary.getVisible())
-                .displayOrder(
-                        dictionary.getDisplayOrder()
-                )
-                .displayGroup(
-                        dictionary.getDisplayGroup()
-                )
-                .nullDisplayText(
-                        dictionary.getNullDisplayText()
-                )
-                .build();
+    private String formatValue(JsonNode value, FieldDictionary dictionary) {
+        return valueFormatter.format(value, fieldMetadataService.toFieldMeta(dictionary));
     }
 
     private String resolveLabel(FieldDictionary dictionary,String fallback) {

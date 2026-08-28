@@ -1,7 +1,6 @@
 package org.example.ai.agent.capability.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
-import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -16,16 +15,15 @@ import org.example.ai.agent.capability.entity.CapabilityDefinition;
 import org.example.ai.agent.capability.entity.FieldDictionary;
 import org.example.ai.agent.capability.mapper.CapabilityDefinitionMapper;
 import org.example.ai.agent.capability.mapper.FieldDictionaryMapper;
-import org.example.ai.agent.capability.service.CapabilityDefinitionService;
 import org.example.ai.agent.capability.service.FieldDictionaryService;
 import org.example.ai.agent.capability.vo.FieldDictionaryBatchSaveResultVO;
 import org.example.ai.agent.capability.vo.FieldDictionaryGenerateResultVO;
 import org.example.ai.agent.common.exception.BusinessException;
 import org.springframework.beans.BeanUtils;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
+import org.example.ai.agent.capability.service.FieldMetadataService;
 
 import java.time.LocalDateTime;
 import java.util.*;
@@ -39,7 +37,7 @@ import java.util.stream.Collectors;
 public class FieldDictionaryServiceImpl extends ServiceImpl<FieldDictionaryMapper, FieldDictionary>
         implements FieldDictionaryService {
     private final ObjectMapper objectMapper;
-
+    private final FieldMetadataService fieldMetadataService;
     private final CapabilityDefinitionMapper capabilityDefinitionMapper;
     /**
      * 自动生成字段字典时忽略的技术字段。
@@ -84,7 +82,7 @@ public class FieldDictionaryServiceImpl extends ServiceImpl<FieldDictionaryMappe
 
         FieldDictionary entity = new FieldDictionary();
         BeanUtils.copyProperties(dto, entity);
-
+        fieldMetadataService.applyDefaults(entity);
         // 非枚举格式会自动清空旧映射，避免产生失效配置。
         entity.setEnumMappingJson(enumMappingJson);
         entity.setCreatedAt(LocalDateTime.now());
@@ -97,9 +95,10 @@ public class FieldDictionaryServiceImpl extends ServiceImpl<FieldDictionaryMappe
         entity.setRequiredOutput(dto.getRequiredOutput() == null
                         ? 0
                         : dto.getRequiredOutput());
-        entity.setVisible(dto.getVisible() == null
-                        ? 1
-                        : dto.getVisible());
+        entity.setModelVisible(dto.getModelVisible() == null
+                        ? 1 : dto.getModelVisible());
+
+        entity.setUserVisible(dto.getUserVisible() == null ? 1 : dto.getUserVisible());
         entity.setDisplayOrder(dto.getDisplayOrder() == null
                         ? 0
                         : dto.getDisplayOrder()
@@ -166,45 +165,43 @@ public class FieldDictionaryServiceImpl extends ServiceImpl<FieldDictionaryMappe
 
     @Override
     public Boolean updateDisplayOptions(Long id, FieldDictionaryDisplayOptionsDTO dto) {
-
         if (id == null || getById(id) == null) {
             throw new BusinessException(404, "字段字典不存在：" + id);
         }
         validateBinaryOption(dto);
-        int visible = dto.getVisible();
-        int requiredOutput = visible == 0
-                ? 0
-                : dto.getRequiredOutput();
+
+        int userVisible = dto.getUserVisible();
+
+        int requiredOutput = userVisible == 0
+                        ? 0
+                        : dto.getRequiredOutput();
 
         boolean updated = lambdaUpdate()
-                .eq(FieldDictionary::getId, id)
-                .set(FieldDictionary::getVisible, visible)
-                .set(FieldDictionary::getRequiredOutput, requiredOutput)
-                .set(FieldDictionary::getSearchable, dto.getSearchable())
-                .set(FieldDictionary::getAggregatable, dto.getAggregatable())
-                .update();
+                        .eq(FieldDictionary::getId, id)
+                        .set(FieldDictionary::getModelVisible, dto.getModelVisible())
+                        .set(FieldDictionary::getUserVisible, userVisible)
+                        .set(FieldDictionary::getRequiredOutput, requiredOutput)
+                        .set(FieldDictionary::getSearchable, dto.getSearchable())
+                        .update();
+
         if (!updated) {
-            throw new BusinessException(404, "字段字典不存在：" + id);
+            throw new BusinessException(
+                    404,
+                    "字段字典不存在：" + id
+            );
         }
+
         return true;
     }
 
     /**
-     * 校验列表快捷编辑只接收 0 或 1。
+     * 校验列表快捷编辑只接收0或1。
      */
-    private void validateBinaryOption(
-            FieldDictionaryDisplayOptionsDTO dto) {
+    private void validateBinaryOption(FieldDictionaryDisplayOptionsDTO dto) {
 
-        if (dto == null
-                || !isBinary(dto.getVisible())
-                || !isBinary(dto.getRequiredOutput())
-                || !isBinary(dto.getSearchable())
-                || !isBinary(dto.getAggregatable())) {
-
-            throw new BusinessException(
-                    400,
-                    "字段快捷配置只能使用0或1"
-            );
+        if (dto == null || !isBinary(dto.getModelVisible()) || !isBinary(dto.getUserVisible()) ||
+                !isBinary(dto.getRequiredOutput()) || !isBinary(dto.getSearchable())) {
+            throw new BusinessException(400, "字段快捷配置只能使用0或1");
         }
     }
 
@@ -292,6 +289,7 @@ public class FieldDictionaryServiceImpl extends ServiceImpl<FieldDictionaryMappe
                     field.setNullDisplayText(
                             resolveNullDisplayText(field.getFieldType())
                     );
+                    fieldMetadataService.applyDefaults(field);
                 }).toList();
 
         return needSaveList.isEmpty() || saveBatch(needSaveList);
@@ -458,6 +456,7 @@ public class FieldDictionaryServiceImpl extends ServiceImpl<FieldDictionaryMappe
                     resolveNullDisplayText(entity.getFieldType())
             );
             entity.setCreatedAt(LocalDateTime.now());
+            fieldMetadataService.applyDefaults(entity);
             entities.add(entity);
             });
 
@@ -756,11 +755,21 @@ public class FieldDictionaryServiceImpl extends ServiceImpl<FieldDictionaryMappe
         if (dto == null) {
             return;
         }
+        if (dto.getModelVisible() != null && !isBinary(dto.getModelVisible())) {
+            throw new BusinessException(400, "模型可见配置只能使用0或1");
+        }
+
+        if (dto.getUserVisible() != null && !isBinary(dto.getUserVisible())) {
+            throw new BusinessException(400, "用户可见配置只能使用0或1");
+        }
+        if (dto.getRequiredOutput() != null && !isBinary(dto.getRequiredOutput())) {
+            throw new BusinessException(400, "必答配置只能使用0或1");
+        }
         /*
          * 禁止出现“必答但不可展示”的矛盾配置。
          */
-        if (Integer.valueOf(1).equals(dto.getRequiredOutput()) && Integer.valueOf(0).equals(dto.getVisible())) {
-            throw new BusinessException( 400, "必答字段必须允许展示" );
+        if (Integer.valueOf(1).equals(dto.getRequiredOutput()) && Integer.valueOf(0).equals(dto.getUserVisible())) {
+            throw new BusinessException(400, "必答字段必须允许展示给用户");
         }
         /*
          * 展示顺序不能小于零。

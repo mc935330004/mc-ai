@@ -32,6 +32,13 @@ public class FieldDictionarySaveDTO {
     private String fieldName;
 
     /**
+     * 字段业务语义编码。
+     *
+     * 不填写时默认使用fieldName。
+     */
+    private String fieldCode;
+
+    /**
      * 字段中文名，例如：合同金额。
      */
     private String fieldCnName;
@@ -79,9 +86,14 @@ public class FieldDictionarySaveDTO {
     private Integer requiredOutput;
 
     /**
-     * 是否允许展示。
+     * 是否允许发送给大模型。
      */
-    private Integer visible;
+    private Integer modelVisible;
+
+    /**
+     * 是否允许展示给用户。
+     */
+    private Integer userVisible;
 
     /**
      * 展示顺序。
@@ -92,6 +104,40 @@ public class FieldDictionarySaveDTO {
      * 展示分组。
      */
     private String displayGroup;
+
+    /**
+     * 字段重要程度：HIGH、NORMAL、LOW。
+     */
+    private String importance;
+
+    /**
+     * 建议展示组件。
+     *
+     * 不填写时默认AUTO。
+     */
+    private String displayComponent;
+
+    /**
+     * 是否优先进入汇总结果。
+     */
+    private Integer summaryFlag;
+
+    /**
+     * 字段展示单位。
+     */
+    private String unit;
+
+    /**
+     * 数字展示精度。
+     */
+    private Integer precisionScale;
+
+    /**
+     * 字段值来源。
+     *
+     * 不填写时默认RAW。
+     */
+    private String valueSource;
 
     /**
      * 空值展示文本。

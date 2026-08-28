@@ -10,10 +10,10 @@ import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 
 /**
- * 从本次实际执行的发布版本中读取回答策略。
+ * 读取本次工作流实际发布版本的报告配置状态。
  *
- * 禁止读取 WorkflowDefinition.graphSpecJson 草稿，
- * 避免运行配置与发布版本不一致。
+ * 这里只判断是否存在报告模板，
+ * 不读取工作流默认展示方式。
  */
 @Component
 @RequiredArgsConstructor
@@ -23,17 +23,16 @@ public class WorkflowAnswerPolicyResolver {
     private final GraphSpecParser graphSpecParser;
 
     /**
-     * 解析本次工作流实际执行版本的展示配置。
+     * 判断当前发布版本是否配置了报告模板。
      */
-    public WorkflowAnswerPolicy resolve(WorkflowExecutionOutcome outcome) {
+    public WorkflowAnswerPolicy resolve(
+            WorkflowExecutionOutcome outcome) {
 
-        if (outcome == null || outcome.versionId() == null || !StringUtils.hasText(outcome.workflowCode())) {
+        if (outcome == null
+                || outcome.versionId() == null
+                || !StringUtils.hasText(outcome.workflowCode())) {
 
-            /*
-             * 无法确认发布版本时保持旧报表行为，
-             * 不允许误切换到新的文字回答链路。
-             */
-            return new WorkflowAnswerPolicy(null);
+            return new WorkflowAnswerPolicy(false);
         }
 
         PublishedWorkflow workflow =
@@ -47,7 +46,7 @@ public class WorkflowAnswerPolicyResolver {
         );
 
         return new WorkflowAnswerPolicy(
-                graph.getPresentationMode()
+                graph.getReportDefinition() != null
         );
     }
 }

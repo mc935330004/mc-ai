@@ -6,6 +6,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import org.example.ai.agent.capability.entity.FieldDictionary;
 import org.example.ai.agent.capability.mapper.FieldDictionaryMapper;
+import org.example.ai.agent.capability.service.FieldMetadataService;
+import org.example.ai.agent.tool.FieldMeta;
 import org.example.ai.agent.workflow.runtime.PublishedWorkflow;
 import org.example.ai.agent.workflow.runtime.WorkflowExecutionOutcome;
 import org.example.ai.agent.workflow.runtime.WorkflowRuntimeSnapshotResolver;
@@ -38,16 +40,18 @@ public class WorkflowAnswerFieldContextResolver {
     private final WorkflowCapabilityCodeCollector capabilityCodeCollector;
     private final FieldDictionaryMapper fieldDictionaryMapper;
     private final ObjectMapper objectMapper;
+    /**
+     * 统一字段元数据转换规则。
+     */
+    private final FieldMetadataService fieldMetadataService;
 
-    public List<WorkflowAnswerFieldContext> resolve(
-            WorkflowExecutionOutcome outcome) {
-        return resolvePolicy(outcome).visibleFields();
+    public List<WorkflowAnswerFieldContext> resolve(WorkflowExecutionOutcome outcome) {
+        return resolvePolicy(outcome).modelFields();
     }
     /**
      * 同时生成可展示字段和禁止发送给模型的字段。
      */
-    public WorkflowAnswerFieldPolicy resolvePolicy(
-            WorkflowExecutionOutcome outcome) {
+    public WorkflowAnswerFieldPolicy resolvePolicy(WorkflowExecutionOutcome outcome) {
 
         if (outcome == null || outcome.versionId() == null
                 || !StringUtils.hasText(
@@ -71,42 +75,15 @@ public class WorkflowAnswerFieldContextResolver {
             return WorkflowAnswerFieldPolicy.empty();
         }
 
-        Set<String> returnedFieldNames =
-                collectReturnedFieldNames(
-                        outcome.result()
-                );
-
-        if (returnedFieldNames.isEmpty()) {
-            return WorkflowAnswerFieldPolicy.empty();
-        }
+        Set<String> returnedFieldNames = collectReturnedFieldNames(outcome.result());
 
         List<FieldDictionary> dictionaries =
-                fieldDictionaryMapper.selectList(
-                        Wrappers
-                                .<FieldDictionary>lambdaQuery()
-                                .in(
-                                        FieldDictionary
-                                                ::getCapabilityCode,
-                                        capabilityCodes
-                                )
-                                .eq(
-                                        FieldDictionary
-                                                ::getPublishStatus,
-                                        "PUBLISHED"
-                                )
-                                .orderByAsc(
-                                        FieldDictionary
-                                                ::getCapabilityCode
-                                )
-                                .orderByAsc(
-                                        FieldDictionary
-                                                ::getDisplayOrder
-                                )
-                                .orderByAsc(
-                                        FieldDictionary
-                                                ::getId
-                                )
-                );
+                fieldDictionaryMapper.selectList(Wrappers.<FieldDictionary>lambdaQuery()
+                                .in(FieldDictionary::getCapabilityCode, capabilityCodes)
+                                .eq(FieldDictionary::getPublishStatus, "PUBLISHED")
+                                .orderByAsc(FieldDictionary::getCapabilityCode)
+                                .orderByAsc(FieldDictionary::getDisplayOrder)
+                                .orderByAsc(FieldDictionary::getId));
 
         if (dictionaries == null || dictionaries.isEmpty()) {
             /*
@@ -118,9 +95,7 @@ public class WorkflowAnswerFieldContextResolver {
             );
         }
 
-        Map<String, WorkflowAnswerFieldContext> visibleFields = new LinkedHashMap<>();
-
-        Set<String> hiddenFieldNames = new LinkedHashSet<>();
+        Map<String, WorkflowAnswerFieldContext> internalFields = new LinkedHashMap<>();
 
         for (FieldDictionary dictionary : dictionaries) {
 
@@ -129,70 +104,52 @@ public class WorkflowAnswerFieldContextResolver {
             }
 
             String fieldName = resolveMachineFieldName(dictionary);
-
-            if (!StringUtils.hasText(fieldName) || !returnedFieldNames.contains(fieldName)) {
+            FieldMeta metadata = fieldMetadataService.toFieldMeta(dictionary);
+            boolean required =Integer.valueOf(1).equals(metadata.getRequiredOutput());
+            // 必答字段不能因为本次没有返回值，就提前丢失字段元数据。
+            if (!StringUtils.hasText(fieldName) || (!required && !returnedFieldNames.contains(fieldName))) {
                 continue;
             }
-
-            /*
-             * visible=0：
-             * 字段仍可存在于workflowData中，
-             * 但是必须从模型输入中删除。
-             */
-            if (Integer.valueOf(0).equals(
-                    dictionary.getVisible())) {
-
-                hiddenFieldNames.add(fieldName);
-                continue;
-            }
-
-            String capabilityCode =
-                    trimToNull(
-                            dictionary.getCapabilityCode()
-                    );
-
-            String fieldPath =
-                    trimToNull(
-                            dictionary.getFieldPath()
-                    );
+            String capabilityCode = trimToNull(dictionary.getCapabilityCode());
+            String fieldPath = trimToNull(dictionary.getFieldPath());
 
             /*
              * 同一个能力中可能存在名称相同、路径不同的字段。
              * 因此不能再使用 capabilityCode + fieldName 去重，
              * 必须优先使用完整字段路径。
              */
-            String uniqueKey =
-                    capabilityCode
-                            + ":"
-                            + (StringUtils.hasText(fieldPath)
-                            ? fieldPath
-                            : fieldName);
+            String uniqueKey = capabilityCode + ":" + (StringUtils.hasText(fieldPath) ? fieldPath : fieldName);
 
-            visibleFields.putIfAbsent(uniqueKey,
-                    new WorkflowAnswerFieldContext(
+            internalFields.putIfAbsent(uniqueKey, new WorkflowAnswerFieldContext(
                             dictionary.getId(),
                             capabilityCode,
                             fieldName,
-                            StringUtils.hasText(
-                                    dictionary.getFieldCnName())
-                                    ? dictionary.getFieldCnName().trim()
-                                    : fieldName,
-                            trimToNull( dictionary.getBusinessMeaning()),
-                            trimToNull(dictionary.getDisplayFormat()),
-                            trimToNull(dictionary.getDisplayGroup()),
+                            StringUtils.hasText(metadata.getCnName()) ? metadata.getCnName().trim() : fieldName,
+                            trimToNull(metadata.getMeaning()),
+                            trimToNull(metadata.getFormat()),
+                            trimToNull(metadata.getDisplayGroup()),
                             fieldPath,
-                            trimToNull(dictionary.getFieldType()),
-
-                            /*
-                             * 当前项目字段字典约定：
-                             * aggregatable = 0 表示允许聚合；
-                             * aggregatable = 1 表示不允许聚合。
-                             */
-                            Integer.valueOf(0).equals(dictionary.getAggregatable())
+                            trimToNull(metadata.getType()), !Integer.valueOf(0).equals(metadata.getModelVisible()),
+                            !Integer.valueOf(0).equals(metadata.getUserVisible()),
+                            StringUtils.hasText(metadata.getFieldCode())
+                                    ? metadata.getFieldCode().trim()
+                                    : fieldName,
+                            metadata.getDisplayOrder(),
+                            Integer.valueOf(1).equals(
+                                    metadata.getRequiredOutput()
+                            ),
+                            metadata.getImportance(),
+                            metadata.getDisplayComponent(),
+                            metadata.getSummaryFlag(),
+                            metadata.getUnit(),
+                            metadata.getPrecisionScale(),
+                            metadata.getValueSource(),
+                            metadata.getEnumMappingJson(),
+                            metadata.getNullDisplayText()
                     )
             );
         }
-        return new WorkflowAnswerFieldPolicy(List.copyOf(visibleFields.values()), hiddenFieldNames);
+        return new WorkflowAnswerFieldPolicy(List.copyOf(internalFields.values()));
     }
     /**
      * 递归收集结果对象中出现过的所有字段名称。

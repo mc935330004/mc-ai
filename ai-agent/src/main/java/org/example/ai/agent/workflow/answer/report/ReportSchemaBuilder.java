@@ -17,8 +17,6 @@ import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.example.ai.agent.workflow.answer.report.template.ReportTemplate;
-import org.example.ai.agent.workflow.answer.report.template.ReportTemplateRegistry;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -39,7 +37,6 @@ public class ReportSchemaBuilder {
     private final WorkflowAnswerFieldContextResolver fieldContextResolver;
     private final WorkflowAnswerPayloadFactory answerPayloadFactory;
     private final ObjectMapper objectMapper;
-    private final ReportTemplateRegistry reportTemplateRegistry;
     private final ReportDefinitionResolver reportDefinitionResolver;
     private final ConfigurableReportSectionBuilder configurableReportSectionBuilder;
     /**
@@ -80,30 +77,18 @@ public class ReportSchemaBuilder {
                         ? artifactId
                         : outcome.runId();
 
-        ReportTemplate reportTemplate = reportTemplateRegistry
-                .find(outcome.workflowCode())
-                .orElse(null);
-
     // 数据提示先创建，配置报告解析失败时需要追加告警。
         List<String> warnings = buildWarnings(trace);
 
-        ResolvedReportDefinition configuredReport = resolveConfiguredReport(
+        ResolvedReportDefinition configuredReport =resolveConfiguredReport(
                         outcome,
-                        reportTemplate,
                         warnings
                 );
-        boolean analysisRequired =resolveAnalysisRequired(safeQueryType,configuredReport);
-        String reportType;
-        if (reportTemplate != null) {
-            reportType = reportTemplate.reportType().name();
-        } else if (configuredReport != null) {
-            reportType = configuredReport
-                    .definition()
-                    .reportType()
-                    .name();
-        } else {
-            reportType =ReportType.GENERIC_WORKFLOW_REPORT.name();
-        }
+        boolean analysisRequired =resolveAnalysisRequired(safeQueryType, configuredReport);
+        String reportType = configuredReport == null
+                ? ReportType.GENERIC_WORKFLOW_REPORT.name()
+                : configuredReport.definition().reportType().name();
+
 
         String title = configuredReport != null
                         && StringUtils.hasText(
@@ -123,7 +108,7 @@ public class ReportSchemaBuilder {
                           ? "BASE_READY"
                           : "PARTIAL";
 
-        List<ReportSchemaVO.Section> sections =buildReportSections( outcome,trace,reportTemplate,configuredReport,warnings );
+        List<ReportSchemaVO.Section> sections = buildReportSections(outcome, trace, configuredReport, warnings);
 
         ReportSchemaVO.Meta meta = new ReportSchemaVO.Meta(
                         trace.topLevelTotalCount(),
@@ -211,50 +196,65 @@ public class ReportSchemaBuilder {
     }
 
     /**
-     * 根据固定模板生成业务区块。
-     *
-     * 没有模板或安全字段策略异常时，
-     * 只返回指标和告警，禁止降级返回原始 JSON。
+     * 所有报告只读取工作流发布版本中的reportDefinition。
      */
     private List<ReportSchemaVO.Section> buildReportSections(
             WorkflowExecutionOutcome outcome,
             WorkflowResultTraceData trace,
-            ReportTemplate reportTemplate,
             ResolvedReportDefinition configuredReport,
             List<String> warnings) {
 
-        if (reportTemplate == null && configuredReport == null) {
-            warnings.add("当前工作流没有固定报告模板，明细暂不展示");
-            return List.of(buildMetricsSection(trace),buildWarningSection(warnings));
+        if (configuredReport == null) {
+            warnings.add("当前工作流没有有效的报告配置，业务明细暂不展示");
+
+            return List.of(
+                    buildMetricsSection(trace),
+                    buildWarningSection(warnings)
+            );
         }
+
         List<ReportSchemaVO.Section> sections = new ArrayList<>();
+
         try {
-            WorkflowAnswerFieldPolicy policy =fieldContextResolver.resolvePolicy(outcome);
-            if (outcome.result() != null && policy.visibleFields().isEmpty()) {
-                warnings.add("字段展示策略未就绪，明细暂不展示");
+            WorkflowAnswerFieldPolicy policy =
+                    fieldContextResolver.resolvePolicy(outcome);
+
+            if (outcome.result() != null
+                    && policy.userFields().isEmpty()) {
+
+                warnings.add("字段展示策略未就绪，业务明细暂不展示");
                 sections.add(buildMetricsSection(trace));
             } else {
-                WorkflowAnswerModelPayload safePayload =answerPayloadFactory.create(outcome,policy.hiddenFieldNames() );
-                JsonNode safeResult =objectMapper.valueToTree(safePayload.result());
-                if (reportTemplate != null) {
-                    // 已有专用模板优先，保证项目结算展示不受影响。
-                    sections.addAll(reportTemplate.buildSections(safeResult));
-                } else {
-                    // 没有专用模板时才使用工作流发布版本中的配置报告。
-                    sections.addAll(configurableReportSectionBuilder.build(configuredReport,safeResult)
-                    );
-                }
+                WorkflowAnswerModelPayload safePayload =
+                        answerPayloadFactory.create(
+                                outcome,
+                                policy.userFieldNames()
+                        );
+
+                JsonNode safeResult =
+                        objectMapper.valueToTree(
+                                safePayload.result()
+                        );
+
+                sections.addAll(
+                        configurableReportSectionBuilder.build(
+                                configuredReport,
+                                safeResult
+                        )
+                );
             }
         } catch (RuntimeException exception) {
             log.warn(
-                    "固定报告模板构建失败，runId={}，workflowCode={}，errorType={}",
+                    "配置报告构建失败，runId={}，workflowCode={}，errorType={}",
                     outcome.runId(),
                     outcome.workflowCode(),
                     exception.getClass().getSimpleName()
             );
-            warnings.add("固定报告模板构建失败，明细暂不展示");
+
+            warnings.add("配置报告构建失败，业务明细暂不展示");
             sections.add(buildMetricsSection(trace));
         }
+
         sections.add(buildWarningSection(warnings));
         return List.copyOf(sections);
     }
@@ -278,17 +278,13 @@ public class ReportSchemaBuilder {
     }
 
     /**
-     * 只有不存在专用模板时才解析配置报告。
+     * 解析工作流发布版本中的报告配置。
      */
-    private ResolvedReportDefinition resolveConfiguredReport(
-            WorkflowExecutionOutcome outcome,
-            ReportTemplate reportTemplate,
-            List<String> warnings) {
-        if (reportTemplate != null) {
-            return null;
-        }
+    private ResolvedReportDefinition resolveConfiguredReport(WorkflowExecutionOutcome outcome, List<String> warnings) {
         try {
-            return reportDefinitionResolver.resolve(outcome).orElse(null);
+            return reportDefinitionResolver
+                    .resolve(outcome)
+                    .orElse(null);
         } catch (RuntimeException exception) {
             log.warn(
                     "配置报告解析失败，runId={}，workflowCode={}，errorType={}",
@@ -296,6 +292,7 @@ public class ReportSchemaBuilder {
                     outcome.workflowCode(),
                     exception.getClass().getSimpleName()
             );
+
             warnings.add("报告配置无效，业务明细暂不展示");
             return null;
         }

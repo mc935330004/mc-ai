@@ -1,12 +1,10 @@
 package org.example.ai.agent.tool.impl;
 
-import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import lombok.RequiredArgsConstructor;
 import org.example.ai.agent.access.service.AgentResourceAccessService;
 import org.example.ai.agent.answer.extractor.DictionaryFactExtractor;
-import org.example.ai.agent.answer.model.AnswerFact;
+import org.example.ai.agent.answer.model.UnifiedFactSet;
 import org.example.ai.agent.capability.entity.CapabilityDefinition;
-import org.example.ai.agent.capability.entity.FieldDictionary;
 import org.example.ai.agent.capability.invocation.runtime.CapabilityHttpInvoker;
 import org.example.ai.agent.capability.invocation.runtime.CapabilityHttpRequest;
 import org.example.ai.agent.capability.invocation.runtime.CapabilityHttpRequestBuilder;
@@ -15,7 +13,6 @@ import org.example.ai.agent.capability.invocation.runtime.CapabilityInvocationCo
 import org.example.ai.agent.capability.invocation.runtime.CapabilityInvocationException;
 import org.example.ai.agent.capability.invocation.runtime.CapabilityResponseInterpreter;
 import org.example.ai.agent.capability.invocation.runtime.ResponseInterpretationResult;
-import org.example.ai.agent.capability.mapper.FieldDictionaryMapper;
 import org.example.ai.agent.capability.service.CapabilityDefinitionService;
 import org.example.ai.agent.common.exception.BusinessException;
 import org.example.ai.agent.plan.PlanStep;
@@ -29,6 +26,7 @@ import org.example.ai.agent.tool.projection.CapabilityOutputProjector;
 import org.springframework.stereotype.Service;
 import org.springframework.util.CollectionUtils;
 import org.springframework.util.StringUtils;
+import org.example.ai.agent.capability.service.FieldMetadataService;
 
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -55,9 +53,6 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
 
     private final CapabilityDefinitionService capabilityDefinitionService;
     private final AgentResourceAccessService resourceAccessService;
-
-    private final FieldDictionaryMapper fieldDictionaryMapper;
-
     private final CapabilityInvocationContextFactory invocationContextFactory;
 
     private final CapabilityHttpRequestBuilder httpRequestBuilder;
@@ -65,6 +60,10 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
     private final CapabilityHttpInvoker httpInvoker;
 
     private final CapabilityResponseInterpreter responseInterpreter;
+    /**
+     * 统一加载已发布字段元数据。
+     */
+    private final FieldMetadataService fieldMetadataService;
     /**
      * PM WRITE 能力权限校验器。
      */
@@ -230,8 +229,7 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
              */
             CapabilityOutputProjection projection = outputProjector.project(raw, interpreted.data(), fields);
 
-            List<AnswerFact> facts = dictionaryFactExtractor.extract(capabilityCode, raw, fields);
-
+            UnifiedFactSet factSet = dictionaryFactExtractor.extract(capabilityCode, raw, fields);
             return ToolResult.builder()
                     .success(true)
                     .capabilityCode(
@@ -272,7 +270,7 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
                             projection.displayData()
                     )
                     .fields(fields)
-                    .facts(facts)
+                    .factSet(factSet)
                     .summary(interpreted.emptyData()
                                     ? "业务能力调用成功，但未查询到数据：" + capability.getCapabilityName():
                             "业务能力调用成功："+ capability.getCapabilityName())
@@ -488,68 +486,12 @@ public class BusinessCapabilityExecutorImpl implements BusinessCapabilityExecuto
     }
 
     /**
-     * 加载已发布字段字典。
+     * 加载已发布字段元数据。
      */
-    private List<FieldMeta> loadFieldMetas(
-            String capabilityCode) {
-
-        List<FieldDictionary> dictionaries =
-                fieldDictionaryMapper.selectList(
-                        new LambdaQueryWrapper<FieldDictionary>()
-                                .eq(
-                                        FieldDictionary
-                                                ::getCapabilityCode,
-                                        capabilityCode
-                                )
-                                .eq(
-                                        FieldDictionary
-                                                ::getPublishStatus,
-                                        "PUBLISHED"
-                                )
-                                .orderByAsc(
-                                        FieldDictionary
-                                                ::getDisplayOrder
-                                )
-                                .orderByAsc(
-                                        FieldDictionary
-                                                ::getId
-                                )
-                );
-
-        return dictionaries.stream()
-                .map(item ->
-                        FieldMeta.builder()
-                                .name(item.getFieldName())
-                                .cnName(item.getFieldCnName())
-                                .path(item.getFieldPath())
-                                .type(item.getFieldType())
-                                .format(item.getDisplayFormat())
-                                .enumMappingJson(item.getEnumMappingJson())
-                                .meaning(item.getBusinessMeaning())
-                                .requiredOutput(defaultInteger(item.getRequiredOutput(), 0))
-                                .visible(defaultInteger(item.getVisible(),
-                                                1))
-                                .displayOrder(defaultInteger(item.getDisplayOrder(), 0))
-                                .displayGroup(item.getDisplayGroup())
-                                .nullDisplayText(StringUtils.hasText(item.getNullDisplayText())
-                                                ? item.getNullDisplayText().trim()
-                                                : "")
-                                .build()
-                )
-                .toList();
+    private List<FieldMeta> loadFieldMetas(String capabilityCode) {
+        return fieldMetadataService.loadPublished(capabilityCode);
     }
 
-    /**
-     * Integer空值默认处理。
-     */
-    private int defaultInteger(
-            Integer value,
-            int defaultValue) {
-
-        return value == null
-                ? defaultValue
-                : value;
-    }
 
     /**
      * 构建统一失败结果。

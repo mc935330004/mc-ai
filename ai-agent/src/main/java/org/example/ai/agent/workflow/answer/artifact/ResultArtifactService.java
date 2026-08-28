@@ -146,7 +146,7 @@ public class ResultArtifactService {
         );
 
         artifact.setFieldSemanticsJson(
-                writeJson(fieldPolicy.visibleFields())
+                writeJson(fieldPolicy.modelFields())
         );
 
         artifact.setExpiresAt(

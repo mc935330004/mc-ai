@@ -50,7 +50,10 @@ public class ChatResponseAccumulator {
     private ResponseMeta meta = ResponseMeta.empty();
     private ResponseStatus status = ResponseStatus.RUNNING;
     private boolean dataComplete;
-
+    /**
+     * 记录区块失败，整体状态在回答结束时统一确定。
+     */
+    private boolean blockFailed;
     public ChatResponseAccumulator(ResponseStreamContext context) {
         this.context = Objects.requireNonNull(
                 context,
@@ -157,7 +160,8 @@ public class ChatResponseAccumulator {
             );
             completedBlocks.put(failedText.id(), failedText);
         }
-        status = ResponseStatus.PARTIAL;
+        // 单个区块失败不代表整个回答已经结束。
+        blockFailed = true;
     }
 
     /**
@@ -203,35 +207,78 @@ public class ChatResponseAccumulator {
     }
 
     /**
-     * 正常完成回答。
-     *
-     * 已经出现部分失败时保留PARTIAL状态。
+     * 结束回答，并根据数据完整性和区块状态确定最终结果。
      */
     public synchronized AiResponse complete() {
-        if (status == ResponseStatus.RUNNING) {
-            status = ResponseStatus.COMPLETED;
+        if (status != ResponseStatus.RUNNING) {
+            return snapshot();
+        }
+
+        boolean incomplete = !dataComplete
+                || blockFailed
+                || !streamingTextBlocks.isEmpty();
+
+        // 没有正常结束的文字不能被标记为生成成功。
+        finishStreamingText(BlockStatus.FAILED);
+
+        for (ResponseBlock block : completedBlocks.values()) {
+            if (block.status() != BlockStatus.READY) {
+                incomplete = true;
+            }
+        }
+
+        if (!hasVisibleContent()) {
+            status = ResponseStatus.FAILED;
+        } else {
+            status = incomplete
+                    ? ResponseStatus.PARTIAL
+                    : ResponseStatus.COMPLETED;
         }
 
         return snapshot();
     }
 
     /**
-     * 整体处理失败。
-     *
-     * 已经有可展示内容时返回PARTIAL，
-     * 完全没有内容时返回FAILED。
+     * 整体失败时保留成功区块和已经生成的文字。
      */
     public synchronized AiResponse fail() {
-        status = hasVisibleContent() ? ResponseStatus.PARTIAL : ResponseStatus.FAILED;
+        finishStreamingText(BlockStatus.FAILED);
+        status = hasVisibleContent()
+                ? ResponseStatus.PARTIAL
+                : ResponseStatus.FAILED;
         return snapshot();
     }
 
     /**
-     * 用户主动终止回答。
+     * 主动取消只终止正在生成的文字，不修改已经完成的业务区块。
      */
     public synchronized AiResponse cancel() {
+        finishStreamingText(BlockStatus.CANCELLED);
         status = ResponseStatus.CANCELLED;
         return snapshot();
+    }
+
+    /**
+     * 判断是否存在可展示内容，失败文字中的已有内容同样保留。
+     */
+    private boolean hasVisibleContent() {
+        for (ResponseBlock block : completedBlocks.values()) {
+            if (block instanceof TextBlock text) {
+                if (text.markdown() != null && !text.markdown().isBlank()) {
+                    return true;
+                }
+            } else if (block.status() == BlockStatus.READY) {
+                return true;
+            }
+        }
+
+        for (StringBuilder content : streamingTextContents.values()) {
+            if (!content.toString().isBlank()) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -253,23 +300,27 @@ public class ChatResponseAccumulator {
 
         return List.copyOf(blocks);
     }
-
     /**
-     * 判断当前是否已有用户可以看到的内容。
+     * 将正在生成的文字固定为终态，内容原样保留。
      */
-    private boolean hasVisibleContent() {
-        for (ResponseBlock block : completedBlocks.values()) {
-            if (block.status() != BlockStatus.FAILED) {
-                return true;
-            }
+    private void finishStreamingText(BlockStatus finalStatus) {
+        for (Map.Entry<String, BlockStartPayload> entry
+                : streamingTextBlocks.entrySet()) {
+            BlockStartPayload start = entry.getValue();
+            StringBuilder content = streamingTextContents.get(entry.getKey());
+
+            TextBlock text = new TextBlock(
+                    start.blockId(),
+                    start.title(),
+                    start.order(),
+                    finalStatus,
+                    start.source(),
+                    content == null ? "" : content.toString()
+            );
+            completedBlocks.put(text.id(), text);
         }
 
-        for (StringBuilder content : streamingTextContents.values()) {
-            if (!content.isEmpty()) {
-                return true;
-            }
-        }
-
-        return false;
+        streamingTextBlocks.clear();
+        streamingTextContents.clear();
     }
 }

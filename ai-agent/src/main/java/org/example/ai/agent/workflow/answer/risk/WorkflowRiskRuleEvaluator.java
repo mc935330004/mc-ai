@@ -57,7 +57,7 @@ public class WorkflowRiskRuleEvaluator {
         }
 
         JsonNode resultRoot = objectMapper.valueToTree(
-                preparation.modelPayload().result()
+                preparation.internalPayload().result()
         );
 
         List<JsonNode> candidateRoots =
@@ -672,8 +672,7 @@ public class WorkflowRiskRuleEvaluator {
         Map<String, WorkflowAnswerFieldContext> result =
                 new LinkedHashMap<>();
 
-        for (WorkflowAnswerFieldContext field :
-                preparation.fieldPolicy().visibleFields()) {
+        for (WorkflowAnswerFieldContext field : preparation.fieldPolicy().internalFields()) {
 
             if (field != null
                     && StringUtils.hasText(

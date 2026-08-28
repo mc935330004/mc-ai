@@ -170,8 +170,7 @@ public class ReportDefinitionResolver {
                 );
             }
 
-            if (Integer.valueOf(0).equals(
-                    field.getVisible())) {
+            if (Integer.valueOf(0).equals(field.getUserVisible())) {
 
                 throw new IllegalStateException(
                         "报告字段不允许展示："

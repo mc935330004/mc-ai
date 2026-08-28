@@ -23,7 +23,7 @@ public class WorkflowAnswerPayloadFactory {
 
     public WorkflowAnswerModelPayload create(
             WorkflowExecutionOutcome outcome,
-            Set<String> hiddenFieldNames) {
+            Set<String> allowedFieldNames) {
 
         if (outcome == null) {
             throw new IllegalArgumentException(
@@ -31,11 +31,7 @@ public class WorkflowAnswerPayloadFactory {
             );
         }
 
-        Object safeResult =
-                sanitizeResult(
-                        outcome.result(),
-                        hiddenFieldNames
-                );
+        Object safeResult = sanitizeResult(outcome.result(), allowedFieldNames);
 
         List<WorkflowAnswerModelPayload.Batch> batches =
                 outcome.batches()
@@ -67,7 +63,7 @@ public class WorkflowAnswerPayloadFactory {
 
     private Object sanitizeResult(
             Object result,
-            Set<String> hiddenFieldNames) {
+            Set<String> allowedFieldNames) {
 
         if (result == null) {
             return null;
@@ -76,11 +72,11 @@ public class WorkflowAnswerPayloadFactory {
         JsonNode copy =
                 objectMapper.valueToTree(result);
 
-        removeHiddenFields(
+        retainAllowedFields(
                 copy,
-                hiddenFieldNames == null
+                allowedFieldNames == null
                         ? Set.of()
-                        : hiddenFieldNames
+                        : allowedFieldNames
         );
 
         return objectMapper.convertValue(
@@ -90,59 +86,42 @@ public class WorkflowAnswerPayloadFactory {
     }
 
     /**
-     * 递归删除禁止发送给模型的字段和值。
+     * 递归删除未授权的叶子字段。
      *
-     * 使用字段名称精确匹配：
-     * 隐藏id不会误删projectId。
+     * 对象和数组只作为结构容器保留，
+     * 业务叶子字段必须在允许集合中。
      */
-    private void removeHiddenFields(
-            JsonNode node,
-            Set<String> hiddenFieldNames) {
+    private void retainAllowedFields(JsonNode node, Set<String> allowedFieldNames) {
 
-        if (node == null
-                || node.isNull()
-                || node.isMissingNode()) {
+        if (node == null || node.isNull() || node.isMissingNode()) {
             return;
         }
 
         if (node.isObject()) {
-            ObjectNode objectNode =
-                    (ObjectNode) node;
+            ObjectNode objectNode = (ObjectNode) node;
+            List<String> fieldNames = new ArrayList<>();
+            objectNode.fieldNames().forEachRemaining(fieldNames::add);
 
-            List<String> fieldNames =
-                    new ArrayList<>();
-
-            objectNode.fieldNames()
-                    .forEachRemaining(
-                            fieldNames::add
-                    );
-
-            for (String fieldName :
-                    fieldNames) {
-
-                if (hiddenFieldNames.contains(
-                        fieldName)) {
-
-                    objectNode.remove(fieldName);
+            for (String fieldName : fieldNames) {
+                JsonNode child = objectNode.get(fieldName);
+                if (child == null) {
                     continue;
                 }
-
-                removeHiddenFields(
-                        objectNode.get(fieldName),
-                        hiddenFieldNames
-                );
+                if (child.isContainerNode()) {
+                    retainAllowedFields(child, allowedFieldNames);
+                    continue;
+                }
+                if (!allowedFieldNames.contains(fieldName)) {
+                    objectNode.remove(fieldName);
+                }
             }
-
             return;
         }
-
         if (node.isArray()) {
             for (JsonNode child : node) {
-                removeHiddenFields(
-                        child,
-                        hiddenFieldNames
-                );
+                retainAllowedFields(child, allowedFieldNames);
             }
         }
     }
+
 }

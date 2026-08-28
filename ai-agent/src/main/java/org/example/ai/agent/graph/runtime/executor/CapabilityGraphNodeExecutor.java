@@ -171,10 +171,10 @@ public class CapabilityGraphNodeExecutor
             );
         }
 
-        if (toolResult.getFacts() != null) {
+        if (toolResult.getFactSet() != null) {
             metadata.put(
-                    "facts",
-                    toolResult.getFacts()
+                    "factSet",
+                    toolResult.getFactSet()
             );
         }
 

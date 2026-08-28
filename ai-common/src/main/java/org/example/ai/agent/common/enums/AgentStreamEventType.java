@@ -1,19 +1,19 @@
 package org.example.ai.agent.common.enums;
 
 /**
- * Agent SSE 事件类型。
+ * Agent SSE事件类型。
  *
- * 使用枚举统一事件名称，避免业务代码中散落字符串。
+ * 运行过程事件和最终回答事件分开管理。
  */
 public enum AgentStreamEventType {
 
     /**
-     * Agent 运行已经开始。
+     * Agent运行已经开始。
      */
     RUN_STARTED,
 
     /**
-     * Agent 正在处理。
+     * Agent正在处理。
      */
     THINKING,
 
@@ -27,10 +27,6 @@ public enum AgentStreamEventType {
      */
     TOOL_RESULT,
 
-    /**
-     * 已提取核心业务事实。
-     */
-    FACTS,
     /**
      * WRITE参数收集表单。
      */
@@ -50,12 +46,14 @@ public enum AgentStreamEventType {
      * 处理失败。
      */
     ERROR,
+
     /**
      * 已发布工作流执行结果。
      */
     WORKFLOW_RESULT,
+
     /**
      * 报告完成后的独立业务追问。
      */
-    REPORT_FOLLOW_UP,
+    REPORT_FOLLOW_UP
 }

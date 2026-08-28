@@ -525,14 +525,6 @@ public class WorkflowRiskRuleValidator {
             ));
         }
 
-        if (Integer.valueOf(0).equals(field.getVisible())) {
-            errors.add(error(
-                    "RISK_FIELD_NOT_VISIBLE",
-                    graphPath,
-                    "风险规则不能使用禁止展示的字段：" + fieldId
-            ));
-        }
-
         return field;
     }
 

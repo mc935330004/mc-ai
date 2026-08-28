@@ -134,11 +134,6 @@ app:
       default-requests-per-minute: 120
       expensive-requests-per-minute: 20
       key-prefix: mc-ai:rate-limit:${RATE_LIMIT_KEY_PREFIX:}
-    answer:
-      # 标准事实模型开关，紧急回滚时可设为false
-      structured-enabled: true
-      # Java确定性Markdown开关
-      deterministic-markdown-enabled: true
 
 mybatis-plus:
   # MyBatis Plus XML Mapper 扫描路径

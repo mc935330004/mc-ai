@@ -2,24 +2,27 @@ package org.example.ai.agent.answer.model;
 
 import lombok.Builder;
 import lombok.Data;
+import org.example.ai.agent.common.enums.FactSourceType;
+
+import java.util.List;
 
 /**
- * 从业务接口真实数据和字段字典中提取出的标准事实。
+ * 从业务数据和字段字典中提取出的标准事实。
  *
- * 最终 Markdown 只能基于 AnswerFact 生成，
- * 不再直接遍历原始业务接口 JSON。
+ * 事实只保存真实值、格式化结果、来源和缺失原因，
+ * 不负责选择Block，也不负责生成Markdown。
  */
 @Data
 @Builder
 public class AnswerFact {
 
     /**
-     * 事实唯一键。
+     * 事实唯一标识。
      *
      * 格式：
      * capabilityCode:fieldPath:recordPath
      */
-    private String key;
+    private String factKey;
 
     /**
      * 业务能力编码。
@@ -27,29 +30,62 @@ public class AnswerFact {
     private String capabilityCode;
 
     /**
-     * 原始字段名。
+     * 字段业务语义编码。
+     *
+     * 当前字段字典尚未增加fieldCode时，
+     * 暂时使用fieldName。
+     */
+    private String fieldCode;
+
+    /**
+     * 字段重要程度。
+     */
+    private String importance;
+
+    /**
+     * 字段建议展示组件。
+     */
+    private String displayComponent;
+
+    /**
+     * 是否优先进入汇总。
+     */
+    private boolean summary;
+
+    /**
+     * 字段单位。
+     */
+    private String unit;
+
+    /**
+     * 数字展示精度。
+     */
+    private Integer precisionScale;
+
+    /**
+     * 字段机器名称。
      */
     private String fieldName;
 
     /**
-     * 字段字典配置的 JSON 路径。
+     * 字段字典中的完整取值路径。
      */
     private String fieldPath;
 
     /**
-     * 字段中文展示名称。
+     * 字段中文名称。
      */
     private String label;
 
     /**
-     * 原始字段值。
+     * 业务接口返回的原始值。
      */
-    private Object value;
+    private Object rawValue;
 
     /**
-     * 确定性格式化后的展示值。
+     * 后端确定性格式化后的值。
      */
-    private String displayValue;
+    private String formattedValue;
 
     /**
      * 字段数据类型。
@@ -79,7 +115,17 @@ public class AnswerFact {
     /**
      * 是否为必答字段。
      */
-    private boolean required;
+    private boolean requiredOutput;
+
+    /**
+     * 是否允许发送给大模型。
+     */
+    private boolean modelVisible;
+
+    /**
+     * 是否允许展示给用户。
+     */
+    private boolean userVisible;
 
     /**
      * 字段是否缺失。
@@ -87,16 +133,20 @@ public class AnswerFact {
     private boolean missing;
 
     /**
-     * 缺失原因。
+     * 字段缺失原因。
      *
-     * 示例：PATH_NOT_FOUND、VALUE_NULL、ARRAY_EMPTY。
+     * 例如：
+     * PATH_INVALID
+     * PATH_NOT_FOUND
+     * VALUE_NULL
+     * ARRAY_EMPTY
      */
     private String missingReason;
 
     /**
      * 当前字段所属记录路径。
      *
-     * 示例：
+     * 例如：
      * $.data.records[0]
      */
     private String recordPath;
@@ -104,8 +154,34 @@ public class AnswerFact {
     /**
      * 当前字段所属集合。
      *
-     * 示例：
+     * 例如：
      * capabilityCode:$.data.records[]
      */
     private String collectionKey;
+    /**
+     * 计算公式表达式。
+     *
+     * 只用于后端审计和问题排查，
+     * 不交给前端执行。
+     */
+    private String calculationExpression;
+
+    /**
+     * 计算公式引用的字段编码。
+     */
+    @Builder.Default
+    private List<String> sourceFieldCodes = List.of();
+
+    /**
+     * 计算状态。
+     *
+     * SUCCESS：计算成功
+     * FAILED：计算失败
+     */
+    private String calculationStatus;
+    /**
+     * 事实来源。
+     */
+    @Builder.Default
+    private FactSourceType sourceType = FactSourceType.RAW;
 }

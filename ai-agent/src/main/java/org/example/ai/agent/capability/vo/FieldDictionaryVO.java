@@ -29,10 +29,14 @@ public class FieldDictionaryVO {
     private Integer requiredOutput;
 
     /**
-     * 是否允许展示。
+     * 是否允许发送给大模型。
      */
-    private Integer visible;
+    private Integer modelVisible;
 
+    /**
+     * 是否允许展示给用户。
+     */
+    private Integer userVisible;
     /**
      * 展示顺序。
      */
@@ -47,5 +51,18 @@ public class FieldDictionaryVO {
      * 空值展示文本。
      */
     private String nullDisplayText;
+    private String fieldCode;
+
+    private String importance;
+
+    private String displayComponent;
+
+    private Integer summaryFlag;
+
+    private String unit;
+
+    private Integer precisionScale;
+
+    private String valueSource;
 
 }

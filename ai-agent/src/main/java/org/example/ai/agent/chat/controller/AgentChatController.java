@@ -1,5 +1,6 @@
 package org.example.ai.agent.chat.controller;
 
+import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.example.ai.agent.chat.dto.ChatSessionCreateDTO;
@@ -7,9 +8,8 @@ import org.example.ai.agent.chat.dto.ChatSessionModelDTO;
 import org.example.ai.agent.chat.entity.AgentRequest;
 import org.example.ai.agent.chat.service.AgentOrchestrator;
 import org.example.ai.agent.chat.service.AiChatSessionService;
-import org.example.ai.agent.chat.vo.ChatMessageVO;
-import org.example.ai.agent.chat.vo.ChatModelVO;
-import org.example.ai.agent.chat.vo.ChatSessionVO;
+import org.example.ai.agent.chat.service.ChatTablePageService;
+import org.example.ai.agent.chat.vo.*;
 import org.example.ai.agent.common.result.Result;
 import org.example.ai.agent.modules.knowledgebase.security.KnowledgeAccessContext;
 import org.example.ai.agent.security.CurrentUserProvider;
@@ -28,6 +28,7 @@ public class AgentChatController {
     private final CurrentUserProvider currentUserProvider;
     private final AiChatSessionService aiChatSessionService;
     private final KnowledgeAccessContext knowledgeAccessContext;
+    private final ChatTablePageService chatTablePageService;
     /**
      * 统一流式聊天入口。
      *
@@ -103,6 +104,29 @@ public class AgentChatController {
     public Result<List<ChatMessageVO>> listMessages(@PathVariable String sessionId) {
         String userId = currentUserProvider.getRequiredUserId();
         return Result.success(aiChatSessionService.listMessages(userId, sessionId));
+    }
+
+    /**
+     * 获取指定回答的持久化快照，用于断线或刷新后的恢复。
+     */
+    @GetMapping("/sessions/{sessionId}/runs/{runId}/response")
+    public Result<ChatResponseSnapshotVO> getResponseSnapshot(@PathVariable String sessionId, @PathVariable String runId, @RequestParam(required = false) String responseId, HttpServletResponse response) {
+        // 恢复查询不能使用旧缓存。
+        response.setHeader("Cache-Control", "no-store");
+        // 用户身份只从认证上下文读取，不接收前端指定用户。
+        String userId = currentUserProvider.getRequiredUserId();
+        return Result.success(aiChatSessionService.getResponseSnapshot(userId, sessionId, runId, responseId));
+    }
+
+    /**
+     * 读取当前回答中指定表格的一页数据。
+     */
+    @GetMapping("/sessions/{sessionId}/runs/{runId}/tables/{blockId}/rows")
+    public Result<ChatTablePageVO> pageTableRows(@PathVariable String sessionId, @PathVariable String runId,
+                                                 @PathVariable String blockId, @RequestParam String responseId, @RequestParam(defaultValue = "1") int current, @RequestParam(defaultValue = "10") int size, HttpServletResponse response) {
+        // 业务快照不能被浏览器或代理缓存复用。
+        response.setHeader("Cache-Control", "no-store");
+        return Result.success(chatTablePageService.page(currentUserProvider.getRequiredUserId(), sessionId, runId, responseId, blockId, current, size));
     }
 
     @PatchMapping("/sessions/{sessionId}/model")

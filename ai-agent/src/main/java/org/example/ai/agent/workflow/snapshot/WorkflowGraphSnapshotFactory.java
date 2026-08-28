@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.RequiredArgsConstructor;
+import org.example.ai.agent.common.enums.WorkflowPresentationMode;
 import org.example.ai.agent.common.exception.BusinessException;
 import org.example.ai.agent.graph.GraphSpecParser;
 import org.example.ai.agent.graph.compiler.*;
@@ -109,14 +110,13 @@ public class WorkflowGraphSnapshotFactory {
 
         GraphCompilationResult graphCompilation = graphSpecCompiler.compile(graph);
         List<GraphValidationError> errors = new ArrayList<>(graphCompilation.errors());
-        validateInputSchema(graph.getInputSchema(),errors );
-        // 报告定义与工作流一起校验，禁止发布无效字段路径和区块结构。
-        errors.addAll(reportDefinitionValidator.validate(graph.getReportDefinition()));
+        validateInputSchema(graph.getInputSchema(), errors);
         /*
-         * 风险规则与工作流一起发布。
-         * 字段不存在、路径错误或类型不兼容时禁止发布。
+         * 固定报表模式必须配置报告定义。
+         * AUTO 和 ANSWER 不强制配置，避免增加无用配置。
          */
-        errors.addAll( workflowRiskRuleValidator.validate(graph));
+        validatePresentationMode(graph, errors);
+        errors.addAll(reportDefinitionValidator.validate( graph.getReportDefinition()));
         GraphCompilationResult compilation =errors.isEmpty()
                         ? graphCompilation
                         : GraphCompilationResult.failure(
@@ -285,9 +285,27 @@ public class WorkflowGraphSnapshotFactory {
                 : null;
     }
 
-    private record GraphSize(
-            int nodeCount,
-            int edgeCount) {
+    private record GraphSize(int nodeCount, int edgeCount) {
+
+    }
+
+    /**
+     * 校验工作流展示方式和报告配置是否一致。
+     */
+    private void validatePresentationMode(GraphSpec graph, List<GraphValidationError> errors) {
+        WorkflowPresentationMode mode =graph.getPresentationMode() == null
+                        ? WorkflowPresentationMode.AUTO
+                        : graph.getPresentationMode();
+        if (mode != WorkflowPresentationMode.REPORT || graph.getReportDefinition() != null) {
+            return;
+        }
+        errors.add(new GraphValidationError(
+                        "WORKFLOW_REPORT_DEFINITION_REQUIRED",
+                        "root.reportDefinition",
+                        null,
+                        null,
+                        "完整报表模式必须先完成报告配置")
+        );
     }
 
     /**

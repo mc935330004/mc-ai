@@ -3,6 +3,7 @@ package org.example.ai.agent.chat.service;
 import org.example.ai.agent.chat.dto.ChatSessionCreateDTO;
 import org.example.ai.agent.chat.vo.ChatMessageVO;
 import org.example.ai.agent.chat.vo.ChatModelVO;
+import org.example.ai.agent.chat.vo.ChatResponseSnapshotVO;
 import org.example.ai.agent.chat.vo.ChatSessionVO;
 
 import java.util.List;
@@ -33,6 +34,11 @@ public interface AiChatSessionService {
      *  逻辑删除会话。
      */
     void deleteSession(String userId, String sessionId);
+
+    /**
+     * 精确查询指定运行产生的回答快照，不重新执行业务或模型调用。
+     */
+    ChatResponseSnapshotVO getResponseSnapshot(String userId, String sessionId, String runId, String responseId);
 
     /**
      *  查询会话历史消息。

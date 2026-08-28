@@ -5,7 +5,7 @@ import com.fasterxml.jackson.annotation.JsonTypeInfo;
 import org.example.ai.agent.common.enums.protocol.BlockSource;
 import org.example.ai.agent.common.enums.protocol.BlockStatus;
 import org.example.ai.agent.common.enums.protocol.BlockType;
-
+import com.fasterxml.jackson.annotation.JsonProperty;
 /**
  * CHAT和REPORT共用的回答区块。
  *
@@ -48,6 +48,7 @@ public sealed interface ResponseBlock permits
     /**
      * 区块类型。
      */
+    @JsonProperty("type")
     BlockType type();
 
     /**

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import org.example.ai.agent.answer.model.AnswerFact;
+import org.example.ai.agent.answer.model.UnifiedFactSet;
 import org.example.ai.agent.capability.invocation.runtime.SimpleJsonPathReader;
 import org.example.ai.agent.graph.config.CapabilityPaginationConfig;
 import org.example.ai.agent.graph.runtime.GraphExecutionException;
@@ -18,14 +19,7 @@ import org.springframework.util.StringUtils;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HexFormat;
-import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 
 /**
  * 业务能力自动分页执行器。
@@ -215,16 +209,14 @@ public class CapabilityPaginationExecutor {
                             pageResult.getInput();
                 }
 
-                if (fields == null
-                        && pageResult.getFields() != null) {
+                if (fields == null && pageResult.getFields() != null) {
 
-                    fields =
-                            pageResult.getFields();
+                    fields = pageResult.getFields();
                 }
-
-                if (pageResult.getFacts() != null) {
+                UnifiedFactSet pageFactSet = pageResult.getFactSet();
+                if (pageFactSet != null) {
                     allFacts.addAll(
-                            pageResult.getFacts()
+                            pageFactSet.facts()
                     );
                 }
 
@@ -692,6 +684,12 @@ public class CapabilityPaginationExecutor {
                         pageSize
                 );
 
+        UnifiedFactSet factSet =
+                UnifiedFactSet.from(
+                        allFacts,
+                        total
+                );
+
         return ToolResult.builder()
                 .success(true)
                 .capabilityCode(
@@ -700,10 +698,6 @@ public class CapabilityPaginationExecutor {
                 .outputKey(
                         baseStep.getOutputKey()
                 )
-
-                /*
-                 * data继续保持展示视图，兼容旧逻辑。
-                 */
                 .data(displayData)
                 .workflowData(workflowData)
                 .displayData(displayData)
@@ -723,13 +717,7 @@ public class CapabilityPaginationExecutor {
                         workflowRecords.isEmpty()
                 )
                 .fields(fields)
-                .facts(
-                        Collections.unmodifiableList(
-                                new ArrayList<>(
-                                        allFacts
-                                )
-                        )
-                )
+                .factSet(factSet)
                 .input(firstAuditInput)
                 .summary(
                         "自动分页查询完成，共请求"
@@ -779,10 +767,13 @@ public class CapabilityPaginationExecutor {
                                 ? null
                                 : referenceResult.getFields()
                 )
-                .facts(
-                        referenceResult == null
-                                ? List.of()
-                                : referenceResult.getFacts()
+
+                /*
+                 * 分页失败不返回最后一页事实，
+                 * 防止把不完整分页结果当成完整数据。
+                 */
+                .factSet(
+                        UnifiedFactSet.empty()
                 )
                 .input(
                         referenceResult == null

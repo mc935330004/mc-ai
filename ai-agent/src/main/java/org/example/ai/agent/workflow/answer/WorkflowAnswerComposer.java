@@ -88,17 +88,23 @@ public class WorkflowAnswerComposer {
 
         WorkflowAnswerFieldPolicy fieldPolicy = fieldContextResolver.resolvePolicy(outcome);
 
-        /*
-         * 只能使用经过隐藏字段过滤后的安全结果。
-         * 禁止文字回答重新读取原始工作流响应。
-         */
+        WorkflowAnswerModelPayload internalPayload = answerPayloadFactory.create(
+                        outcome,
+                        fieldPolicy.internalFieldNames());
+
         WorkflowAnswerModelPayload modelPayload =
                 answerPayloadFactory.create(
                         outcome,
-                        fieldPolicy.hiddenFieldNames()
+                        fieldPolicy.modelFieldNames()
                 );
-        String fieldSemanticsJson = writeJson(fieldPolicy.visibleFields());
-        WorkflowAnswerChunkPlan chunkPlan = chunkPlanner.plan(modelPayload);
+
+        String fieldSemanticsJson =
+                writeJson(
+                        fieldPolicy.modelFields()
+                );
+
+        WorkflowAnswerChunkPlan chunkPlan =
+                chunkPlanner.plan(modelPayload);
         /*
          * 文字回答同样保存 Artifact，
          * 后续追问仍然可以使用上一轮安全结果。
@@ -113,6 +119,7 @@ public class WorkflowAnswerComposer {
         return new WorkflowAnswerPreparation(
                 outcome,
                 fieldPolicy,
+                internalPayload,
                 modelPayload,
                 fieldSemanticsJson,
                 chunkPlan,
@@ -224,13 +231,10 @@ public class WorkflowAnswerComposer {
         WorkflowAnswerModelPayload modelPayload =
                 answerPayloadFactory.create(
                         outcome,
-                        fieldPolicy.hiddenFieldNames()
+                        fieldPolicy.modelFieldNames()
                 );
 
-        String fieldSemanticsJson =
-                writeJson(
-                        fieldPolicy.visibleFields()
-                );
+        String fieldSemanticsJson = writeJson(fieldPolicy.modelFields());
 
         /*
          * 第二阶段：数据分块并逐块调用大模型。

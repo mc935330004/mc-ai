@@ -43,6 +43,14 @@ public class FieldDictionary {
     private String fieldName;
 
     /**
+     * 字段业务语义编码。
+     *
+     * fieldPath负责定位真实数据，
+     * fieldCode负责识别业务语义。
+     */
+    private String fieldCode;
+
+    /**
      * 字段中文名。
      */
     private String fieldCnName;
@@ -120,12 +128,20 @@ public class FieldDictionary {
     private Integer requiredOutput;
 
     /**
-     * 是否允许向用户和模型展示。
+     * 是否允许发送给大模型。
      *
-     * 1：允许展示。
-     * 0：不允许展示。
+     * 1：允许。
+     * 0：仅供工作流内部使用。
      */
-    private Integer visible;
+    private Integer modelVisible;
+
+    /**
+     * 是否允许展示给用户。
+     *
+     * 1：允许。
+     * 0：不允许进入文字回答、列表和报告。
+     */
+    private Integer userVisible;
 
     /**
      * 字段展示顺序。
@@ -140,6 +156,44 @@ public class FieldDictionary {
      * 示例：基本信息、合同信息、进度信息。
      */
     private String displayGroup;
+
+    /**
+     * 字段重要程度：HIGH、NORMAL、LOW。
+     */
+    private String importance;
+
+    /**
+     * 建议展示组件。
+     *
+     * 支持：
+     * AUTO、METRICS、KEY_VALUE、TABLE、STATUS、HIDDEN。
+     */
+    private String displayComponent;
+
+    /**
+     * 是否优先进入汇总结果。
+     *
+     * 1：是。
+     * 0：否。
+     */
+    private Integer summaryFlag;
+
+    /**
+     * 字段展示单位。
+     */
+    private String unit;
+
+    /**
+     * 数字展示精度。
+     */
+    private Integer precisionScale;
+
+    /**
+     * 字段值来源。
+     *
+     * RAW、CALCULATED、AGGREGATED、RULE_EVALUATED。
+     */
+    private String valueSource;
 
     /**
      * 字段值为 null 或不存在时的展示文本。

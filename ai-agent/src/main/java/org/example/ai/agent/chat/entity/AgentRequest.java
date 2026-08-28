@@ -3,6 +3,7 @@ package org.example.ai.agent.chat.entity;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import jakarta.validation.constraints.NotBlank;
 import lombok.Data;
+import org.example.ai.agent.chat.memory.model.ResultStatisticsContext;
 import org.example.ai.agent.modules.knowledgebase.security.KnowledgeAccessPrincipal;
 
 import java.util.ArrayList;
@@ -123,6 +124,12 @@ public class AgentRequest {
      */
     @JsonIgnore
     private String resultArtifactId;
+
+    /**
+     * 服务端注入的最近统计上下文，禁止客户端指定。
+     */
+    @JsonIgnore
+    private ResultStatisticsContext lastStatisticsContext;
 
     /**
      *  当前问题是否属于上一轮结果分析追问。

@@ -660,3 +660,64 @@ ALTER TABLE ai_field_dictionary
     ADD COLUMN enum_mapping_json TEXT NULL
         COMMENT '枚举值映射JSON，例如：{"0":"审批中","1":"审批通过"}'
         AFTER display_format;
+
+-- ============================================================ 从这开始新的
+-- 字段字典权限边界拆分
+--
+-- 规则：
+-- 1. 已发布字段默认允许工作流内部使用；
+-- 2. model_visible 控制是否允许发送给大模型；
+-- 3. user_visible 控制是否允许展示给用户；
+-- 4. 项目未上线，不保留 visible 旧字段。
+-- ============================================================
+
+ALTER TABLE ai_field_dictionary
+    CHANGE COLUMN visible user_visible TINYINT NOT NULL DEFAULT 1
+    COMMENT '是否允许展示给用户：1是，0否',
+    ADD COLUMN model_visible TINYINT NOT NULL DEFAULT 1
+    COMMENT '是否允许发送给大模型：1是，0否'
+    AFTER required_output;
+
+-- ============================================================
+-- 字段字典升级为统一展示规则中心
+--
+-- field_path：定位真实接口字段
+-- field_code：表示稳定业务语义
+-- display_component：允许明确指定Block类型
+-- AUTO表示由后端确定性规则自动选择
+-- ============================================================
+
+ALTER TABLE ai_field_dictionary
+    ADD COLUMN field_code VARCHAR(128) NULL
+        COMMENT '字段业务语义编码，同一业务字段可跨列表和详情复用'
+        AFTER field_name,
+    ADD COLUMN importance VARCHAR(16) NOT NULL DEFAULT 'NORMAL'
+        COMMENT '字段重要程度：HIGH、NORMAL、LOW'
+        AFTER display_group,
+    ADD COLUMN display_component VARCHAR(32) NOT NULL DEFAULT 'AUTO'
+        COMMENT '建议展示组件：AUTO、METRICS、KEY_VALUE、TABLE、STATUS、HIDDEN'
+        AFTER importance,
+    ADD COLUMN summary_flag TINYINT NOT NULL DEFAULT 0
+        COMMENT '是否优先进入汇总结果：1是，0否'
+        AFTER display_component,
+    ADD COLUMN unit VARCHAR(32) NULL
+        COMMENT '字段单位，例如元、万元、百分比'
+        AFTER summary_flag,
+    ADD COLUMN precision_scale INT NULL
+        COMMENT '数字展示精度'
+        AFTER unit,
+    ADD COLUMN value_source VARCHAR(16) NOT NULL DEFAULT 'RAW'
+        COMMENT '字段值来源：RAW、CALCULATED、AGGREGATED、RULE_EVALUATED'
+        AFTER precision_scale;
+
+UPDATE ai_field_dictionary
+SET field_code = field_name
+WHERE field_code IS NULL
+   OR TRIM(field_code) = '';
+
+ALTER TABLE ai_field_dictionary
+    MODIFY COLUMN field_code VARCHAR(128) NOT NULL
+    COMMENT '字段业务语义编码，同一业务字段可跨列表和详情复用';
+
+CREATE INDEX idx_field_dictionary_semantic
+    ON ai_field_dictionary (capability_code, field_code);

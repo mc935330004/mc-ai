@@ -5,16 +5,14 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.ai.agent.chat.protocol.response.ResponseDocument;
 import org.springframework.stereotype.Service;
 
+import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 import java.util.Objects;
 
 /**
- * 回答快照SHA-256校验服务。
- *
- * 校验值用于判断前端恢复后的完整回答，
- * 是否与后端最终快照一致。
+ * 对实际传输或保存的回答JSON计算校验值。
  */
 @Service
 public class ResponseChecksumService {
@@ -26,29 +24,31 @@ public class ResponseChecksumService {
     }
 
     /**
-     * 计算完整回答的SHA-256校验值。
+     * 快照只序列化一次，传输正文与计算校验使用同一份文本。
      */
-    public String calculate(ResponseDocument document) {
-        Objects.requireNonNull(
-                document,
-                "计算校验值时document不能为空"
-        );
+    public String serialize(ResponseDocument document) {
+        Objects.requireNonNull(document, "回答文档不能为空");
+        try {
+            return objectMapper.writeValueAsString(document);
+        } catch (JsonProcessingException exception) {
+            throw new IllegalStateException("回答文档序列化失败", exception);
+        }
+    }
+
+    /**
+     * 按原始UTF-8文本计算SHA-256，不重新解析或格式化JSON。
+     */
+    public String calculate(String documentJson) {
+        Objects.requireNonNull(documentJson, "回答JSON不能为空");
 
         try {
-            byte[] documentBytes = objectMapper.writeValueAsBytes(document);
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
-            byte[] checksumBytes = digest.digest(documentBytes);
-
-            return HexFormat.of().formatHex(checksumBytes);
-        } catch (JsonProcessingException e) {
-            throw new IllegalStateException(
-                    "完整回答序列化失败，无法计算校验值",
-                    e
-            );
-        } catch (NoSuchAlgorithmException e) {
+            byte[] bytes = documentJson.getBytes(StandardCharsets.UTF_8);
+            return HexFormat.of().formatHex(digest.digest(bytes));
+        } catch (NoSuchAlgorithmException exception) {
             throw new IllegalStateException(
                     "当前运行环境不支持SHA-256",
-                    e
+                    exception
             );
         }
     }

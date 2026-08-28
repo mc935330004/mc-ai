@@ -3,8 +3,6 @@ package org.example.ai.agent.chat.support;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.example.ai.agent.chat.entity.AgentStreamEvent;
-import org.example.ai.agent.common.config.AgentStreamProperties;
-import org.example.ai.agent.common.enums.AgentStreamEventType;
 import org.example.ai.agent.common.exception.BusinessException;
 import org.example.ai.agent.observability.AgentMetrics;
 import org.flywaydb.core.internal.util.StringUtils;
@@ -28,14 +26,15 @@ import org.example.ai.agent.common.enums.protocol.BlockStatus;
 import org.example.ai.agent.common.enums.protocol.BlockType;
 import org.example.ai.agent.common.enums.protocol.PresentationMode;
 import org.example.ai.agent.chat.protocol.response.ReportSchema;
-
+import org.example.ai.agent.chat.protocol.response.ResponseDocument;
+import org.example.ai.agent.common.enums.protocol.ResponseStatus;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.UUID;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicLong;
-
+import org.example.ai.agent.chat.stream.ResponseSequenceGenerator;
 /**
  * 单次 Agent SSE 会话。
  *
@@ -51,6 +50,11 @@ public class AgentStreamSession {
      * 禁止CHAT和REPORT在同一个responseId中混用。
      */
     private PresentationMode responseMode;
+    /**
+     * 保存本次已准备的报告，异常收尾时保留报告模式和业务区块。
+     */
+    @Getter
+    private volatile ReportSchema currentReport;
     /**
      * -- GETTER --
      *  Controller 最终需要返回底层 SseEmitter。
@@ -85,180 +89,234 @@ public class AgentStreamSession {
      */
     @Getter
     private final ChatResponseAccumulator chatResponseAccumulator;
-
-    private final AtomicLong sequence = new AtomicLong(0);
+    /**
+     * 单次请求唯一的事件序号生成器。
+     * 进度事件与统一回答事件共同使用。
+     */
+    private final ResponseSequenceGenerator sequenceGenerator = new ResponseSequenceGenerator();
     /**
      * SSE会话创建时间。
      */
     private final long startedAt = System.currentTimeMillis();
     private final AtomicBoolean completed = new AtomicBoolean(false);
+    /**
+     * 只表示网络连接是否可用，不代表后台回答已经结束。
+     */
+    private final AtomicBoolean connectionOpen = new AtomicBoolean(true);
 
+    /**
+     * 用户取消意图独立保存，避免线程中断标志被底层组件清除后丢失。
+     */
+    @Getter
+    private volatile boolean cancellationRequested;
+
+    /**
+     * 进入最终保存后，不再接受新的取消请求。
+     */
+    private boolean finalizing;
+
+    /**
+     * 当前聊天任务的执行线程，排队时为空。
+     */
+    private Thread executionThread;
     /**
      * 创建统一协议SSE会话。
      */
-    public AgentStreamSession(SseEmitter emitter, String runId, String conversationId,
-                              AgentMetrics agentMetrics, ResponseChecksumService checksumService) {
+    public AgentStreamSession(
+            SseEmitter emitter,
+            String runId,
+            String conversationId,
+            AgentMetrics agentMetrics,
+            ResponseChecksumService checksumService) {
 
         this.emitter = Objects.requireNonNull(
-                        emitter,
-                        "SseEmitter不能为空"
-                );
+                emitter,
+                "SseEmitter不能为空"
+        );
+        this.runId = requireText(runId, "runId不能为空");
+        this.conversationId = requireText(
+                conversationId,
+                "conversationId不能为空"
+        );
+        this.agentMetrics = Objects.requireNonNull(
+                agentMetrics,
+                "AgentMetrics不能为空"
+        );
 
-        this.runId =
-                requireText(
-                        runId,
-                        "runId不能为空"
-                );
-
-        this.conversationId =
-                requireText(
-                        conversationId,
-                        "conversationId不能为空"
-                );
-
-        this.agentMetrics =
-                Objects.requireNonNull(
-                        agentMetrics,
-                        "AgentMetrics不能为空"
-                );
-
-        this.messageId =
-                UUID.randomUUID()
-                        .toString()
-                        .replace("-", "");
+        this.messageId = UUID.randomUUID()
+                .toString()
+                .replace("-", "");
 
         ResponseStreamContext responseContext =
                 new ResponseStreamContext(
                         messageId,
-                        runId,
-                        conversationId
+                        this.runId,
+                        this.conversationId
                 );
 
-        this.responseEventFactory =
-                new ResponseStreamEventFactory(
-                        responseContext,
-                        checksumService
-                );
+        // 将会话中的同一个序号生成器交给回答事件工厂。
+        this.responseEventFactory = new ResponseStreamEventFactory(
+                responseContext,
+                checksumService,
+                sequenceGenerator
+        );
 
         this.chatResponseAccumulator =
-                new ChatResponseAccumulator(
-                        responseContext
-                );
+                new ChatResponseAccumulator(responseContext);
 
         this.agentMetrics.recordSseOpened();
     }
 
     /**
-     * 发送运行进度类事件。
-     *
-     * THINKING、PLAN、FACTS等运行过程信息仍使用该方法；
-     * 最终CHAT和REPORT回答使用统一响应事件。
+     * 发送进度事件。连接断开只停止推送，不中断业务处理。
      */
-    public synchronized void send(
-            String eventName,
-            AgentStreamEvent event) throws Exception {
-
-        if (completed.get()) {
+    public synchronized void send(String eventName, AgentStreamEvent event) throws Exception {
+        if (completed.get() || !connectionOpen.get()) {
             return;
         }
-
-        long currentSequence =
-                sequence.incrementAndGet();
-
-        String eventId =
-                runId + "-" + currentSequence;
+        Objects.requireNonNull(event, "进度事件不能为空");
+        long currentSequence = sequenceGenerator.next();
+        String eventId = runId + "-" + currentSequence;
 
         event.setRunId(runId);
         event.setMessageId(messageId);
         event.setEventId(eventId);
         event.setSequence(currentSequence);
-        event.setTimestamp(
-                System.currentTimeMillis()
-        );
+        event.setTimestamp(System.currentTimeMillis());
 
         try {
-            emitter.send(
-                    SseEmitter.event()
-                            .id(eventId)
-                            .name(eventName)
-                            .data(event)
-            );
+            emitter.send(SseEmitter.event()
+                    .id(eventId)
+                    .name(eventName)
+                    .data(event));
         } catch (Exception exception) {
-            if (isClientDisconnected(exception)) {
-                completed.set(true);
-
-                log.debug(
-                        "SSE客户端已断开，停止发送事件，"
-                                + "runId={}，eventType={}",
-                        runId,
-                        event.getType()
-                );
-
-                throw new AgentClientDisconnectedException(
-                        "SSE客户端连接已断开",
-                        exception
-                );
+            if (!connectionOpen.get() || isClientDisconnected(exception)) {
+                closeConnection("DISCONNECTED");
+                return;
             }
 
             throw exception;
         }
 
         agentMetrics.recordSseEvent(event.getType());
+    }
 
-        /*
-         * FACTS属于用户能够看到的首批业务内容。
-         * CHAT回答的首内容由BLOCK事件单独统计。
-         */
-        boolean firstVisibleContent =
-                AgentStreamEventType.FACTS
-                        .name()
-                        .equalsIgnoreCase(
-                                event.getType()
-                        );
+    /**
+     * 绑定执行线程。排队期间已经取消的任务，只进入取消收尾。
+     */
+    public synchronized void bindExecutionThread() {
+        executionThread = Thread.currentThread();
+        checkCancellation();
+    }
 
-        if (firstVisibleContent
-                && firstContentRecorded
-                .compareAndSet(false, true)) {
-            agentMetrics.recordFirstContentDuration(System.currentTimeMillis() - startedAt);
+    /**
+     * 清理线程引用和中断标志，避免影响线程池后续任务。
+     */
+    public synchronized void unbindExecutionThread() {
+        executionThread = null;
+        Thread.interrupted();
+    }
+
+    /**
+     * 接受用户取消请求。
+     * 最终保存已经开始时返回 false，不能同时承诺完成和取消。
+     */
+    public synchronized boolean requestCancellation() {
+        if (completed.get() || finalizing || cancellationRequested) {
+            return false;
+        }
+
+        cancellationRequested = true;
+
+        if (executionThread != null) {
+            executionThread.interrupt();
+        }
+
+        return true;
+    }
+
+    /**
+     * 在处理边界检查取消意图。
+     */
+    public synchronized void checkCancellation() {
+        if (cancellationRequested || Thread.currentThread().isInterrupted()) {
+            throw new CancellationException("回答已由用户终止");
         }
     }
 
     /**
-     * 发送新版统一响应事件。
-     *
-     * 新版事件已经包含eventId和sequence，
-     * 这里不再重复生成事件编号。
+     * 正常或失败结果进入最终保存。
+     * 必须在数据库保存之前调用，不能放到发送完成事件之后。
      */
-    public synchronized void sendResponseEvent(ResponseStreamEvent<?> event) throws Exception {
-        if (completed.get()) {
+    public synchronized void beginFinalization() {
+        checkCancellation();
+        finalizing = true;
+    }
+
+    /**
+     * 异常收尾期间禁止再次中断保存，并返回此前是否接受过用户取消。
+     */
+    public synchronized boolean beginInterruptedFinalization() {
+        finalizing = true;
+        return cancellationRequested;
+    }
+
+    /**
+     * 只关闭网络连接，后台任务仍可继续累计内容和保存结果。
+     */
+    private void closeConnection(String reason) {
+        if (!connectionOpen.compareAndSet(true, false)) {
             return;
         }
+
+        try {
+            emitter.complete();
+        } catch (RuntimeException exception) {
+            log.debug("关闭SSE连接失败，runId={}，errorType={}",
+                    runId, exception.getClass().getSimpleName());
+        } finally {
+            agentMetrics.recordSseClosed(reason);
+        }
+    }
+
+    /**
+     * 发送统一回答事件，继续使用原来的共享事件序号。
+     */
+    public synchronized void sendResponseEvent(ResponseStreamEvent<?> event) throws Exception {
+
+        if (completed.get() || !connectionOpen.get()) {
+            return;
+        }
+
         Objects.requireNonNull(event, "发送的响应事件不能为空");
 
         String eventName = event.eventType().name().toLowerCase(Locale.ROOT);
+
         try {
-            emitter.send(SseEmitter.event().id(event.eventId()).name(eventName).data(event));
+            emitter.send(SseEmitter.event()
+                    .id(event.eventId())
+                    .name(eventName)
+                    .data(event));
         } catch (Exception exception) {
-            if (isClientDisconnected(exception)) {
-                completed.set(true);
-                log.debug(
-                        "SSE客户端已断开，停止发送新版事件，runId={}，eventType={}",
-                        runId,
-                        event.eventType()
-                );
-                throw new AgentClientDisconnectedException(
-                        "SSE客户端连接已断开",
-                        exception
-                );
+            if (!connectionOpen.get() || isClientDisconnected(exception)) {
+                closeConnection("DISCONNECTED");
+                return;
             }
+
             throw exception;
         }
+
         agentMetrics.recordSseEvent(event.eventType().name());
-        boolean firstVisibleContent = event.eventType() == ResponseStreamEventType.BLOCK_DELTA
+
+        boolean firstVisibleContent =
+                event.eventType() == ResponseStreamEventType.BLOCK_DELTA
                         || event.eventType() == ResponseStreamEventType.BLOCK_DONE;
 
-        if (firstVisibleContent && firstContentRecorded.compareAndSet(false, true)) {
-            agentMetrics.recordFirstContentDuration(System.currentTimeMillis() - startedAt);
+        if (firstVisibleContent
+                && firstContentRecorded.compareAndSet(false, true)) {
+            agentMetrics.recordFirstContentDuration(
+                    System.currentTimeMillis() - startedAt
+            );
         }
     }
 
@@ -499,279 +557,214 @@ public class AgentStreamSession {
     }
 
     /**
-     * 发送当前完整基础报告快照。
-     *
-     * 基础业务数据准备完成后立即发送，
-     * 不等待AI分析结束。
+     * 保存并发送当前报告快照，不等待AI分析完成。
      */
-    public synchronized void sendReportSnapshot(
-            ReportSchema report) throws Exception {
-
+    public synchronized void sendReportSnapshot(ReportSchema report) throws Exception {
+        currentReport = Objects.requireNonNull(report, "报告快照不能为空");
         startReportResponse();
-
-        sendResponseEvent(
-                responseEventFactory.responseSnapshot(
-                        report
-                )
-        );
+        sendResponseEvent(responseEventFactory.responseSnapshot(report));
     }
 
     /**
-     * 正常完成REPORT响应。
+     * 发送已经整理好的异常或取消结果。
+     * 持久化失败时明确提示，不能伪装为保存成功。
      */
-    public synchronized void finishReportResponse(
-            ReportSchema report) throws Exception {
-
+    public synchronized void finishInterruptedResponse(ResponseDocument document, Throwable failure, boolean persisted) {
         if (completed.get()) {
             return;
         }
 
-        startReportResponse();
+        Objects.requireNonNull(document, "最终响应不能为空");
 
-        sendResponseEvent(
-                responseEventFactory.responseDone(
-                        report
-                )
-        );
-
-        completed.set(true);
-        emitter.complete();
-
-        agentMetrics.recordSseClosed("SUCCESS");
-    }
-
-    /**
-     * 报告处理失败。
-     *
-     * snapshot保留已经成功生成的基础报告，
-     * 避免AI分析异常导致业务数据全部消失。
-     */
-    public synchronized void failReportResponse(
-            Throwable throwable,
-            ReportSchema snapshot) {
-
-        if (completed.get()) {
-            return;
-        }
+        boolean cancelled = document.status() == ResponseStatus.CANCELLED;
 
         try {
-            startReportResponse();
+            startResponse(document.mode());
 
-            sendResponseEvent(
-                    responseEventFactory.responseError(
-                            "REPORT_PROCESSING_FAILED",
-                            safeErrorMessage(throwable),
-                            true,
-                            snapshot
-                    )
-            );
+            if (cancelled && persisted) {
+                sendResponseEvent(responseEventFactory.responseDone(document));
+            } else {
+                String errorCode = persisted
+                        ? "AGENT_PROCESSING_FAILED"
+                        : "RESPONSE_PERSISTENCE_FAILED";
+
+                String errorMessage = persisted
+                        ? safeErrorMessage(failure)
+                        : "本次回答已结束，但最终结果保存失败。"
+                          + "当前内容仍可查看，刷新后可能无法恢复。";
+
+                sendResponseEvent(responseEventFactory.responseError(
+                        errorCode,
+                        errorMessage,
+                        true,
+                        document
+                ));
+            }
         } catch (Exception sendException) {
             if (!isClientDisconnected(sendException)) {
-                log.error(
-                        "发送报告错误事件失败，runId={}",
-                        runId,
-                        sendException
-                );
+                log.warn("发送最终响应失败，runId={}，errorType={}",
+                        runId, sendException.getClass().getSimpleName());
             }
         } finally {
-            completed.set(true);
-            emitter.complete();
-            agentMetrics.recordSseClosed("ERROR");
-        }
+                completed.set(true);
+                closeConnection(cancelled ? "CANCELLED" : "ERROR");
+       }
     }
-
     /**
-     * 用户主动终止报告分析。
-     *
-     * 基础报告仍然保留，
-     * 最终状态通过ReportSchema中的CANCELLED表达。
+     * 完成报告响应，调用方必须已经保存最终快照。
      */
-    public synchronized void cancelReportResponse(
-            ReportSchema report) {
+    public synchronized void finishReportResponse(ReportSchema report) throws Exception {
+        finishResponse(report);
+    }
 
-        if (completed.get()) {
-            return;
-        }
 
-        try {
-            startReportResponse();
-
-            sendResponseEvent(
-                    responseEventFactory.responseDone(
-                            report
-                    )
-            );
-        } catch (Exception sendException) {
-            if (!isClientDisconnected(sendException)) {
-                log.warn(
-                        "发送报告取消事件失败，runId={}",
-                        runId
-                );
-            }
-        } finally {
-            completed.set(true);
-            emitter.complete();
-            agentMetrics.recordSseClosed("CANCELLED");
-        }
+    /**
+     * 完成报告取消响应，调用方必须已经保存取消快照。
+     */
+    public synchronized void cancelReportResponse(ReportSchema report) {
+        finishResponse(report);
     }
 
     /**
-     * 正常完成CHAT回答。
+     * 完成文字回答，调用方必须已经保存最终快照。
      */
     public synchronized void finishChatResponse() throws Exception {
         if (completed.get()) {
             return;
         }
         if (activeTextBlock != null) {
-            throw new IllegalStateException("TEXT区块尚未完成，blockId=" + activeTextBlock.blockId());
+            throw new IllegalStateException(
+                    "TEXT区块尚未完成，blockId=" + activeTextBlock.blockId()
+            );
         }
-        AiResponse finalResponse = chatResponseAccumulator.complete();
-        sendResponseEvent(responseEventFactory.responseDone(finalResponse));
-        completed.set(true);
-        emitter.complete();
-        agentMetrics.recordSseClosed("SUCCESS");
+
+        finishResponse(chatResponseAccumulator.complete());
     }
 
+
     /**
-     * CHAT回答整体失败。
-     *
-     * 已经生成的区块通过snapshot保留。
+     * 整理取消快照，不提前发送完成事件。
      */
-    public synchronized void failChatResponse(Throwable throwable) {
-
-        if (completed.get()) {
-            return;
+    public synchronized AiResponse prepareCancelledChatResponse(String finalMarkdown) {
+        beginInterruptedFinalization();
+        Thread.interrupted();
+        if (responseMode == PresentationMode.REPORT) {
+            throw new IllegalStateException(
+                    "REPORT响应必须通过报告取消流程收尾"
+            );
         }
-        AiResponse snapshot = chatResponseAccumulator.fail();
 
-        try {
-            sendResponseEvent(responseEventFactory.responseError("AGENT_PROCESSING_FAILED", safeErrorMessage(throwable), true, snapshot));
-        } catch (Exception sendException) {
-            if (!isClientDisconnected(sendException)) {
-                log.error("发送新版回答错误事件失败，runId={}", runId, sendException);
-            }
-        } finally {
-            completed.set(true);
-            emitter.complete();
-            agentMetrics.recordSseClosed("ERROR");
+        if (activeTextBlock != null && finalMarkdown != null) {
+            TextBlock cancelledText = new TextBlock(
+                    activeTextBlock.blockId(),
+                    activeTextBlock.title(),
+                    activeTextBlock.order(),
+                    BlockStatus.CANCELLED,
+                    activeTextBlock.source(),
+                    finalMarkdown
+            );
+
+            chatResponseAccumulator.completeBlock(cancelledText);
         }
+
+        activeTextBlock = null;
+        activeTextDeltaIndex = 0;
+
+        return chatResponseAccumulator.cancel();
     }
 
     /**
-     * 用户主动终止CHAT回答。
+     * 完成文字回答取消，调用方必须已经保存取消快照。
      */
     public synchronized void cancelChatResponse() {
         if (completed.get()) {
             return;
         }
+        finishResponse(chatResponseAccumulator.cancel());
+    }
 
-        AiResponse cancelledResponse = chatResponseAccumulator.cancel();
-
+    /**
+     * 最终结果已经保存，发送失败不能再把它改写成另一份失败快照。
+     * 本方法由持有会话锁的公开方法调用。
+     */
+    private void finishResponse(ResponseDocument document) {
+        if (completed.get()) {
+            return;
+        }
+        Objects.requireNonNull(document, "最终响应不能为空");
+        if (document instanceof ReportSchema report) {
+            currentReport = report;
+        }
         try {
-            sendResponseEvent(responseEventFactory.responseDone(cancelledResponse));
-        } catch (Exception sendException) {
-            if (!isClientDisconnected(sendException)) {
-                log.warn("发送回答取消事件失败，runId={}", runId);
-            }
+            startResponse(document.mode());
+            sendResponseEvent(responseEventFactory.responseDone(document));
+        } catch (Exception exception) {
+            log.warn("最终结果已保存，但完成事件未能发送，runId={}，errorType={}",
+                    runId, exception.getClass().getSimpleName());
         } finally {
             completed.set(true);
-            emitter.complete();
-            agentMetrics.recordSseClosed("CANCELLED");
+            closeConnection(document.status() == ResponseStatus.CANCELLED ? "CANCELLED" : "SUCCESS");
         }
     }
 
-
-
     /**
-     * 关闭只包含运行事件或写操作事件的SSE连接。
-     *
-     * CHAT和REPORT回答分别使用
-     * finishChatResponse和finishReportResponse结束。
+     * 结束只包含运行事件或写操作提示的响应。
      */
     public synchronized void complete() {
-
         if (!completed.compareAndSet(false, true)) {
             return;
         }
 
-        emitter.complete();
-
-        agentMetrics.recordSseClosed(
-                "SUCCESS"
-        );
+        closeConnection("SUCCESS");
     }
 
     /**
-     * 使用统一错误事件结束当前请求。
+     * 无法构建正常回答快照时，发送统一错误并结束业务。
      */
-    public synchronized void error(
-            Throwable throwable) {
-
-        if (!completed.compareAndSet(false, true)) {
+    public synchronized void error(Throwable throwable) {
+        if (completed.get()) {
             return;
         }
 
         if (isClientDisconnected(throwable)) {
-            log.debug(
-                    "SSE客户端已断开，跳过错误事件发送，runId={}",
-                    runId
-            );
-
-            agentMetrics.recordSseClosed(
-                    "CANCELLED"
-            );
-
+            closeConnection("DISCONNECTED");
             return;
         }
-
         try {
-            ResponseStreamEvent<?> event =
-                    responseEventFactory.responseError(
-                            "AGENT_PROCESSING_FAILED",
-                            safeErrorMessage(throwable),
-                            true,
-                            null
-                    );
-
-            emitter.send(
-                    SseEmitter.event()
-                            .id(event.eventId())
-                            .name(
-                                    event.eventType()
-                                            .name()
-                                            .toLowerCase(Locale.ROOT)
-                            )
-                            .data(event)
-            );
-
-            agentMetrics.recordSseEvent(
-                    event.eventType().name()
-            );
-        } catch (Exception sendException) {
-            if (!isClientDisconnected(sendException)) {
-                log.warn(
-                        "发送统一错误事件失败，"
-                                + "runId={}，errorType={}",
-                        runId,
-                        sendException
-                                .getClass()
-                                .getSimpleName()
-                );
-            }
+            sendResponseEvent(responseEventFactory.responseError(
+                    "AGENT_PROCESSING_FAILED",
+                    safeErrorMessage(throwable),
+                    true,
+                    null
+            ));
+        } catch (Exception exception) {
+            log.warn("发送统一错误事件失败，runId={}，errorType={}",
+                    runId, exception.getClass().getSimpleName());
         } finally {
-            emitter.complete();
-
-            agentMetrics.recordSseClosed(
-                    "ERROR"
-            );
+            completed.set(true);
+            closeConnection("ERROR");
         }
     }
 
     /**
-     * 客户端连接超时。
+     * SSE连接超时不等于模型执行超时，不取消后台回答。
      */
     public void timeout() {
-        error(new IllegalStateException( "Agent回答超时"));
+        closeConnection("TIMEOUT");
+    }
+
+    /**
+     * 浏览器或容器关闭连接，只更新连接状态。
+     */
+    public void connectionClosed() {
+        closeConnection("DISCONNECTED");
+    }
+
+    /**
+     * 判断业务回答是否已经结束，不用于判断网络连接。
+     */
+    public boolean isCompleted() {
+        return completed.get();
     }
 
 
@@ -796,45 +789,31 @@ public class AgentStreamSession {
     }
 
     /**
-     * 判断异常是否源于客户端断开连接。
-     *
-     * 不直接 import 容器实现类，通过类名判断，
-     * 兼容 Spring 异步请求不可用和 Tomcat 客户端中止两类异常，
-     * 并递归检查 cause 链。
+     * 识别连接断开，不把普通业务异常当成网络断开。
      */
     private boolean isClientDisconnected(Throwable throwable) {
-        if (throwable == null) {
-            return false;
-        }
-        if (throwable instanceof AgentClientDisconnectedException) {
-            return true;
-        }
-        String className = throwable.getClass().getName();
-        if ("org.springframework.web.context.request.async.AsyncRequestNotUsableException"
-                .equals(className)) {
-            return true;
-        }
-        if ("org.apache.catalina.connector.ClientAbortException".equals(className)) {
-            return true;
-        }
-        return isClientDisconnected(throwable.getCause());
-    }
+        Throwable current = throwable;
+        while (current != null) {
+            if (current instanceof AgentClientDisconnectedException
+                    || current instanceof java.net.SocketException
+                    || current instanceof java.io.EOFException) {
+                return true;
+            }
 
-    /**
-     * SSE会话是否已经结束。
-     */
-    public boolean isCompleted() {
-        return completed.get();
-    }
-
-    /**
-     * 客户端或容器提前关闭连接。
-     */
-    public void connectionClosed() {
-        if (!completed.compareAndSet(false, true)) {
-            return;
+            String className = current.getClass().getName();
+            if ("org.springframework.web.context.request.async.AsyncRequestNotUsableException"
+                    .equals(className)
+                    || "org.apache.catalina.connector.ClientAbortException"
+                    .equals(className)) {
+                return true;
+            }
+            if (current.getCause() == current) {
+                break;
+            }
+            current = current.getCause();
         }
-        agentMetrics.recordSseClosed("CANCELLED");
+
+        return false;
     }
 
 
