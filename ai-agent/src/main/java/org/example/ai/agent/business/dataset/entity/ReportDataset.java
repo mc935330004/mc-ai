@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.annotation.IdType;
 import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
+import com.baomidou.mybatisplus.annotation.Version;
 import lombok.Data;
 
 import java.time.LocalDateTime;
@@ -34,6 +35,13 @@ public class ReportDataset {
     private Boolean enabled;
     private String configChecksum;
     private String fieldPolicyChecksum;
+
+    /**
+     * 乐观锁版本号，防止多个管理员同时覆盖当前配置。
+     */
+    @Version
+    private Integer version;
+
     private String createdBy;
     private String updatedBy;
 

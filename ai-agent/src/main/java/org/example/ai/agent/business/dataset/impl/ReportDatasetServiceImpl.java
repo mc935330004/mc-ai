@@ -13,6 +13,7 @@ import org.example.ai.agent.business.dataset.entity.ReportDataset;
 import org.example.ai.agent.business.dataset.entity.ReportDatasetField;
 import org.example.ai.agent.business.dataset.mapper.ReportDatasetFieldMapper;
 import org.example.ai.agent.business.dataset.mapper.ReportDatasetMapper;
+import org.example.ai.agent.business.model.BusinessSubjectType;
 import org.example.ai.agent.chat.support.ContentHashUtils;
 import org.example.ai.agent.common.exception.BusinessException;
 import org.example.ai.agent.graph.compiler.CompiledGraphNode;
@@ -25,10 +26,12 @@ import org.example.ai.agent.workflow.runtime.WorkflowRuntimeSnapshotResolver;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
+import org.springframework.dao.DuplicateKeyException;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.EnumSet;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -67,16 +70,8 @@ public class ReportDatasetServiceImpl
         validateDataset(dataset);
         List<ReportDatasetField> validatedFields = validateFields(fields);
 
-        JsonNode subjectTypes = normalizeRequiredJson(
-                dataset.getSubjectTypesJson(),
-                "subjectTypesJson",
-                true
-        );
-        JsonNode inputMapping = normalizeRequiredJson(
-                dataset.getInputMappingJson(),
-                "inputMappingJson",
-                false
-        );
+        JsonNode subjectTypes = normalizeSubjectTypesJson(dataset.getSubjectTypesJson());
+        JsonNode inputMapping = normalizeInputMappingJson(dataset.getInputMappingJson());
         dataset.setSubjectTypesJson(writeJson(subjectTypes));
         dataset.setInputMappingJson(writeJson(inputMapping));
 
@@ -169,30 +164,51 @@ public class ReportDatasetServiceImpl
         }
     }
 
-    private JsonNode normalizeRequiredJson(
-            String json,
-            String fieldName,
-            boolean requireArray) {
+    private JsonNode normalizeSubjectTypesJson(String json) {
         try {
             JsonNode parsed = objectMapper.readTree(json);
-            if (parsed == null || parsed.isNull()) {
-                throw new BusinessException(400, fieldName + "不能为空JSON");
+            if (parsed == null || !parsed.isArray() || parsed.isEmpty()) {
+                throw new BusinessException(400, "subjectTypesJson必须是非空JSON数组");
             }
-            if (requireArray) {
-                if (!parsed.isArray() || parsed.isEmpty()) {
-                    throw new BusinessException(400, fieldName + "必须是非空JSON数组");
+
+            Set<BusinessSubjectType> subjectTypes = EnumSet.noneOf(BusinessSubjectType.class);
+            for (JsonNode item : parsed) {
+                if (!item.isTextual() || !StringUtils.hasText(item.textValue())) {
+                    throw new BusinessException(400, "主体类型只能是非空字符串");
                 }
-                for (JsonNode item : parsed) {
-                    if (!item.isTextual() || !StringUtils.hasText(item.textValue())) {
-                        throw new BusinessException(400, fieldName + "只能包含非空主体类型字符串");
-                    }
+                String subjectTypeCode = item.textValue().trim();
+                BusinessSubjectType subjectType;
+                try {
+                    subjectType = BusinessSubjectType.valueOf(subjectTypeCode);
+                } catch (IllegalArgumentException exception) {
+                    throw new BusinessException(400, "不支持的主体类型：" + subjectTypeCode);
                 }
-            } else if (!parsed.isObject()) {
-                throw new BusinessException(400, fieldName + "必须是JSON对象");
+                if (!subjectTypes.add(subjectType)) {
+                    throw new BusinessException(400, "主体类型重复：" + subjectTypeCode);
+                }
+            }
+
+            ArrayNode normalized = objectMapper.createArrayNode();
+            for (BusinessSubjectType subjectType : BusinessSubjectType.values()) {
+                if (subjectTypes.contains(subjectType)) {
+                    normalized.add(subjectType.name());
+                }
+            }
+            return normalized;
+        } catch (JsonProcessingException exception) {
+            throw new BusinessException(400, "subjectTypesJson不是合法JSON");
+        }
+    }
+
+    private JsonNode normalizeInputMappingJson(String json) {
+        try {
+            JsonNode parsed = objectMapper.readTree(json);
+            if (parsed == null || !parsed.isObject()) {
+                throw new BusinessException(400, "inputMappingJson必须是JSON对象");
             }
             return canonicalize(parsed);
         } catch (JsonProcessingException exception) {
-            throw new BusinessException(400, fieldName + "不是合法JSON");
+            throw new BusinessException(400, "inputMappingJson不是合法JSON");
         }
     }
 
@@ -221,12 +237,13 @@ public class ReportDatasetServiceImpl
             if (node.config() instanceof CapabilityNodeConfig capability
                     && StringUtils.hasText(capability.capabilityCode())) {
                 String capabilityCode = capability.capabilityCode().trim();
-                if ("WRITE".equalsIgnoreCase(capabilityCatalog.sideEffect(capabilityCode))) {
+                String sideEffect = trimToNull(capabilityCatalog.sideEffect(capabilityCode));
+                if (!"READ".equalsIgnoreCase(sideEffect)) {
                     throw new BusinessException(
                             400,
                             "报告数据集只允许引用READ工作流，工作流"
                                     + workflowCode
-                                    + "包含WRITE能力："
+                                    + "包含非READ能力："
                                     + capabilityCode
                     );
                 }
@@ -296,19 +313,27 @@ public class ReportDatasetServiceImpl
         dataset.setUpdatedAt(now);
         if (existing == null) {
             dataset.setId(null);
+            dataset.setVersion(0);
             dataset.setCreatedBy(operator);
             dataset.setCreatedAt(now);
-            if (datasetMapper.insert(dataset) != 1 || dataset.getId() == null) {
-                throw new BusinessException(500, "报告数据集当前配置新增失败");
+            try {
+                if (datasetMapper.insert(dataset) != 1 || dataset.getId() == null) {
+                    throw new BusinessException(500, "报告数据集当前配置新增失败");
+                }
+            } catch (DuplicateKeyException exception) {
+                throw new BusinessException(409, "相同datasetCode的当前配置已经存在");
             }
             return;
         }
 
+        if (dataset.getVersion() == null) {
+            throw new BusinessException(400, "更新当前数据集配置时version不能为空");
+        }
         dataset.setId(existing.getId());
         dataset.setCreatedBy(existing.getCreatedBy());
         dataset.setCreatedAt(existing.getCreatedAt());
         if (datasetMapper.updateById(dataset) != 1) {
-            throw new BusinessException(409, "报告数据集当前配置已被修改，请重试");
+            throw new BusinessException(409, "报告数据集配置已被其他人修改，请刷新后重试");
         }
     }
 

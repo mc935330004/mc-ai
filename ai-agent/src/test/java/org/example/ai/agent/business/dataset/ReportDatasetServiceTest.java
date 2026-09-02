@@ -1,6 +1,7 @@
 package org.example.ai.agent.business.dataset;
 
 import com.baomidou.mybatisplus.core.conditions.Wrapper;
+import com.baomidou.mybatisplus.annotation.Version;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.ai.agent.business.dataset.entity.ReportDataset;
 import org.example.ai.agent.business.dataset.entity.ReportDatasetField;
@@ -21,9 +22,13 @@ import org.example.ai.agent.workflow.runtime.WorkflowRuntimeSnapshotResolver;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.InOrder;
+import org.springframework.dao.DuplicateKeyException;
 
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.time.LocalDateTime;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -31,6 +36,7 @@ import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.catchThrowableOfType;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
@@ -41,6 +47,7 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+@SuppressWarnings("unchecked")
 class ReportDatasetServiceTest {
 
     private ReportDatasetMapper datasetMapper;
@@ -150,6 +157,51 @@ class ReportDatasetServiceTest {
         verify(datasetMapper, never()).insert(any(ReportDataset.class));
     }
 
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = {"", " ", "UNKNOWN", "DANGEROUS"})
+    void rejectsMainGraphCapabilityUnlessSideEffectIsExplicitlyRead(String sideEffect) {
+        when(workflowResolver.resolveByCode("QUERY_EMPLOYEE"))
+                .thenReturn(publishedWorkflow(
+                        "QUERY_EMPLOYEE",
+                        "{\"type\":\"object\"}",
+                        graphWithCapability("EMPLOYEE_QUERY")
+                ));
+        when(capabilityCatalog.sideEffect("EMPLOYEE_QUERY")).thenReturn(sideEffect);
+
+        assertThatThrownBy(() -> service.saveCurrent(
+                validDataset("{\"employeeNo\":\"subjectId\"}"),
+                List.of(validField("employee_name", 10)),
+                "admin"
+        ))
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("只允许")
+                .hasMessageContaining("READ")
+                .hasMessageContaining("EMPLOYEE_QUERY");
+
+        verify(datasetMapper, never()).insert(any(ReportDataset.class));
+    }
+
+    @Test
+    void rejectsUnknownSideEffectNestedInsideForEachBody() {
+        when(workflowResolver.resolveByCode("QUERY_EMPLOYEE"))
+                .thenReturn(publishedWorkflow(
+                        "QUERY_EMPLOYEE",
+                        "{\"type\":\"object\"}",
+                        graphWithForEachBody(graphWithCapability("EMPLOYEE_NESTED_QUERY"))
+                ));
+        when(capabilityCatalog.sideEffect("EMPLOYEE_NESTED_QUERY")).thenReturn("UNKNOWN");
+
+        assertThatThrownBy(() -> service.saveCurrent(
+                validDataset("{\"employeeNo\":\"subjectId\"}"),
+                List.of(validField("employee_name", 10)),
+                "admin"
+        ))
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("READ")
+                .hasMessageContaining("EMPLOYEE_NESTED_QUERY");
+    }
+
     @Test
     void rejectsDuplicateFactCodeInOneDataset() {
         assertThatThrownBy(() -> service.saveCurrent(
@@ -203,6 +255,7 @@ class ReportDatasetServiceTest {
         existing.setId(77L);
         existing.setCreatedBy("creator");
         existing.setCreatedAt(createdAt);
+        existing.setVersion(6);
         when(datasetMapper.selectOne(any(Wrapper.class))).thenReturn(existing);
         when(workflowResolver.resolveByCode("QUERY_EMPLOYEE"))
                 .thenReturn(publishedWorkflow(
@@ -211,8 +264,10 @@ class ReportDatasetServiceTest {
                         graphWithCapability("EMPLOYEE_QUERY")
                 ));
 
+        ReportDataset request = validDataset("{\"employeeNo\":\"subjectId\"}");
+        request.setVersion(5);
         ReportDataset updated = service.saveCurrent(
-                validDataset("{\"employeeNo\":\"subjectId\"}"),
+                request,
                 List.of(validField("employee_status", 20)),
                 "editor"
         );
@@ -221,12 +276,180 @@ class ReportDatasetServiceTest {
         assertThat(updated.getCreatedBy()).isEqualTo("creator");
         assertThat(updated.getCreatedAt()).isEqualTo(createdAt);
         assertThat(updated.getUpdatedBy()).isEqualTo("editor");
+        assertThat(updated.getVersion()).isEqualTo(5);
         verify(datasetMapper, never()).insert(any(ReportDataset.class));
         verify(datasetMapper).updateById(updated);
 
         InOrder replacementOrder = inOrder(fieldMapper);
         replacementOrder.verify(fieldMapper).delete(any(Wrapper.class));
         replacementOrder.verify(fieldMapper).insert(any(ReportDatasetField.class));
+    }
+
+    @Test
+    void declaresVersionColumnAndOptimisticLockField() throws Exception {
+        String migration;
+        try (InputStream input = getClass().getResourceAsStream(
+                "/db/migration/V12__create_business_assistant_config.sql")) {
+            assertThat(input).isNotNull();
+            migration = new String(input.readAllBytes(), StandardCharsets.UTF_8);
+        }
+
+        assertThat(migration)
+                .containsPattern("(?i)version\\s+INT\\s+NOT\\s+NULL\\s+DEFAULT\\s+0");
+        assertThat(ReportDataset.class.getDeclaredField("version").getAnnotation(Version.class))
+                .isNotNull();
+    }
+
+    @Test
+    void forcesVersionZeroWhenCreatingCurrentDataset() {
+        when(workflowResolver.resolveByCode("QUERY_EMPLOYEE"))
+                .thenReturn(publishedWorkflow(
+                        "QUERY_EMPLOYEE",
+                        "{\"type\":\"object\"}",
+                        graphWithCapability("EMPLOYEE_QUERY")
+                ));
+        ReportDataset request = validDataset("{}");
+
+        ReportDataset saved = service.saveCurrent(
+                request,
+                List.of(validField("employee_name", 10)),
+                "admin"
+        );
+
+        assertThat(saved.getVersion()).isZero();
+    }
+
+    @Test
+    void requiresClientVersionWhenUpdatingCurrentDataset() {
+        ReportDataset existing = existingDataset(77L, 4);
+        when(datasetMapper.selectOne(any(Wrapper.class))).thenReturn(existing);
+        when(workflowResolver.resolveByCode("QUERY_EMPLOYEE"))
+                .thenReturn(publishedWorkflow(
+                        "QUERY_EMPLOYEE",
+                        "{\"type\":\"object\"}",
+                        graphWithCapability("EMPLOYEE_QUERY")
+                ));
+
+        assertThatThrownBy(() -> service.saveCurrent(
+                validDataset("{}"),
+                List.of(validField("employee_name", 10)),
+                "editor"
+        ))
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("version")
+                .hasMessageContaining("不能为空");
+
+        verify(datasetMapper, never()).updateById(any(ReportDataset.class));
+    }
+
+    @Test
+    void reportsOptimisticConflictWhenUpdateAffectsNoRow() {
+        ReportDataset existing = existingDataset(77L, 6);
+        when(datasetMapper.selectOne(any(Wrapper.class))).thenReturn(existing);
+        when(datasetMapper.updateById(any(ReportDataset.class))).thenReturn(0);
+        when(workflowResolver.resolveByCode("QUERY_EMPLOYEE"))
+                .thenReturn(publishedWorkflow(
+                        "QUERY_EMPLOYEE",
+                        "{\"type\":\"object\"}",
+                        graphWithCapability("EMPLOYEE_QUERY")
+                ));
+        ReportDataset request = validDataset("{}");
+        request.setVersion(5);
+
+        BusinessException conflict = catchThrowableOfType(BusinessException.class, () -> service.saveCurrent(
+                request,
+                List.of(validField("employee_name", 10)),
+                "editor"
+        ));
+
+        assertThat(conflict.getCode()).isEqualTo(409);
+        assertThat(conflict).hasMessageContaining("配置已被其他人修改");
+    }
+
+    @Test
+    void convertsConcurrentDatasetCodeInsertToBusinessConflict() {
+        when(workflowResolver.resolveByCode("QUERY_EMPLOYEE"))
+                .thenReturn(publishedWorkflow(
+                        "QUERY_EMPLOYEE",
+                        "{\"type\":\"object\"}",
+                        graphWithCapability("EMPLOYEE_QUERY")
+                ));
+        when(datasetMapper.insert(any(ReportDataset.class)))
+                .thenThrow(new DuplicateKeyException("Duplicate entry EMPLOYEE_PROFILE"));
+
+        BusinessException conflict = catchThrowableOfType(BusinessException.class, () -> service.saveCurrent(
+                validDataset("{}"),
+                List.of(validField("employee_name", 10)),
+                "admin"
+        ));
+
+        assertThat(conflict.getCode()).isEqualTo(409);
+        assertThat(conflict)
+                .hasMessageContaining("相同datasetCode")
+                .hasMessageNotContaining("Duplicate entry");
+    }
+
+    @Test
+    void normalizesSubjectTypeSetInEnumOrderAndProducesStableChecksum() {
+        when(workflowResolver.resolveByCode("QUERY_EMPLOYEE"))
+                .thenReturn(publishedWorkflow(
+                        "QUERY_EMPLOYEE",
+                        "{\"type\":\"object\"}",
+                        graphWithCapability("EMPLOYEE_QUERY")
+                ));
+        ReportDataset reordered = validDataset("{}");
+        reordered.setSubjectTypesJson("[\" DEPARTMENT \",\"PROJECT\",\" PERSON \"]");
+        ReportDataset canonical = validDataset("{}");
+        canonical.setSubjectTypesJson("[\"PROJECT\",\"PERSON\",\"DEPARTMENT\"]");
+
+        ReportDataset first = service.saveCurrent(
+                reordered,
+                List.of(validField("employee_name", 10)),
+                "admin"
+        );
+        ReportDataset second = service.saveCurrent(
+                canonical,
+                List.of(validField("employee_name", 10)),
+                "admin"
+        );
+
+        assertThat(first.getSubjectTypesJson())
+                .isEqualTo("[\"PROJECT\",\"PERSON\",\"DEPARTMENT\"]");
+        assertThat(second.getConfigChecksum()).isEqualTo(first.getConfigChecksum());
+    }
+
+    @Test
+    void rejectsDuplicateSubjectTypeAfterTrimming() {
+        ReportDataset dataset = validDataset("{}");
+        dataset.setSubjectTypesJson("[\"PERSON\",\" PERSON \"]");
+
+        assertThatThrownBy(() -> service.saveCurrent(
+                dataset,
+                List.of(validField("employee_name", 10)),
+                "admin"
+        ))
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("主体类型")
+                .hasMessageContaining("重复");
+
+        verify(workflowResolver, never()).resolveByCode(anyString());
+    }
+
+    @Test
+    void rejectsUnknownBusinessSubjectType() {
+        ReportDataset dataset = validDataset("{}");
+        dataset.setSubjectTypesJson("[\"TEAM\"]");
+
+        assertThatThrownBy(() -> service.saveCurrent(
+                dataset,
+                List.of(validField("employee_name", 10)),
+                "admin"
+        ))
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("主体类型")
+                .hasMessageContaining("TEAM");
+
+        verify(workflowResolver, never()).resolveByCode(anyString());
     }
 
     @Test
@@ -252,12 +475,15 @@ class ReportDatasetServiceTest {
 
         ReportDataset existing = validDataset("{}");
         existing.setId(101L);
+        existing.setVersion(0);
         existing.setCreatedBy("admin");
         existing.setCreatedAt(LocalDateTime.of(2026, 9, 1, 10, 0));
         when(datasetMapper.selectOne(any(Wrapper.class))).thenReturn(existing);
 
+        ReportDataset secondRequest = validDataset("{\"period\":{\"start\":\"periodStart\",\"end\":\"periodEnd\"},\"employeeNo\":\"subjectId\"}");
+        secondRequest.setVersion(0);
         ReportDataset second = service.saveCurrent(
-                validDataset("{\"period\":{\"start\":\"periodStart\",\"end\":\"periodEnd\"},\"employeeNo\":\"subjectId\"}"),
+                secondRequest,
                 List.of(
                         validField("employee_name", 10),
                         validField("employee_status", 20)
@@ -284,6 +510,15 @@ class ReportDatasetServiceTest {
         dataset.setMaxConcurrency(4);
         dataset.setEnabled(true);
         return dataset;
+    }
+
+    private ReportDataset existingDataset(long id, int version) {
+        ReportDataset existing = validDataset("{}");
+        existing.setId(id);
+        existing.setCreatedBy("creator");
+        existing.setCreatedAt(LocalDateTime.of(2026, 9, 1, 10, 0));
+        existing.setVersion(version);
+        return existing;
     }
 
     private ReportDatasetField validField(String factCode, int displayOrder) {

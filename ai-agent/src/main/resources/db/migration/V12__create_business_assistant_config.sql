@@ -24,6 +24,7 @@ CREATE TABLE ai_report_dataset
     enabled               TINYINT(1)   NOT NULL DEFAULT 1 COMMENT '是否启用：0否，1是',
     config_checksum       CHAR(64)     NOT NULL COMMENT '当前数据集配置SHA-256',
     field_policy_checksum CHAR(64)     NOT NULL COMMENT '当前字段策略SHA-256',
+    version               INT          NOT NULL DEFAULT 0 COMMENT '乐观锁版本号',
     created_by            VARCHAR(128) NOT NULL COMMENT '创建人',
     updated_by            VARCHAR(128) NOT NULL COMMENT '最后修改人',
     created_at            DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP COMMENT '创建时间',
