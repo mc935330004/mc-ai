@@ -17,6 +17,7 @@ import org.example.ai.agent.business.model.DatasetExecutionStatus;
 import org.example.ai.agent.capability.entity.FieldDictionary;
 import org.example.ai.agent.capability.mapper.FieldDictionaryMapper;
 import org.example.ai.agent.capability.service.FieldMetadataService;
+import org.example.ai.agent.common.exception.BusinessException;
 import org.example.ai.agent.workflow.entity.WorkflowDefinition;
 import org.example.ai.agent.workflow.entity.WorkflowVersion;
 import org.example.ai.agent.workflow.runtime.PublishedWorkflow;
@@ -82,6 +83,85 @@ class ReportDatasetExecutionServiceTest {
                 metadataService,
                 extractor,
                 objectMapper
+        );
+    }
+
+    @Test
+    void requestRecursivelySnapshotsAndFreezesSecurityAndCanonicalValues() {
+        List<Object> scopes = new ArrayList<>(List.of("read"));
+        Map<String, Object> secureNested = new LinkedHashMap<>();
+        secureNested.put("scopes", scopes);
+        Map<String, Object> secureContext = new LinkedHashMap<>();
+        secureContext.put("claims", secureNested);
+
+        Object[] filters = new Object[]{"ACTIVE"};
+        Map<String, Object> canonicalNested = new LinkedHashMap<>();
+        canonicalNested.put("filters", filters);
+        Map<String, Object> canonicalInput = new LinkedHashMap<>();
+        canonicalInput.put("query", canonicalNested);
+
+        DatasetExecutionRequest request = new DatasetExecutionRequest(
+                "agent-run-1", "user-1", "session-1", SECRET,
+                secureContext, "PROJECT_BASE", BusinessSubjectType.PROJECT,
+                "P100", canonicalInput
+        );
+        scopes.add("late");
+        secureNested.put("late", "must-not-escape");
+        filters[0] = "DELETED";
+        canonicalNested.put("late", "must-not-escape");
+
+        Map<String, Object> frozenClaims =
+                (Map<String, Object>) request.secureContext().get("claims");
+        Map<String, Object> frozenQuery =
+                (Map<String, Object>) request.canonicalInput().get("query");
+        assertThat(frozenClaims).containsOnlyKeys("scopes");
+        assertThat((List<Object>) frozenClaims.get("scopes")).containsExactly("read");
+        assertThat(frozenQuery).containsOnlyKeys("filters");
+        assertThat((List<Object>) frozenQuery.get("filters")).containsExactly("ACTIVE");
+        assertThatThrownBy(() -> frozenClaims.put("bad", true))
+                .isInstanceOf(UnsupportedOperationException.class);
+        assertThatThrownBy(() -> ((List<Object>) frozenClaims.get("scopes")).add("bad"))
+                .isInstanceOf(UnsupportedOperationException.class);
+    }
+
+    @Test
+    void requestRejectsCyclicAndUnsupportedNestedValuesWithControlledError() {
+        Map<String, Object> cyclic = new LinkedHashMap<>();
+        cyclic.put("self", cyclic);
+
+        assertThatThrownBy(() -> new DatasetExecutionRequest(
+                "agent-run-1", "user-1", "session-1", SECRET,
+                cyclic, "PROJECT_BASE", BusinessSubjectType.PROJECT,
+                "P100", Map.of()
+        ))
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("循环");
+
+        assertThatThrownBy(() -> new DatasetExecutionRequest(
+                "agent-run-1", "user-1", "session-1", SECRET,
+                Map.of(), "PROJECT_BASE", BusinessSubjectType.PROJECT,
+                "P100", Map.of("bad", new StringBuilder("mutable"))
+        ))
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("StringBuilder")
+                .hasMessageContaining("不支持");
+    }
+
+    @Test
+    void requestToStringDoesNotExposeSecurityOrCanonicalKeysAndValues() {
+        DatasetExecutionRequest request = new DatasetExecutionRequest(
+                "agent-run-1", "user-1", "session-1", SECRET,
+                Map.of("authorizationSecretKey", "authorizationSecretValue"),
+                "PROJECT_BASE", BusinessSubjectType.PROJECT, "P100",
+                Map.of("canonicalSecretKey", "canonicalSecretValue")
+        );
+
+        assertThat(request.toString()).doesNotContain(
+                SECRET,
+                "authorizationSecretKey",
+                "authorizationSecretValue",
+                "canonicalSecretKey",
+                "canonicalSecretValue"
         );
     }
 

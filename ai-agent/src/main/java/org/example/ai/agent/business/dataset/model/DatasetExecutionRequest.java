@@ -1,9 +1,8 @@
 package org.example.ai.agent.business.dataset.model;
 
+import org.example.ai.agent.business.dataset.ReportDatasetValidator;
 import org.example.ai.agent.business.model.BusinessSubjectType;
 
-import java.util.Collections;
-import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
@@ -23,19 +22,23 @@ public record DatasetExecutionRequest(
         Map<String, Object> canonicalInput) {
 
     public DatasetExecutionRequest {
-        secureContext = immutableTopLevelCopy(secureContext);
-        canonicalInput = immutableTopLevelCopy(canonicalInput);
-    }
-
-    private static Map<String, Object> immutableTopLevelCopy(
-            Map<String, Object> source) {
-        return source == null
-                ? Map.of()
-                : Collections.unmodifiableMap(new LinkedHashMap<>(source));
+        secureContext = immutableDeepCopy(secureContext);
+        canonicalInput = immutableDeepCopy(canonicalInput);
     }
 
     /**
-     * 仅展示认证是否存在和安全上下文键名，不展示任何认证值。
+     * 与规范输入映射共用同一递归安全策略，构造后不再保留调用方的可变嵌套引用。
+     */
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> immutableDeepCopy(
+            Map<String, Object> source) {
+        return (Map<String, Object>) ReportDatasetValidator.freezeSafeValue(
+                source == null ? Map.of() : source
+        );
+    }
+
+    /**
+     * 仅展示非敏感摘要，不展示认证、上下文或规范输入的键和值。
      */
     @Override
     public String toString() {
@@ -44,11 +47,13 @@ public record DatasetExecutionRequest(
                 + ", userId=" + userId
                 + ", sessionId=" + sessionId
                 + ", authorizationPresent=" + (authorization != null && !authorization.isBlank())
-                + ", secureContextKeys=" + secureContext.keySet()
+                + ", secureContextPresent=" + !secureContext.isEmpty()
+                + ", secureContextSize=" + secureContext.size()
                 + ", datasetCode=" + datasetCode
                 + ", subjectType=" + subjectType
                 + ", subjectId=" + subjectId
-                + ", canonicalInputKeys=" + canonicalInput.keySet()
+                + ", canonicalInputPresent=" + !canonicalInput.isEmpty()
+                + ", canonicalInputSize=" + canonicalInput.size()
                 + ']';
     }
 }

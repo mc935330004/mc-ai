@@ -150,20 +150,20 @@ public final class ReportDatasetValidator {
     /**
      * 递归复制并冻结可安全跨执行边界传递的值。
      */
-    Object freezeSafeValue(Object value) {
+    public static Object freezeSafeValue(Object value) {
         return freezeSafeValue(value, new IdentityHashMap<>(), 0);
     }
 
     /**
      * 为已经冻结的安全值生成带类型标签的确定性表达。
      */
-    String canonicalSafeValue(Object safeValue) {
+    static String canonicalSafeValue(Object safeValue) {
         StringBuilder canonical = new StringBuilder();
         appendCanonical(safeValue, canonical);
         return canonical.toString();
     }
 
-    private Object freezeSafeValue(
+    private static Object freezeSafeValue(
             Object value,
             IdentityHashMap<Object, Boolean> recursionPath,
             int depth) {
@@ -201,7 +201,7 @@ public final class ReportDatasetValidator {
         }
     }
 
-    private Map<String, Object> freezeMap(
+    private static Map<String, Object> freezeMap(
             Map<?, ?> source,
             IdentityHashMap<Object, Boolean> recursionPath,
             int depth) {
@@ -218,7 +218,7 @@ public final class ReportDatasetValidator {
         return Collections.unmodifiableMap(frozen);
     }
 
-    private Set<Object> freezeSet(
+    private static Set<Object> freezeSet(
             Set<?> source,
             IdentityHashMap<Object, Boolean> recursionPath,
             int depth) {
@@ -233,7 +233,7 @@ public final class ReportDatasetValidator {
         return Collections.unmodifiableSet(result);
     }
 
-    private List<Object> freezeCollection(
+    private static List<Object> freezeCollection(
             Collection<?> source,
             IdentityHashMap<Object, Boolean> recursionPath,
             int depth) {
@@ -244,7 +244,7 @@ public final class ReportDatasetValidator {
         return Collections.unmodifiableList(frozen);
     }
 
-    private List<Object> freezeArray(
+    private static List<Object> freezeArray(
             Object source,
             IdentityHashMap<Object, Boolean> recursionPath,
             int depth) {
@@ -256,13 +256,13 @@ public final class ReportDatasetValidator {
         return Collections.unmodifiableList(frozen);
     }
 
-    private boolean isContainer(Object value) {
+    private static boolean isContainer(Object value) {
         return value instanceof Map<?, ?>
                 || value instanceof Collection<?>
                 || value.getClass().isArray();
     }
 
-    private boolean isImmutableScalar(Object value) {
+    private static boolean isImmutableScalar(Object value) {
         return value instanceof String
                 || value instanceof Boolean
                 || value instanceof Character
@@ -272,14 +272,14 @@ public final class ReportDatasetValidator {
                 || isJavaTimeValue(value);
     }
 
-    private boolean isJavaTimeValue(Object value) {
+    private static boolean isJavaTimeValue(Object value) {
         return "java.time".equals(value.getClass().getPackageName())
                 && (value instanceof TemporalAccessor
                 || value instanceof TemporalAmount
                 || value instanceof ZoneId);
     }
 
-    private void appendCanonical(Object value, StringBuilder target) {
+    private static void appendCanonical(Object value, StringBuilder target) {
         if (value == null) {
             target.append("N;");
             return;
@@ -331,7 +331,7 @@ public final class ReportDatasetValidator {
         );
     }
 
-    private void appendToken(StringBuilder target, String tag, String value) {
+    private static void appendToken(StringBuilder target, String tag, String value) {
         target.append(tag)
                 .append(value.length())
                 .append(':')

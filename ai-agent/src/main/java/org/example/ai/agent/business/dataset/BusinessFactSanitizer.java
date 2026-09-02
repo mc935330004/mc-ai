@@ -52,7 +52,7 @@ public final class BusinessFactSanitizer {
             boolean missing = rawValue == null;
             Object calculationValue = missing
                     ? MissingValue.INSTANCE
-                    : validator.freezeSafeValue(rawValue);
+                    : ReportDatasetValidator.freezeSafeValue(rawValue);
             Object visibleValue = missing
                     ? MissingValue.INSTANCE
                     : mask(calculationValue, policy.maskStrategy());
@@ -106,7 +106,9 @@ public final class BusinessFactSanitizer {
     }
 
     private String sha256(Object value) {
-        return ContentHashUtils.sha256(validator.canonicalSafeValue(value));
+        return ContentHashUtils.sha256(
+                ReportDatasetValidator.canonicalSafeValue(value)
+        );
     }
 
     private static Map<String, Object> immutableMap(Map<String, Object> source) {

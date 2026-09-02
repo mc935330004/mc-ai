@@ -45,7 +45,7 @@ public final class CanonicalInputMapper {
         for (Map.Entry<String, Object> entry : canonicalSnapshot.entrySet()) {
             workflowInput.put(
                     mappingSnapshot.get(entry.getKey()),
-                    validator.freezeSafeValue(entry.getValue())
+                    ReportDatasetValidator.freezeSafeValue(entry.getValue())
             );
         }
         return Collections.unmodifiableMap(workflowInput);
