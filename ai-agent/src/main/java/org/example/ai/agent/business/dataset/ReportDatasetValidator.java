@@ -20,7 +20,8 @@ public final class ReportDatasetValidator {
             "workflowcode",
             "capabilitycode",
             "authorization",
-            "securecontext"
+            "securecontext",
+            "usercontext"
     );
     private static final Set<String> MASK_STRATEGIES = Set.of(
             "NONE",

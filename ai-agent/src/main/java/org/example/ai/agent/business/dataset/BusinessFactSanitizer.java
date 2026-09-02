@@ -8,14 +8,17 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.example.ai.agent.business.dataset.model.FieldPolicy;
 import org.springframework.stereotype.Component;
 
+import java.lang.reflect.Array;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.HexFormat;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -65,10 +68,12 @@ public final class BusinessFactSanitizer {
                     ? factSnapshot.get(policy.factCode())
                     : null;
             boolean missing = rawValue == null;
-            Object calculationValue = missing ? MissingValue.INSTANCE : rawValue;
+            Object calculationValue = missing
+                    ? MissingValue.INSTANCE
+                    : freeze(rawValue);
             Object visibleValue = missing
                     ? MissingValue.INSTANCE
-                    : mask(rawValue, policy.maskStrategy());
+                    : mask(calculationValue, policy.maskStrategy());
 
             if (policy.calculable()) {
                 calculationFacts.put(policy.factCode(), calculationValue);
@@ -89,6 +94,39 @@ public final class BusinessFactSanitizer {
                 exportFacts,
                 modelFacts
         );
+    }
+
+    /**
+     * 递归冻结标准 JSON 风格容器，保留数值等标量的原始 Java 类型。
+     */
+    private Object freeze(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof Map<?, ?> map) {
+            Map<Object, Object> frozen = new LinkedHashMap<>();
+            map.forEach((key, item) -> frozen.put(key, freeze(item)));
+            return Collections.unmodifiableMap(frozen);
+        }
+        if (value instanceof Set<?> set) {
+            Set<Object> frozen = new LinkedHashSet<>();
+            set.forEach(item -> frozen.add(freeze(item)));
+            return Collections.unmodifiableSet(frozen);
+        }
+        if (value instanceof Collection<?> collection) {
+            List<Object> frozen = new ArrayList<>(collection.size());
+            collection.forEach(item -> frozen.add(freeze(item)));
+            return Collections.unmodifiableList(frozen);
+        }
+        if (value.getClass().isArray()) {
+            int length = Array.getLength(value);
+            List<Object> frozen = new ArrayList<>(length);
+            for (int index = 0; index < length; index++) {
+                frozen.add(freeze(Array.get(value, index)));
+            }
+            return Collections.unmodifiableList(frozen);
+        }
+        return value;
     }
 
     private Object mask(Object value, String strategy) {

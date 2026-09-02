@@ -157,6 +157,26 @@ class CanonicalInputMapperTest {
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Authorization")
                 .hasMessageContaining("保留");
+
+        assertThatThrownBy(() -> mapper.map(
+                Map.of("UsErCoNtExT", Map.of("role", "admin")),
+                Map.of("UsErCoNtExT", "safe_id"),
+                reservedSchema
+        ))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("UsErCoNtExT")
+                .hasMessageContaining("保留");
+
+        assertThatThrownBy(() -> mapper.map(
+                Map.of("id", 91L),
+                Map.of("id", "uSeRcOnTeXt"),
+                schema("""
+                        {"type":"object","properties":{"uSeRcOnTeXt":{"type":"object"}}}
+                        """)
+        ))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("uSeRcOnTeXt")
+                .hasMessageContaining("保留");
     }
 
     @Test

@@ -8,9 +8,12 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -144,6 +147,59 @@ class BusinessFactSanitizerTest {
                 .containsOnlyKeys("expense.approvedAmount")
                 .containsEntry("expense.approvedAmount", new BigDecimal("10"));
         assertThatThrownBy(() -> result.displayFacts().put("extra", "value"))
+                .isInstanceOf(UnsupportedOperationException.class);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void recursivelyFreezesNestedJsonStyleFactsWithoutChangingScalarTypes() {
+        List<Object> details = new ArrayList<>();
+        details.add(new BigDecimal("12.50"));
+        Set<String> labels = new LinkedHashSet<>(Set.of("approved"));
+        Object[] attachments = {new ArrayList<>(List.of("receipt.pdf"))};
+        Map<String, Object> nested = new LinkedHashMap<>();
+        nested.put("details", details);
+        nested.put("labels", labels);
+        nested.put("attachments", attachments);
+        nested.put("missing", null);
+
+        SanitizedFacts result = sanitizer.sanitize(
+                Map.of("expense.record", nested),
+                List.of(policy("expense.record", true, true, true, true, "NONE"))
+        );
+        Map<String, Object> frozen = (Map<String, Object>) result
+                .calculationFacts()
+                .get("expense.record");
+
+        details.add("late-detail");
+        labels.add("late-label");
+        ((List<String>) attachments[0]).add("late-file.pdf");
+        attachments[0] = "replaced";
+        nested.put("late", "value");
+
+        assertThat(frozen)
+                .containsOnlyKeys("details", "labels", "attachments", "missing")
+                .containsEntry("missing", null);
+        assertThat((List<Object>) frozen.get("details"))
+                .containsExactly(new BigDecimal("12.50"));
+        assertThat(((List<Object>) frozen.get("details")).get(0))
+                .isInstanceOf(BigDecimal.class);
+        assertThat((Set<String>) frozen.get("labels")).containsExactly("approved");
+        List<Object> frozenAttachments = (List<Object>) frozen.get("attachments");
+        assertThat((List<String>) frozenAttachments.get(0)).containsExactly("receipt.pdf");
+
+        assertThat(result.displayFacts().get("expense.record")).isSameAs(frozen);
+        assertThat(result.exportFacts().get("expense.record")).isSameAs(frozen);
+        assertThat(result.modelFacts().get("expense.record")).isSameAs(frozen);
+        assertThatThrownBy(() -> frozen.put("extra", "value"))
+                .isInstanceOf(UnsupportedOperationException.class);
+        assertThatThrownBy(() -> ((List<Object>) frozen.get("details")).add("value"))
+                .isInstanceOf(UnsupportedOperationException.class);
+        assertThatThrownBy(() -> ((Set<String>) frozen.get("labels")).add("value"))
+                .isInstanceOf(UnsupportedOperationException.class);
+        assertThatThrownBy(() -> frozenAttachments.add("value"))
+                .isInstanceOf(UnsupportedOperationException.class);
+        assertThatThrownBy(() -> ((List<String>) frozenAttachments.get(0)).add("value"))
                 .isInstanceOf(UnsupportedOperationException.class);
     }
 
