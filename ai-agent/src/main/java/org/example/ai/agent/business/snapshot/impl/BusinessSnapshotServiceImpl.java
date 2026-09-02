@@ -4,6 +4,7 @@ import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
+import org.example.ai.agent.business.dataset.BusinessFactSanitizer;
 import org.example.ai.agent.business.dataset.ReportDatasetValidator;
 import org.example.ai.agent.business.dataset.entity.ReportDataset;
 import org.example.ai.agent.business.dataset.entity.ReportDatasetField;
@@ -11,6 +12,7 @@ import org.example.ai.agent.business.dataset.mapper.ReportDatasetFieldMapper;
 import org.example.ai.agent.business.dataset.mapper.ReportDatasetMapper;
 import org.example.ai.agent.business.dataset.model.DatasetExecutionResult;
 import org.example.ai.agent.business.dataset.model.DatasetExecutionSource;
+import org.example.ai.agent.business.dataset.model.FieldPolicy;
 import org.example.ai.agent.business.model.DatasetExecutionStatus;
 import org.example.ai.agent.business.snapshot.BusinessSnapshotService;
 import org.example.ai.agent.business.snapshot.entity.BusinessSnapshot;
@@ -38,6 +40,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -55,6 +58,9 @@ public class BusinessSnapshotServiceImpl implements BusinessSnapshotService {
     private static final Set<String> FACT_CHANNELS = Set.of(
             "calculation", "display", "export", "model"
     );
+    private static final Set<String> MASK_STRATEGIES = Set.of(
+            "NONE", "PARTIAL", "HASH", "SUMMARY_ONLY"
+    );
 
     private final BusinessSnapshotMapper snapshotMapper;
     private final BusinessSnapshotItemMapper itemMapper;
@@ -62,6 +68,7 @@ public class BusinessSnapshotServiceImpl implements BusinessSnapshotService {
     private final WorkflowRunMapper workflowRunMapper;
     private final ReportDatasetMapper datasetMapper;
     private final ReportDatasetFieldMapper datasetFieldMapper;
+    private final BusinessFactSanitizer factSanitizer;
     private final ObjectMapper objectMapper;
     private final Clock clock;
     private final int maxFactBytes;
@@ -76,13 +83,14 @@ public class BusinessSnapshotServiceImpl implements BusinessSnapshotService {
             WorkflowRunMapper workflowRunMapper,
             ReportDatasetMapper datasetMapper,
             ReportDatasetFieldMapper datasetFieldMapper,
+            BusinessFactSanitizer factSanitizer,
             ObjectMapper objectMapper,
             @Value("${ai.business.snapshot.max-fact-bytes:262144}") int maxFactBytes,
             @Value("${ai.business.snapshot.max-query-bytes:65536}") int maxQueryBytes,
             @Value("${ai.business.snapshot.max-items:1000}") int maxItems) {
         this(
                 snapshotMapper, itemMapper, artifactMapper, workflowRunMapper,
-                datasetMapper, datasetFieldMapper, objectMapper,
+                datasetMapper, datasetFieldMapper, factSanitizer, objectMapper,
                 Clock.systemDefaultZone(), maxFactBytes, maxQueryBytes, maxItems
         );
     }
@@ -97,6 +105,7 @@ public class BusinessSnapshotServiceImpl implements BusinessSnapshotService {
             WorkflowRunMapper workflowRunMapper,
             ReportDatasetMapper datasetMapper,
             ReportDatasetFieldMapper datasetFieldMapper,
+            BusinessFactSanitizer factSanitizer,
             ObjectMapper objectMapper,
             Clock clock,
             int maxFactBytes,
@@ -108,6 +117,7 @@ public class BusinessSnapshotServiceImpl implements BusinessSnapshotService {
         this.workflowRunMapper = Objects.requireNonNull(workflowRunMapper, "workflowRunMapper不能为空");
         this.datasetMapper = Objects.requireNonNull(datasetMapper, "datasetMapper不能为空");
         this.datasetFieldMapper = Objects.requireNonNull(datasetFieldMapper, "datasetFieldMapper不能为空");
+        this.factSanitizer = Objects.requireNonNull(factSanitizer, "factSanitizer不能为空");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper不能为空");
         this.clock = Objects.requireNonNull(clock, "clock不能为空");
         if (maxFactBytes <= 0 || maxQueryBytes <= 0 || maxItems <= 0) {
@@ -191,7 +201,7 @@ public class BusinessSnapshotServiceImpl implements BusinessSnapshotService {
                 Wrappers.<ReportDataset>lambdaQuery()
                         .eq(ReportDataset::getDatasetCode, datasetCode)
                         .eq(ReportDataset::getEnabled, true)
-                        .last("LIMIT 1")
+                        .last("LIMIT 1 FOR UPDATE")
         );
         if (dataset == null
                 || dataset.getId() == null
@@ -217,23 +227,25 @@ public class BusinessSnapshotServiceImpl implements BusinessSnapshotService {
         if (fields == null || fields.isEmpty()) {
             throw badRequest("数据集字段策略不可用，请重新查询");
         }
-        FactChannels channels = buildExpectedChannels(fields);
+        FieldPolicyContext fieldPolicy = buildFieldPolicyContext(fields);
         return new DatasetContext(
                 datasetCode,
                 workflowCode,
                 configChecksum,
                 policyChecksum,
                 ttlMinutes,
-                channels
+                fieldPolicy.channels(),
+                fieldPolicy.policies()
         );
     }
 
-    private FactChannels buildExpectedChannels(List<ReportDatasetField> fields) {
+    private FieldPolicyContext buildFieldPolicyContext(List<ReportDatasetField> fields) {
         Set<String> allFacts = new HashSet<>();
         Set<String> calculation = new LinkedHashSet<>();
         Set<String> display = new LinkedHashSet<>();
         Set<String> export = new LinkedHashSet<>();
         Set<String> model = new LinkedHashSet<>();
+        List<FieldPolicy> policies = new ArrayList<>(fields.size());
         for (ReportDatasetField field : fields) {
             if (field == null) {
                 throw badRequest("数据集字段策略包含空项");
@@ -248,16 +260,35 @@ public class BusinessSnapshotServiceImpl implements BusinessSnapshotService {
                     || field.getModelVisible() == null) {
                 throw badRequest("数据集字段策略布尔值不能为空");
             }
+            String factType = requireText(field.getFactType(), 32, "factType");
+            String maskStrategy = requireText(field.getMaskStrategy(), 32, "maskStrategy");
+            String grain = requireText(field.getGrain(), 64, "grain");
+            if (!MASK_STRATEGIES.contains(maskStrategy)) {
+                throw badRequest("不支持的maskStrategy：" + maskStrategy);
+            }
             addWhen(calculation, factCode, field.getCalculable());
             addWhen(display, factCode, field.getDisplayable());
             addWhen(export, factCode, field.getExportable());
             addWhen(model, factCode, field.getModelVisible());
+            policies.add(new FieldPolicy(
+                    factCode,
+                    factType,
+                    field.getCalculable(),
+                    field.getDisplayable(),
+                    field.getExportable(),
+                    field.getModelVisible(),
+                    maskStrategy,
+                    grain
+            ));
         }
-        return new FactChannels(
-                Set.copyOf(calculation),
-                Set.copyOf(display),
-                Set.copyOf(export),
-                Set.copyOf(model)
+        return new FieldPolicyContext(
+                new FactChannels(
+                        Set.copyOf(calculation),
+                        Set.copyOf(display),
+                        Set.copyOf(export),
+                        Set.copyOf(model)
+                ),
+                List.copyOf(policies)
         );
     }
 
@@ -315,7 +346,7 @@ public class BusinessSnapshotServiceImpl implements BusinessSnapshotService {
             }
             verifySource(item.result().source(), command, dataset);
             DatasetExecutionStatus status = requireTerminalStatus(item.result().status());
-            verifySafeFacts(item.result(), status, dataset.factChannels());
+            verifySafeFacts(item.result(), status, dataset);
             WorkflowRun run = verifyWorkflowRun(item.result(), status, dataset);
             ResultArtifact artifact = verifyArtifact(item.result(), status, command, run, now);
             verified.add(new VerifiedItem(item, itemKey, persistedStatus(status), run, artifact));
@@ -357,7 +388,7 @@ public class BusinessSnapshotServiceImpl implements BusinessSnapshotService {
     private void verifySafeFacts(
             DatasetExecutionResult result,
             DatasetExecutionStatus status,
-            FactChannels expected) {
+            DatasetContext dataset) {
         if (status == DatasetExecutionStatus.FAILED || status == DatasetExecutionStatus.TIMEOUT) {
             if (!result.safeFacts().isEmpty()) {
                 throw badRequest("失败或超时执行项不能携带业务事实");
@@ -367,17 +398,146 @@ public class BusinessSnapshotServiceImpl implements BusinessSnapshotService {
         if (!result.safeFacts().keySet().equals(FACT_CHANNELS)) {
             throw badRequest("安全事实通道与字段策略不一致");
         }
-        verifyChannel(result.safeFacts().get("calculation"), expected.calculation());
-        verifyChannel(result.safeFacts().get("display"), expected.display());
-        verifyChannel(result.safeFacts().get("export"), expected.export());
-        verifyChannel(result.safeFacts().get("model"), expected.model());
+        FactChannels expected = dataset.factChannels();
+        Map<String, Object> calculation = verifyChannel(
+                result.safeFacts().get("calculation"), expected.calculation()
+        );
+        Map<String, Object> display = verifyChannel(
+                result.safeFacts().get("display"), expected.display()
+        );
+        Map<String, Object> export = verifyChannel(
+                result.safeFacts().get("export"), expected.export()
+        );
+        Map<String, Object> model = verifyChannel(
+                result.safeFacts().get("model"), expected.model()
+        );
+        verifyCalculablePolicies(dataset.fieldPolicies(), calculation, display, export, model);
+        verifyNonCalculablePolicies(dataset.fieldPolicies(), display, export, model);
     }
 
-    private void verifyChannel(Object value, Set<String> expectedFacts) {
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> verifyChannel(Object value, Set<String> expectedFacts) {
         if (!(value instanceof Map<?, ?> channel)
                 || !channel.keySet().equals(expectedFacts)) {
             throw badRequest("安全事实字段与当前字段策略不一致");
         }
+        return (Map<String, Object>) channel;
+    }
+
+    private void verifyCalculablePolicies(
+            List<FieldPolicy> policies,
+            Map<String, Object> calculation,
+            Map<String, Object> display,
+            Map<String, Object> export,
+            Map<String, Object> model) {
+        List<FieldPolicy> calculablePolicies = policies.stream()
+                .filter(FieldPolicy::calculable)
+                .toList();
+        if (calculablePolicies.isEmpty()) {
+            return;
+        }
+        Map<String, Object> standardFacts = new LinkedHashMap<>();
+        for (FieldPolicy policy : calculablePolicies) {
+            Object value = calculation.get(policy.factCode());
+            if (value != BusinessFactSanitizer.MissingValue.INSTANCE) {
+                standardFacts.put(policy.factCode(), value);
+            }
+        }
+        BusinessFactSanitizer.SanitizedFacts expected = factSanitizer.sanitize(
+                standardFacts,
+                calculablePolicies
+        );
+        for (FieldPolicy policy : calculablePolicies) {
+            if (!Objects.equals(
+                    calculation.get(policy.factCode()),
+                    expected.calculationFacts().get(policy.factCode())
+            )) {
+                throw badRequest("安全事实计算值与当前字段策略不一致");
+            }
+            verifyVisibleValue(policy, display, expected.displayFacts());
+            verifyVisibleValue(policy, export, expected.exportFacts());
+            verifyVisibleValue(policy, model, expected.modelFacts());
+        }
+    }
+
+    private void verifyVisibleValue(
+            FieldPolicy policy,
+            Map<String, Object> actual,
+            Map<String, Object> expected) {
+        if (expected.containsKey(policy.factCode())
+                && !Objects.equals(
+                actual.get(policy.factCode()),
+                expected.get(policy.factCode())
+        )) {
+            throw badRequest("安全事实脱敏值与当前字段策略不一致");
+        }
+    }
+
+    private void verifyNonCalculablePolicies(
+            List<FieldPolicy> policies,
+            Map<String, Object> display,
+            Map<String, Object> export,
+            Map<String, Object> model) {
+        for (FieldPolicy policy : policies) {
+            if (policy.calculable()
+                    || !(policy.displayable() || policy.exportable() || policy.modelVisible())) {
+                continue;
+            }
+            Object visibleValue = consistentVisibleValue(policy, display, export, model);
+            if (visibleValue == BusinessFactSanitizer.MissingValue.INSTANCE) {
+                continue;
+            }
+            boolean valid = switch (policy.maskStrategy()) {
+                case "NONE" -> visibleValue != null;
+                case "SUMMARY_ONLY" -> BusinessFactSanitizer.SUMMARY_ONLY_VALUE.equals(visibleValue);
+                case "HASH" -> visibleValue instanceof String text && SHA256.matcher(text).matches();
+                case "PARTIAL" -> visibleValue instanceof String text && isPartialMask(text);
+                default -> false;
+            };
+            if (!valid) {
+                throw badRequest("安全事实脱敏值与当前字段策略不一致");
+            }
+        }
+    }
+
+    private Object consistentVisibleValue(
+            FieldPolicy policy,
+            Map<String, Object> display,
+            Map<String, Object> export,
+            Map<String, Object> model) {
+        List<Object> values = new ArrayList<>(3);
+        if (policy.displayable()) {
+            values.add(display.get(policy.factCode()));
+        }
+        if (policy.exportable()) {
+            values.add(export.get(policy.factCode()));
+        }
+        if (policy.modelVisible()) {
+            values.add(model.get(policy.factCode()));
+        }
+        Object first = values.get(0);
+        if (values.stream().skip(1).anyMatch(value -> !Objects.equals(first, value))) {
+            throw badRequest("同一字段的可见通道值不一致");
+        }
+        return first;
+    }
+
+    private boolean isPartialMask(String value) {
+        int[] codePoints = value.codePoints().toArray();
+        if (codePoints.length == 0) {
+            return true;
+        }
+        if (codePoints.length == 1) {
+            return codePoints[0] == '*';
+        }
+        int maskedLength = codePoints.length <= 4 ? codePoints.length - 1 : codePoints.length - 4;
+        int maskedStart = codePoints.length <= 4 ? 1 : 0;
+        for (int index = maskedStart; index < maskedStart + maskedLength; index++) {
+            if (codePoints[index] != '*') {
+                return false;
+            }
+        }
+        return true;
     }
 
     private WorkflowRun verifyWorkflowRun(
@@ -413,14 +573,21 @@ public class BusinessSnapshotServiceImpl implements BusinessSnapshotService {
         /* 字段映射失败发生在查询运行成功之后，只对该错误允许成功运行引用。 */
         boolean factMappingFailure = status == DatasetExecutionStatus.FAILED
                 && "FACT_MAPPING_FAILED".equals(result.safeErrorCode());
+        if (factMappingFailure && !successfulRun) {
+            throw badRequest("工作流运行状态与字段映射失败不一致");
+        }
         if (!isSuccessful(status)
-                && factMappingFailure != successfulRun) {
+                && !factMappingFailure
+                && !"FAILED".equals(run.getStatus())) {
             throw badRequest("工作流运行状态与失败结果不一致");
         }
-        if (status == DatasetExecutionStatus.TIMEOUT
-                && StringUtils.hasText(run.getErrorCode())
-                && !run.getErrorCode().toUpperCase().contains("TIMEOUT")) {
-            throw badRequest("工作流运行状态与超时结果不一致");
+        if (status == DatasetExecutionStatus.TIMEOUT) {
+            String errorCode = StringUtils.hasText(run.getErrorCode())
+                    ? run.getErrorCode().trim().toUpperCase(Locale.ROOT)
+                    : null;
+            if (errorCode == null || !errorCode.contains("TIMEOUT")) {
+                throw badRequest("工作流运行状态与超时结果不一致");
+            }
         }
         return run;
     }
@@ -539,7 +706,7 @@ public class BusinessSnapshotServiceImpl implements BusinessSnapshotService {
         int total = nonNegative(command.totalCount(), "totalCount");
         int success = nonNegative(command.successCount(), "successCount");
         int failure = nonNegative(command.failureCount(), "failureCount");
-        if (success + failure > total) {
+        if ((long) success + failure > total) {
             throw badRequest("成功和失败数量之和不能大于总数");
         }
 
@@ -649,7 +816,13 @@ public class BusinessSnapshotServiceImpl implements BusinessSnapshotService {
             String configChecksum,
             String fieldPolicyChecksum,
             int ttlMinutes,
-            FactChannels factChannels) {
+            FactChannels factChannels,
+            List<FieldPolicy> fieldPolicies) {
+    }
+
+    private record FieldPolicyContext(
+            FactChannels channels,
+            List<FieldPolicy> policies) {
     }
 
     private record FactChannels(

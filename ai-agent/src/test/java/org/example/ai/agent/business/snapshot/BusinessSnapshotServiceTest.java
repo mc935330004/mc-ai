@@ -3,6 +3,8 @@ package org.example.ai.agent.business.snapshot;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.SharedString;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.example.ai.agent.business.dataset.BusinessFactSanitizer;
+import org.example.ai.agent.business.dataset.BusinessFactSanitizer.MissingValue;
 import org.example.ai.agent.business.dataset.ReportDatasetValidator;
 import org.example.ai.agent.business.dataset.entity.ReportDataset;
 import org.example.ai.agent.business.dataset.entity.ReportDatasetField;
@@ -96,6 +98,14 @@ class BusinessSnapshotServiceTest {
         assertThat(itemCaptor.getValue().getWorkflowVersionId()).isEqualTo(7L);
         assertThat(itemCaptor.getValue().getWorkflowConfigChecksum())
                 .isEqualTo(WORKFLOW_CHECKSUM);
+        ArgumentCaptor<LambdaQueryWrapper<ReportDataset>> datasetQueryCaptor =
+                ArgumentCaptor.forClass(LambdaQueryWrapper.class);
+        verify(datasetMapper).selectOne(datasetQueryCaptor.capture());
+        SharedString datasetLastSql = (SharedString) ReflectionTestUtils.getField(
+                datasetQueryCaptor.getValue(), "lastSql"
+        );
+        assertThat(datasetLastSql).isNotNull();
+        assertThat(datasetLastSql.getStringValue()).containsIgnoringCase("FOR UPDATE");
     }
 
     @Test
@@ -143,6 +153,244 @@ class BusinessSnapshotServiceTest {
                         DatasetExecutionStatus.SUCCESS, forged, "run-1", null
                 )))
         ))).isInstanceOf(BusinessException.class).hasMessageContaining("字段策略");
+    }
+
+    @Test
+    void shouldRejectRawVisibleValueForHashPolicy() {
+        when(datasetMapper.selectOne(any())).thenReturn(dataset(120));
+        ReportDatasetField hashField = field();
+        hashField.setMaskStrategy("HASH");
+        when(datasetFieldMapper.selectList(any())).thenReturn(List.of(hashField));
+
+        assertThatThrownBy(() -> service.create(command(query(), List.of(item(result(
+                source(query(), 7L, DATASET_CHECKSUM, POLICY_CHECKSUM),
+                DatasetExecutionStatus.SUCCESS,
+                safeFacts("13800138000", "13800138000"),
+                "run-1", null
+        )))))).isInstanceOf(BusinessException.class).hasMessageContaining("脱敏");
+    }
+
+    @Test
+    void shouldAcceptExpectedHashValue() {
+        when(datasetMapper.selectOne(any())).thenReturn(dataset(120));
+        ReportDatasetField hashField = field();
+        hashField.setMaskStrategy("HASH");
+        when(datasetFieldMapper.selectList(any())).thenReturn(List.of(hashField));
+        when(workflowRunMapper.selectOne(any())).thenReturn(workflowRun("SUCCESS"));
+        stubSuccessfulInsert();
+
+        BusinessSnapshot snapshot = service.create(command(query(), List.of(item(result(
+                source(query(), 7L, DATASET_CHECKSUM, POLICY_CHECKSUM),
+                DatasetExecutionStatus.SUCCESS,
+                safeFacts(
+                        "13800138000",
+                        "a8ace2bb81a21d9b46b51577c4e7a667fa9107fca5f7d72d94a9bc75ac91b5aa"
+                ),
+                "run-1", null
+        )))));
+
+        assertThat(snapshot.getStatus()).isEqualTo("COMPLETE");
+    }
+
+    @Test
+    void shouldRejectRawVisibleValueForPartialPolicy() {
+        when(datasetMapper.selectOne(any())).thenReturn(dataset(120));
+        ReportDatasetField partialField = field();
+        partialField.setMaskStrategy("PARTIAL");
+        when(datasetFieldMapper.selectList(any())).thenReturn(List.of(partialField));
+
+        assertThatThrownBy(() -> service.create(command(query(), List.of(item(result(
+                source(query(), 7L, DATASET_CHECKSUM, POLICY_CHECKSUM),
+                DatasetExecutionStatus.SUCCESS,
+                safeFacts("13800138000", "13800138000"),
+                "run-1", null
+        )))))).isInstanceOf(BusinessException.class).hasMessageContaining("脱敏");
+    }
+
+    @Test
+    void shouldAcceptExpectedPartialValue() {
+        when(datasetMapper.selectOne(any())).thenReturn(dataset(120));
+        ReportDatasetField partialField = field();
+        partialField.setMaskStrategy("PARTIAL");
+        when(datasetFieldMapper.selectList(any())).thenReturn(List.of(partialField));
+        when(workflowRunMapper.selectOne(any())).thenReturn(workflowRun("SUCCESS"));
+        stubSuccessfulInsert();
+
+        BusinessSnapshot snapshot = service.create(command(query(), List.of(item(result(
+                source(query(), 7L, DATASET_CHECKSUM, POLICY_CHECKSUM),
+                DatasetExecutionStatus.SUCCESS,
+                safeFacts("13800138000", "*******8000"),
+                "run-1", null
+        )))));
+
+        assertThat(snapshot.getStatus()).isEqualTo("COMPLETE");
+    }
+
+    @Test
+    void shouldRejectRawVisibleValueForSummaryOnlyPolicy() {
+        when(datasetMapper.selectOne(any())).thenReturn(dataset(120));
+        ReportDatasetField summaryField = field();
+        summaryField.setMaskStrategy("SUMMARY_ONLY");
+        when(datasetFieldMapper.selectList(any())).thenReturn(List.of(summaryField));
+
+        assertThatThrownBy(() -> service.create(command(query(), List.of(item(result(
+                source(query(), 7L, DATASET_CHECKSUM, POLICY_CHECKSUM),
+                DatasetExecutionStatus.SUCCESS,
+                safeFacts("13800138000", "13800138000"),
+                "run-1", null
+        )))))).isInstanceOf(BusinessException.class).hasMessageContaining("脱敏");
+    }
+
+    @Test
+    void shouldAcceptExpectedSummaryOnlyValue() {
+        when(datasetMapper.selectOne(any())).thenReturn(dataset(120));
+        ReportDatasetField summaryField = field();
+        summaryField.setMaskStrategy("SUMMARY_ONLY");
+        when(datasetFieldMapper.selectList(any())).thenReturn(List.of(summaryField));
+        when(workflowRunMapper.selectOne(any())).thenReturn(workflowRun("SUCCESS"));
+        stubSuccessfulInsert();
+
+        BusinessSnapshot snapshot = service.create(command(query(), List.of(item(result(
+                source(query(), 7L, DATASET_CHECKSUM, POLICY_CHECKSUM),
+                DatasetExecutionStatus.SUCCESS,
+                safeFacts("13800138000", "仅用于汇总"),
+                "run-1", null
+        )))));
+
+        assertThat(snapshot.getStatus()).isEqualTo("COMPLETE");
+    }
+
+    @Test
+    void shouldAcceptMissingValueForCalculableMaskedField() {
+        when(datasetMapper.selectOne(any())).thenReturn(dataset(120));
+        ReportDatasetField hashField = field();
+        hashField.setMaskStrategy("HASH");
+        when(datasetFieldMapper.selectList(any())).thenReturn(List.of(hashField));
+        when(workflowRunMapper.selectOne(any())).thenReturn(workflowRun("SUCCESS"));
+        stubSuccessfulInsert();
+
+        BusinessSnapshot snapshot = service.create(command(query(), List.of(item(result(
+                source(query(), 7L, DATASET_CHECKSUM, POLICY_CHECKSUM),
+                DatasetExecutionStatus.SUCCESS,
+                safeFacts(MissingValue.INSTANCE, MissingValue.INSTANCE),
+                "run-1", null
+        )))));
+
+        assertThat(snapshot.getStatus()).isEqualTo("COMPLETE");
+    }
+
+    @Test
+    void shouldRejectRawHashValueForNonCalculableVisibleField() {
+        when(datasetMapper.selectOne(any())).thenReturn(dataset(120));
+        ReportDatasetField hashField = field();
+        hashField.setCalculable(false);
+        hashField.setMaskStrategy("HASH");
+        when(datasetFieldMapper.selectList(any())).thenReturn(List.of(hashField));
+
+        assertThatThrownBy(() -> service.create(command(query(), List.of(item(result(
+                source(query(), 7L, DATASET_CHECKSUM, POLICY_CHECKSUM),
+                DatasetExecutionStatus.SUCCESS,
+                safeFactsWithoutCalculation("13800138000"),
+                "run-1", null
+        )))))).isInstanceOf(BusinessException.class).hasMessageContaining("脱敏");
+    }
+
+    @Test
+    void shouldAcceptHashShapeForNonCalculableVisibleField() {
+        when(datasetMapper.selectOne(any())).thenReturn(dataset(120));
+        ReportDatasetField hashField = field();
+        hashField.setCalculable(false);
+        hashField.setMaskStrategy("HASH");
+        when(datasetFieldMapper.selectList(any())).thenReturn(List.of(hashField));
+        when(workflowRunMapper.selectOne(any())).thenReturn(workflowRun("SUCCESS"));
+        stubSuccessfulInsert();
+
+        BusinessSnapshot snapshot = service.create(command(query(), List.of(item(result(
+                source(query(), 7L, DATASET_CHECKSUM, POLICY_CHECKSUM),
+                DatasetExecutionStatus.SUCCESS,
+                safeFactsWithoutCalculation(
+                        "a8ace2bb81a21d9b46b51577c4e7a667fa9107fca5f7d72d94a9bc75ac91b5aa"
+                ),
+                "run-1", null
+        )))));
+
+        assertThat(snapshot.getStatus()).isEqualTo("COMPLETE");
+    }
+
+    @Test
+    void shouldRejectMalformedPartialForNonCalculableVisibleField() {
+        when(datasetMapper.selectOne(any())).thenReturn(dataset(120));
+        ReportDatasetField partialField = field();
+        partialField.setCalculable(false);
+        partialField.setMaskStrategy("PARTIAL");
+        when(datasetFieldMapper.selectList(any())).thenReturn(List.of(partialField));
+
+        assertThatThrownBy(() -> service.create(command(query(), List.of(item(result(
+                source(query(), 7L, DATASET_CHECKSUM, POLICY_CHECKSUM),
+                DatasetExecutionStatus.SUCCESS,
+                safeFactsWithoutCalculation("13800138000"),
+                "run-1", null
+        )))))).isInstanceOf(BusinessException.class).hasMessageContaining("脱敏");
+    }
+
+    @Test
+    void shouldAcceptPartialShapeForNonCalculableVisibleField() {
+        when(datasetMapper.selectOne(any())).thenReturn(dataset(120));
+        ReportDatasetField partialField = field();
+        partialField.setCalculable(false);
+        partialField.setMaskStrategy("PARTIAL");
+        when(datasetFieldMapper.selectList(any())).thenReturn(List.of(partialField));
+        when(workflowRunMapper.selectOne(any())).thenReturn(workflowRun("SUCCESS"));
+        stubSuccessfulInsert();
+
+        BusinessSnapshot snapshot = service.create(command(query(), List.of(item(result(
+                source(query(), 7L, DATASET_CHECKSUM, POLICY_CHECKSUM),
+                DatasetExecutionStatus.SUCCESS,
+                safeFactsWithoutCalculation("*******8000"),
+                "run-1", null
+        )))));
+
+        assertThat(snapshot.getStatus()).isEqualTo("COMPLETE");
+    }
+
+    @Test
+    void shouldAcceptMissingValueForNonCalculableVisibleField() {
+        when(datasetMapper.selectOne(any())).thenReturn(dataset(120));
+        ReportDatasetField hashField = field();
+        hashField.setCalculable(false);
+        hashField.setMaskStrategy("HASH");
+        when(datasetFieldMapper.selectList(any())).thenReturn(List.of(hashField));
+        when(workflowRunMapper.selectOne(any())).thenReturn(workflowRun("SUCCESS"));
+        stubSuccessfulInsert();
+
+        BusinessSnapshot snapshot = service.create(command(query(), List.of(item(result(
+                source(query(), 7L, DATASET_CHECKSUM, POLICY_CHECKSUM),
+                DatasetExecutionStatus.SUCCESS,
+                safeFactsWithoutCalculation(MissingValue.INSTANCE),
+                "run-1", null
+        )))));
+
+        assertThat(snapshot.getStatus()).isEqualTo("COMPLETE");
+    }
+
+    @Test
+    void shouldRejectDifferentValuesAcrossVisibleChannels() {
+        when(datasetMapper.selectOne(any())).thenReturn(dataset(120));
+        ReportDatasetField hashField = field();
+        hashField.setCalculable(false);
+        hashField.setMaskStrategy("HASH");
+        when(datasetFieldMapper.selectList(any())).thenReturn(List.of(hashField));
+        Map<String, Object> inconsistent = Map.of(
+                "calculation", Map.of(),
+                "display", Map.of("amount", "a".repeat(64)),
+                "export", Map.of("amount", "b".repeat(64)),
+                "model", Map.of("amount", "a".repeat(64))
+        );
+
+        assertThatThrownBy(() -> service.create(command(query(), List.of(item(result(
+                source(query(), 7L, DATASET_CHECKSUM, POLICY_CHECKSUM),
+                DatasetExecutionStatus.SUCCESS, inconsistent, "run-1", null
+        )))))).isInstanceOf(BusinessException.class).hasMessageContaining("可见通道");
     }
 
     @Test
@@ -255,6 +503,17 @@ class BusinessSnapshotServiceTest {
     }
 
     @Test
+    void shouldRejectRunningRunForOrdinaryFailure() {
+        stubCurrentConfiguration(120);
+        when(workflowRunMapper.selectOne(any())).thenReturn(workflowRun("RUNNING"));
+        DatasetExecutionSource source = source(query(), 7L, DATASET_CHECKSUM, POLICY_CHECKSUM);
+
+        assertThatThrownBy(() -> service.create(command(query(), List.of(item(result(
+                source, DatasetExecutionStatus.FAILED, Map.of(), "run-1", null
+        )))))).isInstanceOf(BusinessException.class).hasMessageContaining("状态");
+    }
+
+    @Test
     void shouldAllowSuccessfulRunForFactMappingFailureOnly() {
         stubCurrentConfiguration(120);
         stubSuccessfulInsert();
@@ -268,6 +527,63 @@ class BusinessSnapshotServiceTest {
 
         assertThat(snapshot.getStatus()).isEqualTo("FAILED");
         verify(itemMapper).insert(any(BusinessSnapshotItem.class));
+    }
+
+    @Test
+    void shouldAllowPartialSuccessfulRunForFactMappingFailure() {
+        stubCurrentConfiguration(120);
+        stubSuccessfulInsert();
+        when(workflowRunMapper.selectOne(any())).thenReturn(workflowRun("PARTIAL_SUCCESS"));
+        DatasetExecutionSource source = source(query(), 7L, DATASET_CHECKSUM, POLICY_CHECKSUM);
+
+        BusinessSnapshot snapshot = service.create(command(query(), List.of(item(result(
+                source, DatasetExecutionStatus.FAILED, Map.of(), "run-1", null,
+                "FACT_MAPPING_FAILED"
+        )))));
+
+        assertThat(snapshot.getStatus()).isEqualTo("FAILED");
+    }
+
+    @Test
+    void shouldRejectRunningRunForFactMappingFailure() {
+        stubCurrentConfiguration(120);
+        when(workflowRunMapper.selectOne(any())).thenReturn(workflowRun("RUNNING"));
+        DatasetExecutionSource source = source(query(), 7L, DATASET_CHECKSUM, POLICY_CHECKSUM);
+
+        assertThatThrownBy(() -> service.create(command(query(), List.of(item(result(
+                source, DatasetExecutionStatus.FAILED, Map.of(), "run-1", null,
+                "FACT_MAPPING_FAILED"
+        )))))).isInstanceOf(BusinessException.class).hasMessageContaining("状态");
+    }
+
+    @Test
+    void shouldRejectTimeoutRunWithoutTimeoutErrorCode() {
+        stubCurrentConfiguration(120);
+        WorkflowRun run = workflowRun("FAILED");
+        run.setErrorCode(null);
+        when(workflowRunMapper.selectOne(any())).thenReturn(run);
+        DatasetExecutionSource source = source(query(), 7L, DATASET_CHECKSUM, POLICY_CHECKSUM);
+
+        assertThatThrownBy(() -> service.create(command(query(), List.of(item(result(
+                source, DatasetExecutionStatus.TIMEOUT, Map.of(), "run-1", null
+        )))))).isInstanceOf(BusinessException.class).hasMessageContaining("超时");
+    }
+
+    @Test
+    void shouldAcceptFailedRunWithNormalizedTimeoutErrorCode() {
+        stubCurrentConfiguration(120);
+        stubSuccessfulInsert();
+        WorkflowRun run = workflowRun("FAILED");
+        run.setErrorCode(" node_timeout ");
+        when(workflowRunMapper.selectOne(any())).thenReturn(run);
+        DatasetExecutionSource source = source(query(), 7L, DATASET_CHECKSUM, POLICY_CHECKSUM);
+
+        BusinessSnapshot snapshot = service.create(command(query(), List.of(item(result(
+                source, DatasetExecutionStatus.TIMEOUT, Map.of(), "run-1", null,
+                "QUERY_TIMEOUT"
+        )))));
+
+        assertThat(snapshot.getStatus()).isEqualTo("FAILED");
     }
 
     @Test
@@ -302,6 +618,18 @@ class BusinessSnapshotServiceTest {
                 ))
         ))).isInstanceOf(BusinessException.class).hasMessageContaining("itemKey");
         verify(snapshotMapper, never()).insert(any(BusinessSnapshot.class));
+    }
+
+    @Test
+    void shouldRejectCountSumOverflow() {
+        stubCurrentConfiguration(120);
+        when(workflowRunMapper.selectOne(any())).thenReturn(workflowRun("SUCCESS"));
+
+        assertThatThrownBy(() -> service.create(command(query(), List.of(new ItemCommand(
+                "dataset", AssociationType.DIRECT,
+                successResult(query(), "run-1", null),
+                Integer.MAX_VALUE, Integer.MAX_VALUE, Integer.MAX_VALUE
+        ))))).isInstanceOf(BusinessException.class).hasMessageContaining("之和");
     }
 
     @Test
@@ -401,7 +729,9 @@ class BusinessSnapshotServiceTest {
         );
         return new BusinessSnapshotServiceImpl(
                 snapshotMapper, itemMapper, artifactMapper, workflowRunMapper,
-                datasetMapper, datasetFieldMapper, new ObjectMapper(), clock,
+                datasetMapper, datasetFieldMapper,
+                new BusinessFactSanitizer(new ReportDatasetValidator()),
+                new ObjectMapper(), clock,
                 maxFactBytes, maxQueryBytes, maxItems
         );
     }
@@ -494,12 +824,27 @@ class BusinessSnapshotServiceTest {
     }
 
     private Map<String, Object> safeFacts(Object amount) {
-        Map<String, Object> channel = Map.of("amount", amount);
+        return safeFacts(amount, amount);
+    }
+
+    private Map<String, Object> safeFacts(Object calculationValue, Object visibleValue) {
+        Map<String, Object> calculation = Map.of("amount", calculationValue);
+        Map<String, Object> visible = Map.of("amount", visibleValue);
         return Map.of(
-                "calculation", channel,
-                "display", channel,
-                "export", channel,
-                "model", channel
+                "calculation", calculation,
+                "display", visible,
+                "export", visible,
+                "model", visible
+        );
+    }
+
+    private Map<String, Object> safeFactsWithoutCalculation(Object visibleValue) {
+        Map<String, Object> visible = Map.of("amount", visibleValue);
+        return Map.of(
+                "calculation", Map.of(),
+                "display", visible,
+                "export", visible,
+                "model", visible
         );
     }
 
@@ -523,6 +868,9 @@ class BusinessSnapshotServiceTest {
         field.setDisplayable(true);
         field.setExportable(true);
         field.setModelVisible(true);
+        field.setFactType("STRING");
+        field.setMaskStrategy("NONE");
+        field.setGrain("PROJECT");
         return field;
     }
 
