@@ -72,6 +72,7 @@ public class ReportDatasetExecutionServiceImpl
     private final DictionaryFactExtractor factExtractor;
     private final WorkflowCapabilityCodeCollector capabilityCodeCollector;
     private final GraphCapabilityCatalog capabilityCatalog;
+    private final DatasetExecutionProofService proofService;
     private final ObjectMapper objectMapper;
 
     @Override
@@ -137,7 +138,7 @@ public class ReportDatasetExecutionServiceImpl
             /*
              * 权限拒绝不能查询业务数据，也不能通过事实、数量或提示文字泄露记录是否存在。
              */
-            return new DatasetExecutionResult(
+            return signed(
                     executionSource,
                     DatasetExecutionStatus.DENIED,
                     false,
@@ -184,7 +185,7 @@ public class ReportDatasetExecutionServiceImpl
         if (queryOutcome == null || !queryOutcome.success()) {
             boolean timeout = queryOutcome != null
                     && "TIMEOUT".equals(normalize(queryOutcome.errorCode()));
-            return new DatasetExecutionResult(
+            return signed(
                     querySource,
                     timeout
                             ? DatasetExecutionStatus.TIMEOUT
@@ -391,7 +392,7 @@ public class ReportDatasetExecutionServiceImpl
         boolean dataComplete = !empty
                 && !queryOutcome.partialSuccess()
                 && extracted.dataComplete();
-        return new DatasetExecutionResult(
+        return signed(
                 executionSource,
                 empty
                         ? DatasetExecutionStatus.EMPTY
@@ -607,7 +608,7 @@ public class ReportDatasetExecutionServiceImpl
             String errorCode,
             String message,
             String workflowRunId) {
-        return new DatasetExecutionResult(
+        return signed(
                 source,
                 DatasetExecutionStatus.FAILED,
                 false,
@@ -617,6 +618,29 @@ public class ReportDatasetExecutionServiceImpl
                 errorCode,
                 message
         );
+    }
+
+    private DatasetExecutionResult signed(
+            DatasetExecutionSource source,
+            DatasetExecutionStatus status,
+            boolean dataComplete,
+            Map<String, Object> safeFacts,
+            String workflowRunId,
+            String resultArtifactId,
+            String safeErrorCode,
+            String safeMessage) {
+        DatasetExecutionResult unsigned = new DatasetExecutionResult(
+                source,
+                status,
+                dataComplete,
+                safeFacts,
+                workflowRunId,
+                resultArtifactId,
+                safeErrorCode,
+                safeMessage,
+                null
+        );
+        return proofService.sign(unsigned);
     }
 
     private DatasetExecutionSource executionSource(

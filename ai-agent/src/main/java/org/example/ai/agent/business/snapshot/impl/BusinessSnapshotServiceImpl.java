@@ -5,6 +5,7 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import org.example.ai.agent.business.dataset.BusinessFactSanitizer;
+import org.example.ai.agent.business.dataset.DatasetExecutionProofVerifier;
 import org.example.ai.agent.business.dataset.ReportDatasetValidator;
 import org.example.ai.agent.business.dataset.entity.ReportDataset;
 import org.example.ai.agent.business.dataset.entity.ReportDatasetField;
@@ -68,6 +69,7 @@ public class BusinessSnapshotServiceImpl implements BusinessSnapshotService {
     private final WorkflowRunMapper workflowRunMapper;
     private final ReportDatasetMapper datasetMapper;
     private final ReportDatasetFieldMapper datasetFieldMapper;
+    private final DatasetExecutionProofVerifier proofVerifier;
     private final BusinessFactSanitizer factSanitizer;
     private final ObjectMapper objectMapper;
     private final Clock clock;
@@ -83,6 +85,7 @@ public class BusinessSnapshotServiceImpl implements BusinessSnapshotService {
             WorkflowRunMapper workflowRunMapper,
             ReportDatasetMapper datasetMapper,
             ReportDatasetFieldMapper datasetFieldMapper,
+            DatasetExecutionProofVerifier proofVerifier,
             BusinessFactSanitizer factSanitizer,
             ObjectMapper objectMapper,
             @Value("${ai.business.snapshot.max-fact-bytes:262144}") int maxFactBytes,
@@ -90,7 +93,7 @@ public class BusinessSnapshotServiceImpl implements BusinessSnapshotService {
             @Value("${ai.business.snapshot.max-items:1000}") int maxItems) {
         this(
                 snapshotMapper, itemMapper, artifactMapper, workflowRunMapper,
-                datasetMapper, datasetFieldMapper, factSanitizer, objectMapper,
+                datasetMapper, datasetFieldMapper, proofVerifier, factSanitizer, objectMapper,
                 Clock.systemDefaultZone(), maxFactBytes, maxQueryBytes, maxItems
         );
     }
@@ -105,6 +108,7 @@ public class BusinessSnapshotServiceImpl implements BusinessSnapshotService {
             WorkflowRunMapper workflowRunMapper,
             ReportDatasetMapper datasetMapper,
             ReportDatasetFieldMapper datasetFieldMapper,
+            DatasetExecutionProofVerifier proofVerifier,
             BusinessFactSanitizer factSanitizer,
             ObjectMapper objectMapper,
             Clock clock,
@@ -117,6 +121,7 @@ public class BusinessSnapshotServiceImpl implements BusinessSnapshotService {
         this.workflowRunMapper = Objects.requireNonNull(workflowRunMapper, "workflowRunMapper不能为空");
         this.datasetMapper = Objects.requireNonNull(datasetMapper, "datasetMapper不能为空");
         this.datasetFieldMapper = Objects.requireNonNull(datasetFieldMapper, "datasetFieldMapper不能为空");
+        this.proofVerifier = Objects.requireNonNull(proofVerifier, "proofVerifier不能为空");
         this.factSanitizer = Objects.requireNonNull(factSanitizer, "factSanitizer不能为空");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper不能为空");
         this.clock = Objects.requireNonNull(clock, "clock不能为空");
@@ -340,6 +345,10 @@ public class BusinessSnapshotServiceImpl implements BusinessSnapshotService {
             if (item == null || item.result() == null) {
                 throw badRequest("快照执行项及结果不能为空");
             }
+            /* 证明只确认同进程 Task6 执行来源，后续权限和当前配置校验仍不可省略。 */
+            if (!proofVerifier.verify(item.result())) {
+                throw badRequest("数据集执行结果完整性证明无效，请重新查询");
+            }
             String itemKey = requireText(item.itemKey(), 128, "itemKey");
             if (!itemKeys.add(itemKey)) {
                 throw badRequest("itemKey重复");
@@ -412,7 +421,7 @@ public class BusinessSnapshotServiceImpl implements BusinessSnapshotService {
                 result.safeFacts().get("model"), expected.model()
         );
         verifyCalculablePolicies(dataset.fieldPolicies(), calculation, display, export, model);
-        verifyNonCalculablePolicies(dataset.fieldPolicies(), display, export, model);
+        verifyVisibleChannelConsistency(dataset.fieldPolicies(), display, export, model);
     }
 
     @SuppressWarnings("unchecked")
@@ -473,30 +482,16 @@ public class BusinessSnapshotServiceImpl implements BusinessSnapshotService {
         }
     }
 
-    private void verifyNonCalculablePolicies(
+    private void verifyVisibleChannelConsistency(
             List<FieldPolicy> policies,
             Map<String, Object> display,
             Map<String, Object> export,
             Map<String, Object> model) {
         for (FieldPolicy policy : policies) {
-            if (policy.calculable()
-                    || !(policy.displayable() || policy.exportable() || policy.modelVisible())) {
+            if (!(policy.displayable() || policy.exportable() || policy.modelVisible())) {
                 continue;
             }
-            Object visibleValue = consistentVisibleValue(policy, display, export, model);
-            if (visibleValue == BusinessFactSanitizer.MissingValue.INSTANCE) {
-                continue;
-            }
-            boolean valid = switch (policy.maskStrategy()) {
-                case "NONE" -> visibleValue != null;
-                case "SUMMARY_ONLY" -> BusinessFactSanitizer.SUMMARY_ONLY_VALUE.equals(visibleValue);
-                case "HASH" -> visibleValue instanceof String text && SHA256.matcher(text).matches();
-                case "PARTIAL" -> visibleValue instanceof String text && isPartialMask(text);
-                default -> false;
-            };
-            if (!valid) {
-                throw badRequest("安全事实脱敏值与当前字段策略不一致");
-            }
+            consistentVisibleValue(policy, display, export, model);
         }
     }
 
@@ -520,24 +515,6 @@ public class BusinessSnapshotServiceImpl implements BusinessSnapshotService {
             throw badRequest("同一字段的可见通道值不一致");
         }
         return first;
-    }
-
-    private boolean isPartialMask(String value) {
-        int[] codePoints = value.codePoints().toArray();
-        if (codePoints.length == 0) {
-            return true;
-        }
-        if (codePoints.length == 1) {
-            return codePoints[0] == '*';
-        }
-        int maskedLength = codePoints.length <= 4 ? codePoints.length - 1 : codePoints.length - 4;
-        int maskedStart = codePoints.length <= 4 ? 1 : 0;
-        for (int index = maskedStart; index < maskedStart + maskedLength; index++) {
-            if (codePoints[index] != '*') {
-                return false;
-            }
-        }
-        return true;
     }
 
     private WorkflowRun verifyWorkflowRun(

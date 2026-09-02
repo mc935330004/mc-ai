@@ -8,6 +8,7 @@ import org.example.ai.agent.business.dataset.BusinessFactSanitizer.MissingValue;
 import org.example.ai.agent.business.dataset.ReportDatasetValidator;
 import org.example.ai.agent.business.dataset.entity.ReportDataset;
 import org.example.ai.agent.business.dataset.entity.ReportDatasetField;
+import org.example.ai.agent.business.dataset.impl.DatasetExecutionProofTestFixture;
 import org.example.ai.agent.business.dataset.mapper.ReportDatasetFieldMapper;
 import org.example.ai.agent.business.dataset.mapper.ReportDatasetMapper;
 import org.example.ai.agent.business.dataset.model.DatasetExecutionResult;
@@ -68,10 +69,12 @@ class BusinessSnapshotServiceTest {
     @Mock private ReportDatasetMapper datasetMapper;
     @Mock private ReportDatasetFieldMapper datasetFieldMapper;
 
+    private DatasetExecutionProofTestFixture proofFixture;
     private BusinessSnapshotService service;
 
     @BeforeEach
     void setUp() {
+        proofFixture = new DatasetExecutionProofTestFixture();
         service = service(256 * 1024, 1000);
     }
 
@@ -133,6 +136,40 @@ class BusinessSnapshotServiceTest {
                 DATASET_CHECKSUM, POLICY_CHECKSUM
         );
         assertRejected(result(wrongWorkflow, DatasetExecutionStatus.SUCCESS, safeFacts(), "run-1", null));
+        verify(snapshotMapper, never()).insert(any(BusinessSnapshot.class));
+    }
+
+    @Test
+    void shouldRejectUnsignedExecutionResult() {
+        stubCurrentConfiguration(120);
+        DatasetExecutionResult unsigned = unsignedResult(
+                source(query(), 7L, DATASET_CHECKSUM, POLICY_CHECKSUM),
+                DatasetExecutionStatus.SUCCESS, safeFacts(), "run-1", null, null
+        );
+
+        assertThatThrownBy(() -> service.create(command(query(), List.of(item(unsigned)))))
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("完整性证明");
+        verify(snapshotMapper, never()).insert(any(BusinessSnapshot.class));
+    }
+
+    @Test
+    void shouldRejectTamperedSafeFactsEvenWhenRawHashLooksValid() {
+        stubCurrentConfiguration(120);
+        DatasetExecutionResult signed = result(
+                source(query(), 7L, DATASET_CHECKSUM, POLICY_CHECKSUM),
+                DatasetExecutionStatus.SUCCESS, safeFacts(), "run-1", null
+        );
+        DatasetExecutionResult tampered = new DatasetExecutionResult(
+                signed.source(), signed.status(), signed.dataComplete(),
+                safeFacts(8600, "d".repeat(64)), signed.workflowRunId(),
+                signed.resultArtifactId(), signed.safeErrorCode(), signed.safeMessage(),
+                signed.integrityProof()
+        );
+
+        assertThatThrownBy(() -> service.create(command(query(), List.of(item(tampered)))))
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("完整性证明");
         verify(snapshotMapper, never()).insert(any(BusinessSnapshot.class));
     }
 
@@ -273,80 +310,6 @@ class BusinessSnapshotServiceTest {
                 source(query(), 7L, DATASET_CHECKSUM, POLICY_CHECKSUM),
                 DatasetExecutionStatus.SUCCESS,
                 safeFacts(MissingValue.INSTANCE, MissingValue.INSTANCE),
-                "run-1", null
-        )))));
-
-        assertThat(snapshot.getStatus()).isEqualTo("COMPLETE");
-    }
-
-    @Test
-    void shouldRejectRawHashValueForNonCalculableVisibleField() {
-        when(datasetMapper.selectOne(any())).thenReturn(dataset(120));
-        ReportDatasetField hashField = field();
-        hashField.setCalculable(false);
-        hashField.setMaskStrategy("HASH");
-        when(datasetFieldMapper.selectList(any())).thenReturn(List.of(hashField));
-
-        assertThatThrownBy(() -> service.create(command(query(), List.of(item(result(
-                source(query(), 7L, DATASET_CHECKSUM, POLICY_CHECKSUM),
-                DatasetExecutionStatus.SUCCESS,
-                safeFactsWithoutCalculation("13800138000"),
-                "run-1", null
-        )))))).isInstanceOf(BusinessException.class).hasMessageContaining("脱敏");
-    }
-
-    @Test
-    void shouldAcceptHashShapeForNonCalculableVisibleField() {
-        when(datasetMapper.selectOne(any())).thenReturn(dataset(120));
-        ReportDatasetField hashField = field();
-        hashField.setCalculable(false);
-        hashField.setMaskStrategy("HASH");
-        when(datasetFieldMapper.selectList(any())).thenReturn(List.of(hashField));
-        when(workflowRunMapper.selectOne(any())).thenReturn(workflowRun("SUCCESS"));
-        stubSuccessfulInsert();
-
-        BusinessSnapshot snapshot = service.create(command(query(), List.of(item(result(
-                source(query(), 7L, DATASET_CHECKSUM, POLICY_CHECKSUM),
-                DatasetExecutionStatus.SUCCESS,
-                safeFactsWithoutCalculation(
-                        "a8ace2bb81a21d9b46b51577c4e7a667fa9107fca5f7d72d94a9bc75ac91b5aa"
-                ),
-                "run-1", null
-        )))));
-
-        assertThat(snapshot.getStatus()).isEqualTo("COMPLETE");
-    }
-
-    @Test
-    void shouldRejectMalformedPartialForNonCalculableVisibleField() {
-        when(datasetMapper.selectOne(any())).thenReturn(dataset(120));
-        ReportDatasetField partialField = field();
-        partialField.setCalculable(false);
-        partialField.setMaskStrategy("PARTIAL");
-        when(datasetFieldMapper.selectList(any())).thenReturn(List.of(partialField));
-
-        assertThatThrownBy(() -> service.create(command(query(), List.of(item(result(
-                source(query(), 7L, DATASET_CHECKSUM, POLICY_CHECKSUM),
-                DatasetExecutionStatus.SUCCESS,
-                safeFactsWithoutCalculation("13800138000"),
-                "run-1", null
-        )))))).isInstanceOf(BusinessException.class).hasMessageContaining("脱敏");
-    }
-
-    @Test
-    void shouldAcceptPartialShapeForNonCalculableVisibleField() {
-        when(datasetMapper.selectOne(any())).thenReturn(dataset(120));
-        ReportDatasetField partialField = field();
-        partialField.setCalculable(false);
-        partialField.setMaskStrategy("PARTIAL");
-        when(datasetFieldMapper.selectList(any())).thenReturn(List.of(partialField));
-        when(workflowRunMapper.selectOne(any())).thenReturn(workflowRun("SUCCESS"));
-        stubSuccessfulInsert();
-
-        BusinessSnapshot snapshot = service.create(command(query(), List.of(item(result(
-                source(query(), 7L, DATASET_CHECKSUM, POLICY_CHECKSUM),
-                DatasetExecutionStatus.SUCCESS,
-                safeFactsWithoutCalculation("*******8000"),
                 "run-1", null
         )))));
 
@@ -730,6 +693,7 @@ class BusinessSnapshotServiceTest {
         return new BusinessSnapshotServiceImpl(
                 snapshotMapper, itemMapper, artifactMapper, workflowRunMapper,
                 datasetMapper, datasetFieldMapper,
+                proofFixture.verifier(),
                 new BusinessFactSanitizer(new ReportDatasetValidator()),
                 new ObjectMapper(), clock,
                 maxFactBytes, maxQueryBytes, maxItems
@@ -791,9 +755,37 @@ class BusinessSnapshotServiceTest {
             String runId,
             String artifactId,
             String safeErrorCode) {
-        return new DatasetExecutionResult(
+        return proofFixture.sign(unsignedResult(
                 source, status, status == DatasetExecutionStatus.SUCCESS,
                 facts, runId, artifactId, safeErrorCode, null
+        ));
+    }
+
+    private DatasetExecutionResult unsignedResult(
+            DatasetExecutionSource source,
+            DatasetExecutionStatus status,
+            Map<String, Object> facts,
+            String runId,
+            String artifactId,
+            String safeErrorCode) {
+        return unsignedResult(
+                source, status, status == DatasetExecutionStatus.SUCCESS,
+                facts, runId, artifactId, safeErrorCode, null
+        );
+    }
+
+    private DatasetExecutionResult unsignedResult(
+            DatasetExecutionSource source,
+            DatasetExecutionStatus status,
+            boolean dataComplete,
+            Map<String, Object> facts,
+            String runId,
+            String artifactId,
+            String safeErrorCode,
+            String safeMessage) {
+        return new DatasetExecutionResult(
+                source, status, dataComplete, facts, runId, artifactId,
+                safeErrorCode, safeMessage, null
         );
     }
 

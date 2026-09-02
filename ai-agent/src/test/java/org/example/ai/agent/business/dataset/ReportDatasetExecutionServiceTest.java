@@ -1,13 +1,16 @@
-package org.example.ai.agent.business.dataset;
+package org.example.ai.agent.business.dataset.impl;
 
 import com.baomidou.mybatisplus.core.conditions.Wrapper;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.ai.agent.answer.extractor.DictionaryFactExtractor;
 import org.example.ai.agent.answer.formatter.FactValueFormatter;
+import org.example.ai.agent.business.dataset.BusinessFactSanitizer;
+import org.example.ai.agent.business.dataset.CanonicalInputMapper;
+import org.example.ai.agent.business.dataset.ReportDatasetExecutionService;
+import org.example.ai.agent.business.dataset.ReportDatasetValidator;
 import org.example.ai.agent.business.dataset.entity.ReportDataset;
 import org.example.ai.agent.business.dataset.entity.ReportDatasetField;
-import org.example.ai.agent.business.dataset.impl.ReportDatasetExecutionServiceImpl;
 import org.example.ai.agent.business.dataset.mapper.ReportDatasetFieldMapper;
 import org.example.ai.agent.business.dataset.mapper.ReportDatasetMapper;
 import org.example.ai.agent.business.dataset.model.DatasetExecutionRequest;
@@ -65,6 +68,7 @@ class ReportDatasetExecutionServiceTest {
     private WorkflowExecutionFacade executionFacade;
     private FieldDictionaryMapper fieldDictionaryMapper;
     private GraphCapabilityCatalog capabilityCatalog;
+    private DatasetExecutionProofService proofService;
     private ReportDatasetExecutionService service;
 
     @BeforeEach
@@ -75,6 +79,7 @@ class ReportDatasetExecutionServiceTest {
         executionFacade = mock(WorkflowExecutionFacade.class);
         fieldDictionaryMapper = mock(FieldDictionaryMapper.class);
         capabilityCatalog = mock(GraphCapabilityCatalog.class);
+        proofService = new DatasetExecutionProofService();
         when(capabilityCatalog.sideEffect(any())).thenReturn("READ");
         FieldMetadataService metadataService = new FieldMetadataService(fieldDictionaryMapper);
         DictionaryFactExtractor extractor = new DictionaryFactExtractor(
@@ -94,6 +99,7 @@ class ReportDatasetExecutionServiceTest {
                 extractor,
                 new WorkflowCapabilityCodeCollector(),
                 capabilityCatalog,
+                proofService,
                 objectMapper
         );
     }
@@ -192,6 +198,7 @@ class ReportDatasetExecutionServiceTest {
         assertThat(result.dataComplete()).isFalse();
         assertThat(result.safeFacts()).isEmpty();
         assertThat(result.workflowRunId()).isNull();
+        assertThat(result.integrityProof()).hasSize(64);
         assertThat(result.toString()).doesNotContain("exists", SECRET);
         verify(executionFacade, times(1)).execute(any());
         verify(snapshotResolver, never()).resolveByCode(QUERY);
@@ -243,6 +250,9 @@ class ReportDatasetExecutionServiceTest {
         assertThat(result.source().queryWorkflowVersionId()).isEqualTo(22L);
         assertThat(result.source().datasetConfigChecksum()).isEqualTo("a".repeat(64));
         assertThat(result.source().fieldPolicyChecksum()).isEqualTo("b".repeat(64));
+        assertThat(result.integrityProof()).hasSize(64);
+        assertThat(result.toString()).contains("proofPresent=true")
+                .doesNotContain(result.integrityProof());
     }
 
     @Test
@@ -259,6 +269,7 @@ class ReportDatasetExecutionServiceTest {
         DatasetExecutionResult result = service.execute(request());
 
         assertThat(result.status()).isEqualTo(DatasetExecutionStatus.FAILED);
+        assertThat(result.integrityProof()).hasSize(64);
         assertThat(result.safeMessage()).doesNotContain("project_no", SECRET);
         verify(executionFacade, times(1)).execute(any());
     }
@@ -291,6 +302,7 @@ class ReportDatasetExecutionServiceTest {
                 false, false, "timeout-run", QUERY, null, "TIMEOUT", "raw timeout details"
         ));
         assertThat(timeout.status()).isEqualTo(DatasetExecutionStatus.TIMEOUT);
+        assertThat(timeout.integrityProof()).hasSize(64);
         assertThat(timeout.safeMessage()).doesNotContain("raw timeout details");
         assertThat(timeout.source().queryWorkflowVersionId()).isEqualTo(22L);
 
@@ -299,6 +311,7 @@ class ReportDatasetExecutionServiceTest {
                 false, false, "failed-run", QUERY, null, "DOWNSTREAM_FAILURE", "raw failure"
         ));
         assertThat(failed.status()).isEqualTo(DatasetExecutionStatus.FAILED);
+        assertThat(failed.integrityProof()).hasSize(64);
         assertThat(failed.safeMessage()).doesNotContain("raw failure");
 
         resetExecutions();
@@ -307,6 +320,7 @@ class ReportDatasetExecutionServiceTest {
                 true, false, "empty-run", QUERY, Map.of("data", Map.of()), null, null
         ));
         assertThat(empty.status()).isEqualTo(DatasetExecutionStatus.EMPTY);
+        assertThat(empty.integrityProof()).hasSize(64);
         assertThat(empty.dataComplete()).isFalse();
     }
 
@@ -510,7 +524,8 @@ class ReportDatasetExecutionServiceTest {
                 "query-run",
                 null,
                 null,
-                "数据查询完成"
+                "数据查询完成",
+                null
         ))
                 .isInstanceOf(BusinessException.class)
                 .hasMessageContaining("StringBuilder")

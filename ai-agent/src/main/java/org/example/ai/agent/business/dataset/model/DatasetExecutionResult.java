@@ -19,7 +19,8 @@ public record DatasetExecutionResult(
         String workflowRunId,
         String resultArtifactId,
         String safeErrorCode,
-        String safeMessage) {
+        String safeMessage,
+        String integrityProof) {
 
     @SuppressWarnings("unchecked")
     public DatasetExecutionResult {
@@ -52,6 +53,7 @@ public record DatasetExecutionResult(
                 + ", resultArtifactId=" + resultArtifactId
                 + ", safeErrorCode=" + safeErrorCode
                 + ", safeMessage=" + safeMessage
+                + ", proofPresent=" + (integrityProof != null)
                 + ']';
     }
 }

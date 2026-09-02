@@ -68,7 +68,8 @@ class DatasetExecutionSourceTest {
                 null,
                 null,
                 "FAILED",
-                "数据查询失败"
+                "数据查询失败",
+                null
         )).isInstanceOf(NullPointerException.class).hasMessageContaining("source");
     }
 }
