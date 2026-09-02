@@ -1,6 +1,7 @@
 package org.example.ai.agent.business.intent;
 
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import org.example.ai.agent.common.exception.BusinessException;
@@ -85,10 +86,10 @@ public class BusinessQueryIntentResolver {
         String content = response.getResult().getOutput().getText();
         final BusinessQueryIntent intent;
         try {
-            intent = objectMapper.readValue(
-                    extractJson(content),
-                    BusinessQueryIntent.class
-            );
+            intent = objectMapper
+                    .readerFor(BusinessQueryIntent.class)
+                    .with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS)
+                    .readValue(extractJson(content));
         } catch (JsonProcessingException ignored) {
             // 原始模型输出可能包含敏感业务文本，异常中只保留确定性错误描述。
             throw new BusinessException(

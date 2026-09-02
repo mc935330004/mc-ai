@@ -174,23 +174,63 @@ class BusinessIntentValidatorTest {
         assertThat(resolved.exportFormat()).isEqualTo("XLSX");
 
         ArgumentCaptor<String> systemPrompt = ArgumentCaptor.forClass(String.class);
-        ArgumentCaptor<String> userPrompt = ArgumentCaptor.forClass(String.class);
         verify(chatClientService).call(
                 same(context),
                 systemPrompt.capture(),
-                userPrompt.capture(),
+                anyString(),
                 any(ChatOptions.Builder.class)
         );
 
-        String prompts = (systemPrompt.getValue() + userPrompt.getValue())
+        String prompt = systemPrompt.getValue()
                 .toLowerCase(Locale.ROOT);
-        assertThat(prompts)
+        assertThat(prompt)
                 .doesNotContain("workflow")
+                .doesNotContain("工作流")
                 .doesNotContain("capability")
+                .doesNotContain("能力编码")
                 .doesNotContain("api path")
+                .doesNotContain("接口路径")
                 .doesNotContain("permission")
+                .doesNotContain("权限")
                 .doesNotContain("raw schema")
-                .doesNotContain("calculation");
+                .doesNotContain("原始结构")
+                .doesNotContain("calculation")
+                .doesNotContain("计算");
+    }
+
+    @Test
+    void resolverRejectsTwoConsecutiveJsonObjectsWithoutLeakingRawText() {
+        TrackedChatClientService chatClientService = mock(TrackedChatClientService.class);
+        ChatResponse response = mock(ChatResponse.class, RETURNS_DEEP_STUBS);
+        when(response.getResult().getOutput().getText()).thenReturn("""
+                {
+                  "subjectType": "PROJECT",
+                  "datasetCodes": ["PROJECT_OVERVIEW"],
+                  "refresh": false
+                }
+                {
+                  "projectCode": "SENSITIVE-RAW-CONTENT"
+                }
+                """);
+        when(chatClientService.call(
+                any(),
+                anyString(),
+                anyString(),
+                any(ChatOptions.Builder.class)
+        )).thenReturn(response);
+        BusinessQueryIntentResolver resolver = new BusinessQueryIntentResolver(
+                chatClientService,
+                new ObjectMapper().findAndRegisterModules(),
+                validator
+        );
+
+        assertThatThrownBy(() -> resolver.resolve(
+                "查询项目概览",
+                ModelCallContext.builder().build()
+        ))
+                .isInstanceOf(BusinessException.class)
+                .hasMessage("业务查询意图解析失败：模型返回的 JSON 不合法")
+                .hasMessageNotContaining("SENSITIVE-RAW-CONTENT");
     }
 
     private BusinessQueryIntent intent(
