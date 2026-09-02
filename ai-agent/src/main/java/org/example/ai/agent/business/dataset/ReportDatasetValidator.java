@@ -157,7 +157,7 @@ public final class ReportDatasetValidator {
     /**
      * 为已经冻结的安全值生成带类型标签的确定性表达。
      */
-    static String canonicalSafeValue(Object safeValue) {
+    public static String canonicalSafeValue(Object safeValue) {
         StringBuilder canonical = new StringBuilder();
         appendCanonical(safeValue, canonical);
         return canonical.toString();
