@@ -255,7 +255,7 @@ class ReportDatasetServiceTest {
         existing.setId(77L);
         existing.setCreatedBy("creator");
         existing.setCreatedAt(createdAt);
-        existing.setVersion(6);
+        existing.setVersion(5);
         when(datasetMapper.selectOne(any(Wrapper.class))).thenReturn(existing);
         when(workflowResolver.resolveByCode("QUERY_EMPLOYEE"))
                 .thenReturn(publishedWorkflow(
