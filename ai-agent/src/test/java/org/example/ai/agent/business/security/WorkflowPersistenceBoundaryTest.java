@@ -85,24 +85,42 @@ class WorkflowPersistenceBoundaryTest {
 
     @Test
     void rawWorkflowResponseNeverCrossesPersistenceLogOrModelBoundary() {
-        ToolResult projected = executeRawCapabilityResponse();
+        Logger workflowLogger = (Logger) LoggerFactory.getLogger("org.example.ai.agent");
+        ListAppender<ILoggingEvent> appender = new ListAppender<>();
+        appender.start();
+        workflowLogger.addAppender(appender);
+        try {
+            ToolResult projected = executeRawCapabilityResponse();
 
-        assertThat(objectMapper.valueToTree(projected.getDisplayData()).toString())
-                .contains("expense", "approvedAmount", "12580")
-                .doesNotContain(SENTINEL);
-        assertThat(projected.getRaw()).isNull();
+            assertThat(objectMapper.valueToTree(projected.getDisplayData()).toString())
+                    .contains("expense", "approvedAmount", "12580")
+                    .doesNotContain(SENTINEL);
+            assertThat(projected.getRaw()).isNull();
 
-        WorkflowExecutionOutcome outcome = createOutcome(projected.getDisplayData());
-        persistWorkflowRun(outcome);
+            WorkflowExecutionOutcome outcome = createOutcome(projected.getDisplayData());
+            persistWorkflowRun(outcome);
 
-        WorkflowAnswerFieldPolicy fieldPolicy = approvedAmountPolicy();
-        WorkflowAnswerModelPayload modelPayload = new WorkflowAnswerPayloadFactory(objectMapper)
-                .create(outcome, fieldPolicy.modelFieldNames());
-        WorkflowAnswerChunkPlan chunkPlan = new WorkflowAnswerChunkPlanner(objectMapper, 12_000, 10)
-                .plan(modelPayload);
+            WorkflowAnswerFieldPolicy fieldPolicy = approvedAmountPolicy();
+            WorkflowAnswerModelPayload modelPayload = new WorkflowAnswerPayloadFactory(objectMapper)
+                    .create(outcome, fieldPolicy.modelFieldNames());
+            WorkflowAnswerChunkPlan chunkPlan = new WorkflowAnswerChunkPlanner(objectMapper, 12_000, 10)
+                    .plan(modelPayload);
 
-        persistArtifact(outcome, fieldPolicy, chunkPlan);
-        consumeWithModelAndCaptureLog(chunkPlan);
+            persistArtifact(outcome, fieldPolicy, chunkPlan);
+            consumeWithModel(chunkPlan);
+        } finally {
+            workflowLogger.detachAppender(appender);
+            appender.stop();
+        }
+
+        /*
+         * consumer 首次调用失败会产生一条 WARN，
+         * 同时证明包级 appender 确实覆盖了整条工作流链路。
+         */
+        assertThat(appender.list)
+                .isNotEmpty()
+                .extracting(ILoggingEvent::getFormattedMessage)
+                .allSatisfy(message -> assertThat(message).doesNotContain(SENTINEL));
     }
 
     private ToolResult executeRawCapabilityResponse() {
@@ -279,7 +297,7 @@ class WorkflowPersistenceBoundaryTest {
         assertThat(artifactCaptor.getValue().getFieldSemanticsJson()).doesNotContain(SENTINEL);
     }
 
-    private void consumeWithModelAndCaptureLog(WorkflowAnswerChunkPlan chunkPlan) {
+    private void consumeWithModel(WorkflowAnswerChunkPlan chunkPlan) {
         TrackedChatClientService chatClientService = mock(TrackedChatClientService.class);
         ChatResponse response = mock(ChatResponse.class, RETURNS_DEEP_STUBS);
         when(response.getResult().getOutput().getText()).thenReturn("费用审批金额为 12580 元");
@@ -287,18 +305,12 @@ class WorkflowPersistenceBoundaryTest {
                 .thenThrow(new IllegalStateException("临时模型故障"))
                 .thenReturn(response);
 
-        Logger logger = (Logger) LoggerFactory.getLogger(WorkflowAnswerChunkConsumer.class);
-        ListAppender<ILoggingEvent> appender = new ListAppender<>();
-        appender.start();
-        logger.addAppender(appender);
         ExecutorService executorService = Executors.newSingleThreadExecutor();
         try {
             new WorkflowAnswerChunkConsumer(chatClientService, executorService)
                     .consume(request(), RUN_ID, "[]", chunkPlan);
         } finally {
             executorService.shutdownNow();
-            logger.detachAppender(appender);
-            appender.stop();
         }
 
         ArgumentCaptor<String> systemPrompt = ArgumentCaptor.forClass(String.class);
@@ -306,10 +318,6 @@ class WorkflowPersistenceBoundaryTest {
         verify(chatClientService, times(2)).call(any(), systemPrompt.capture(), userPrompt.capture());
         assertThat(systemPrompt.getAllValues()).allSatisfy(prompt -> assertThat(prompt).doesNotContain(SENTINEL));
         assertThat(userPrompt.getAllValues()).allSatisfy(prompt -> assertSafeJson(prompt));
-        assertThat(appender.list)
-                .isNotEmpty()
-                .extracting(ILoggingEvent::getFormattedMessage)
-                .allSatisfy(message -> assertThat(message).doesNotContain(SENTINEL));
     }
 
     private WorkflowAnswerFieldPolicy approvedAmountPolicy() {
