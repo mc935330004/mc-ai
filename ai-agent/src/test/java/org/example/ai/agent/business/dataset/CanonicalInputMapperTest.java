@@ -2,10 +2,13 @@ package org.example.ai.agent.business.dataset;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.example.ai.agent.common.exception.BusinessException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -199,6 +202,85 @@ class CanonicalInputMapperTest {
         assertThat(result)
                 .containsOnlyKeys("project_id")
                 .containsEntry("project_id", 91L);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void recursivelyFreezesMappedValuesAndAllowsRepeatedSharedChildren() throws Exception {
+        List<Object> shared = new ArrayList<>(List.of("first"));
+        Map<String, Object> nested = new LinkedHashMap<>();
+        nested.put("primary", shared);
+        nested.put("secondary", shared);
+
+        Map<String, Object> result = mapper.map(
+                Map.of("payload", nested),
+                Map.of("payload", "request_body"),
+                schema("""
+                        {"type":"object","properties":{"request_body":{"type":"object"}}}
+                        """)
+        );
+        Map<String, Object> frozen = (Map<String, Object>) result.get("request_body");
+        shared.add("late");
+        nested.put("late", true);
+
+        assertThat(frozen).containsOnlyKeys("primary", "secondary");
+        assertThat((List<Object>) frozen.get("primary")).containsExactly("first");
+        assertThat((List<Object>) frozen.get("secondary")).containsExactly("first");
+        assertThatThrownBy(() -> frozen.put("extra", true))
+                .isInstanceOf(UnsupportedOperationException.class);
+        assertThatThrownBy(() -> ((List<Object>) frozen.get("primary")).add("extra"))
+                .isInstanceOf(UnsupportedOperationException.class);
+    }
+
+    @Test
+    void rejectsCyclicMappedValueWithControlledBusinessException() throws Exception {
+        Map<String, Object> cyclic = new LinkedHashMap<>();
+        cyclic.put("self", cyclic);
+
+        assertThatThrownBy(() -> mapper.map(
+                Map.of("payload", cyclic),
+                Map.of("payload", "request_body"),
+                schema("""
+                        {"type":"object","properties":{"request_body":{"type":"object"}}}
+                        """)
+        ))
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("循环");
+    }
+
+    @Test
+    void rejectsUnsupportedMappedValueInsteadOfRetainingMutableObject() throws Exception {
+        assertThatThrownBy(() -> mapper.map(
+                Map.of("payload", new StringBuilder("mutable")),
+                Map.of("payload", "request_body"),
+                schema("""
+                        {"type":"object","properties":{"request_body":{"type":"object"}}}
+                        """)
+        ))
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("StringBuilder")
+                .hasMessageContaining("不支持");
+    }
+
+    @Test
+    void rejectsMappedValueBeyondMaximumSafeDepth() throws Exception {
+        Map<String, Object> root = new LinkedHashMap<>();
+        Map<String, Object> cursor = root;
+        for (int index = 0; index < 66; index++) {
+            Map<String, Object> child = new LinkedHashMap<>();
+            cursor.put("child", child);
+            cursor = child;
+        }
+
+        assertThatThrownBy(() -> mapper.map(
+                Map.of("payload", root),
+                Map.of("payload", "request_body"),
+                schema("""
+                        {"type":"object","properties":{"request_body":{"type":"object"}}}
+                        """)
+        ))
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("深度");
     }
 
     private JsonNode schema(String json) throws Exception {

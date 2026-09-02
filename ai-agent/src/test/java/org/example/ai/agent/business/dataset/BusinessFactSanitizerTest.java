@@ -1,14 +1,15 @@
 package org.example.ai.agent.business.dataset;
 
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.ai.agent.business.dataset.BusinessFactSanitizer.MissingValue;
 import org.example.ai.agent.business.dataset.BusinessFactSanitizer.SanitizedFacts;
 import org.example.ai.agent.business.dataset.model.FieldPolicy;
+import org.example.ai.agent.common.exception.BusinessException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -24,10 +25,7 @@ class BusinessFactSanitizerTest {
 
     @BeforeEach
     void setUp() {
-        sanitizer = new BusinessFactSanitizer(
-                new ReportDatasetValidator(),
-                new ObjectMapper().findAndRegisterModules()
-        );
+        sanitizer = new BusinessFactSanitizer(new ReportDatasetValidator());
     }
 
     @Test
@@ -204,6 +202,108 @@ class BusinessFactSanitizerTest {
     }
 
     @Test
+    void rejectsSelfReferentialMapWithControlledBusinessException() {
+        Map<String, Object> cyclic = new LinkedHashMap<>();
+        cyclic.put("self", cyclic);
+
+        assertThatThrownBy(() -> sanitizer.sanitize(
+                Map.of("cyclic", cyclic),
+                List.of(policy("cyclic", true, true, true, true, "NONE"))
+        ))
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("循环");
+    }
+
+    @Test
+    void rejectsSelfReferentialListWithControlledBusinessException() {
+        List<Object> cyclic = new ArrayList<>();
+        cyclic.add(cyclic);
+
+        assertThatThrownBy(() -> sanitizer.sanitize(
+                Map.of("cyclic", cyclic),
+                List.of(policy("cyclic", true, true, true, true, "NONE"))
+        ))
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("循环");
+    }
+
+    @Test
+    void rejectsNonStringMapKey() {
+        Map<Object, Object> invalid = new LinkedHashMap<>();
+        invalid.put(1, "value");
+
+        assertThatThrownBy(() -> sanitizer.sanitize(
+                Map.of("invalid", invalid),
+                List.of(policy("invalid", true, true, true, true, "NONE"))
+        ))
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("Map key")
+                .hasMessageContaining("String");
+    }
+
+    @Test
+    void rejectsUnknownMutableScalarTypes() {
+        assertThatThrownBy(() -> sanitizer.sanitize(
+                Map.of("invalid", new StringBuilder("mutable")),
+                List.of(policy("invalid", true, true, true, true, "NONE"))
+        ))
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("StringBuilder");
+
+        assertThatThrownBy(() -> sanitizer.sanitize(
+                Map.of("invalid", new Date(0)),
+                List.of(policy("invalid", true, true, true, true, "NONE"))
+        ))
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("Date");
+    }
+
+    @Test
+    void hashesTypedValuesAndContainerKindsDeterministically() {
+        assertThat(hash("1")).isNotEqualTo(hash(1));
+        assertThat(hash("true")).isNotEqualTo(hash(true));
+
+        Map<String, Object> firstMap = new LinkedHashMap<>();
+        firstMap.put("b", 2);
+        firstMap.put("a", 1);
+        Map<String, Object> reorderedMap = new LinkedHashMap<>();
+        reorderedMap.put("a", 1);
+        reorderedMap.put("b", 2);
+        assertThat(hash(firstMap)).isEqualTo(hash(reorderedMap));
+
+        Set<Object> firstSet = new LinkedHashSet<>(List.of("a", 1, true));
+        Set<Object> reorderedSet = new LinkedHashSet<>(List.of(true, 1, "a"));
+        assertThat(hash(firstSet)).isEqualTo(hash(reorderedSet));
+        assertThat(hash(List.of("a", 1, true)))
+                .isNotEqualTo(hash(List.of(true, 1, "a")))
+                .isNotEqualTo(hash(firstSet));
+    }
+
+    @Test
+    void partiallyMasksByUnicodeCodePoint() {
+        SanitizedFacts result = sanitizer.sanitize(Map.of(
+                "empty", "",
+                "single", "王",
+                "emoji", "😀",
+                "mixed", "😀A中",
+                "bank", "6222021234567890"
+        ), List.of(
+                policy("empty", false, true, false, false, "PARTIAL"),
+                policy("single", false, true, false, false, "PARTIAL"),
+                policy("emoji", false, true, false, false, "PARTIAL"),
+                policy("mixed", false, true, false, false, "PARTIAL"),
+                policy("bank", false, true, false, false, "PARTIAL")
+        ));
+
+        assertThat(result.displayFacts())
+                .containsEntry("empty", "")
+                .containsEntry("single", "*")
+                .containsEntry("emoji", "*")
+                .containsEntry("mixed", "😀**")
+                .containsEntry("bank", "************7890");
+    }
+
+    @Test
     void rejectsInvalidOrDuplicateFieldPolicies() {
         assertThatThrownBy(() -> sanitizer.sanitize(Map.of(), List.of(
                 policy("employee.name", false, true, false, true, "NONE"),
@@ -238,5 +338,13 @@ class BusinessFactSanitizerTest {
                 maskStrategy,
                 "PERSON"
         );
+    }
+
+    private String hash(Object value) {
+        SanitizedFacts result = sanitizer.sanitize(
+                Map.of("value", value),
+                List.of(policy("value", false, true, false, false, "HASH"))
+        );
+        return (String) result.displayFacts().get("value");
     }
 }

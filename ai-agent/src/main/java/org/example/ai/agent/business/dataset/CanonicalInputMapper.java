@@ -43,7 +43,10 @@ public final class CanonicalInputMapper {
 
         Map<String, Object> workflowInput = new LinkedHashMap<>();
         for (Map.Entry<String, Object> entry : canonicalSnapshot.entrySet()) {
-            workflowInput.put(mappingSnapshot.get(entry.getKey()), entry.getValue());
+            workflowInput.put(
+                    mappingSnapshot.get(entry.getKey()),
+                    validator.freezeSafeValue(entry.getValue())
+            );
         }
         return Collections.unmodifiableMap(workflowInput);
     }

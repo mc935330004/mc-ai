@@ -2,20 +2,46 @@ package org.example.ai.agent.business.dataset;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import org.example.ai.agent.business.dataset.model.FieldPolicy;
+import org.example.ai.agent.common.exception.BusinessException;
 import org.springframework.stereotype.Component;
 
+import java.lang.reflect.Array;
+import java.math.BigDecimal;
+import java.math.BigInteger;
+import java.time.ZoneId;
+import java.time.temporal.TemporalAccessor;
+import java.time.temporal.TemporalAmount;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
+import java.util.UUID;
 
 /**
- * 报告数据集运行时协议校验器，只校验显式输入映射、目标 Schema 和字段策略形状。
+ * 报告数据集运行时边界校验器，集中处理输入映射、字段策略及安全值冻结。
  */
 @Component
 public final class ReportDatasetValidator {
 
+    private static final int MAX_SAFE_VALUE_DEPTH = 64;
+    private static final Set<Class<?>> IMMUTABLE_NUMBER_TYPES = Set.of(
+            Byte.class,
+            Short.class,
+            Integer.class,
+            Long.class,
+            Float.class,
+            Double.class,
+            BigInteger.class,
+            BigDecimal.class
+    );
     private static final Set<String> RESERVED_INPUT_NAMES = Set.of(
             "workflowcode",
             "capabilitycode",
@@ -119,6 +145,201 @@ public final class ReportDatasetValidator {
                 );
             }
         }
+    }
+
+    /**
+     * 递归复制并冻结可安全跨执行边界传递的值。
+     */
+    Object freezeSafeValue(Object value) {
+        return freezeSafeValue(value, new IdentityHashMap<>(), 0);
+    }
+
+    /**
+     * 为已经冻结的安全值生成带类型标签的确定性表达。
+     */
+    String canonicalSafeValue(Object safeValue) {
+        StringBuilder canonical = new StringBuilder();
+        appendCanonical(safeValue, canonical);
+        return canonical.toString();
+    }
+
+    private Object freezeSafeValue(
+            Object value,
+            IdentityHashMap<Object, Boolean> recursionPath,
+            int depth) {
+        if (depth > MAX_SAFE_VALUE_DEPTH) {
+            throw new BusinessException(
+                    400,
+                    "安全值嵌套深度超过" + MAX_SAFE_VALUE_DEPTH
+            );
+        }
+        if (value == null || isImmutableScalar(value)) {
+            return value;
+        }
+        if (!isContainer(value)) {
+            throw new BusinessException(
+                    400,
+                    "不支持的安全值类型：" + value.getClass().getName()
+            );
+        }
+        if (recursionPath.put(value, Boolean.TRUE) != null) {
+            throw new BusinessException(400, "安全值存在循环引用");
+        }
+        try {
+            if (value instanceof Map<?, ?> map) {
+                return freezeMap(map, recursionPath, depth);
+            }
+            if (value instanceof Set<?> set) {
+                return freezeSet(set, recursionPath, depth);
+            }
+            if (value instanceof Collection<?> collection) {
+                return freezeCollection(collection, recursionPath, depth);
+            }
+            return freezeArray(value, recursionPath, depth);
+        } finally {
+            recursionPath.remove(value);
+        }
+    }
+
+    private Map<String, Object> freezeMap(
+            Map<?, ?> source,
+            IdentityHashMap<Object, Boolean> recursionPath,
+            int depth) {
+        Map<String, Object> frozen = new LinkedHashMap<>();
+        for (Map.Entry<?, ?> entry : source.entrySet()) {
+            if (!(entry.getKey() instanceof String key)) {
+                throw new BusinessException(400, "安全值Map key只允许String");
+            }
+            frozen.put(
+                    key,
+                    freezeSafeValue(entry.getValue(), recursionPath, depth + 1)
+            );
+        }
+        return Collections.unmodifiableMap(frozen);
+    }
+
+    private Set<Object> freezeSet(
+            Set<?> source,
+            IdentityHashMap<Object, Boolean> recursionPath,
+            int depth) {
+        List<FrozenSetElement> sorted = new ArrayList<>(source.size());
+        for (Object item : source) {
+            Object frozen = freezeSafeValue(item, recursionPath, depth + 1);
+            sorted.add(new FrozenSetElement(frozen, canonicalSafeValue(frozen)));
+        }
+        sorted.sort((left, right) -> left.canonical().compareTo(right.canonical()));
+        Set<Object> result = new LinkedHashSet<>();
+        sorted.forEach(item -> result.add(item.value()));
+        return Collections.unmodifiableSet(result);
+    }
+
+    private List<Object> freezeCollection(
+            Collection<?> source,
+            IdentityHashMap<Object, Boolean> recursionPath,
+            int depth) {
+        List<Object> frozen = new ArrayList<>(source.size());
+        for (Object item : source) {
+            frozen.add(freezeSafeValue(item, recursionPath, depth + 1));
+        }
+        return Collections.unmodifiableList(frozen);
+    }
+
+    private List<Object> freezeArray(
+            Object source,
+            IdentityHashMap<Object, Boolean> recursionPath,
+            int depth) {
+        int length = Array.getLength(source);
+        List<Object> frozen = new ArrayList<>(length);
+        for (int index = 0; index < length; index++) {
+            frozen.add(freezeSafeValue(Array.get(source, index), recursionPath, depth + 1));
+        }
+        return Collections.unmodifiableList(frozen);
+    }
+
+    private boolean isContainer(Object value) {
+        return value instanceof Map<?, ?>
+                || value instanceof Collection<?>
+                || value.getClass().isArray();
+    }
+
+    private boolean isImmutableScalar(Object value) {
+        return value instanceof String
+                || value instanceof Boolean
+                || value instanceof Character
+                || IMMUTABLE_NUMBER_TYPES.contains(value.getClass())
+                || value instanceof UUID
+                || value instanceof Enum<?>
+                || isJavaTimeValue(value);
+    }
+
+    private boolean isJavaTimeValue(Object value) {
+        return "java.time".equals(value.getClass().getPackageName())
+                && (value instanceof TemporalAccessor
+                || value instanceof TemporalAmount
+                || value instanceof ZoneId);
+    }
+
+    private void appendCanonical(Object value, StringBuilder target) {
+        if (value == null) {
+            target.append("N;");
+            return;
+        }
+        if (isImmutableScalar(value)) {
+            appendToken(target, "V", value.getClass().getName());
+            String scalarText = value instanceof Enum<?> enumValue
+                    ? enumValue.name()
+                    : String.valueOf(value);
+            appendToken(target, "X", scalarText);
+            return;
+        }
+        if (value instanceof Map<?, ?> map) {
+            target.append("M{");
+            Map<String, Object> sorted = new TreeMap<>();
+            for (Map.Entry<?, ?> entry : map.entrySet()) {
+                if (!(entry.getKey() instanceof String key)) {
+                    throw new BusinessException(400, "安全值Map key只允许String");
+                }
+                sorted.put(key, entry.getValue());
+            }
+            sorted.forEach((key, item) -> {
+                appendToken(target, "K", key);
+                appendCanonical(item, target);
+            });
+            target.append("};");
+            return;
+        }
+        if (value instanceof Set<?> set) {
+            List<String> elements = new ArrayList<>(set.size());
+            for (Object item : set) {
+                elements.add(canonicalSafeValue(item));
+            }
+            Collections.sort(elements);
+            target.append("S[");
+            elements.forEach(item -> appendToken(target, "E", item));
+            target.append("];");
+            return;
+        }
+        if (value instanceof List<?> list) {
+            target.append("L[");
+            list.forEach(item -> appendCanonical(item, target));
+            target.append("];");
+            return;
+        }
+        throw new BusinessException(
+                400,
+                "不支持的安全值类型：" + value.getClass().getName()
+        );
+    }
+
+    private void appendToken(StringBuilder target, String tag, String value) {
+        target.append(tag)
+                .append(value.length())
+                .append(':')
+                .append(value)
+                .append(';');
+    }
+
+    private record FrozenSetElement(Object value, String canonical) {
     }
 
     private JsonNode requireObjectSchema(JsonNode inputSchema) {
