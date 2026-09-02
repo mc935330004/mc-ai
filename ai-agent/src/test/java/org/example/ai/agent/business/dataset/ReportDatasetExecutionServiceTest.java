@@ -7,6 +7,7 @@ import org.example.ai.agent.answer.extractor.DictionaryFactExtractor;
 import org.example.ai.agent.answer.formatter.FactValueFormatter;
 import org.example.ai.agent.business.dataset.BusinessFactSanitizer;
 import org.example.ai.agent.business.dataset.CanonicalInputMapper;
+import org.example.ai.agent.business.dataset.DatasetAccessWorkflowExecutor;
 import org.example.ai.agent.business.dataset.ReportDatasetExecutionService;
 import org.example.ai.agent.business.dataset.ReportDatasetValidator;
 import org.example.ai.agent.business.dataset.entity.ReportDataset;
@@ -87,12 +88,13 @@ class ReportDatasetExecutionServiceTest {
                 new FactValueFormatter(objectMapper)
         );
         ReportDatasetValidator validator = new ReportDatasetValidator();
+        CanonicalInputMapper inputMapper = new CanonicalInputMapper(validator);
         service = new ReportDatasetExecutionServiceImpl(
                 datasetMapper,
                 datasetFieldMapper,
                 snapshotResolver,
                 executionFacade,
-                new CanonicalInputMapper(validator),
+                inputMapper,
                 new BusinessFactSanitizer(validator),
                 fieldDictionaryMapper,
                 metadataService,
@@ -100,7 +102,10 @@ class ReportDatasetExecutionServiceTest {
                 new WorkflowCapabilityCodeCollector(),
                 capabilityCatalog,
                 proofService,
-                objectMapper
+                objectMapper,
+                new DatasetAccessWorkflowExecutor(
+                        snapshotResolver, executionFacade, inputMapper, objectMapper
+                )
         );
     }
 

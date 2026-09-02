@@ -10,6 +10,7 @@ import org.example.ai.agent.answer.model.AnswerFact;
 import org.example.ai.agent.answer.model.UnifiedFactSet;
 import org.example.ai.agent.business.dataset.BusinessFactSanitizer;
 import org.example.ai.agent.business.dataset.CanonicalInputMapper;
+import org.example.ai.agent.business.dataset.DatasetAccessWorkflowExecutor;
 import org.example.ai.agent.business.dataset.ReportDatasetExecutionService;
 import org.example.ai.agent.business.dataset.ReportDatasetValidator;
 import org.example.ai.agent.business.dataset.entity.ReportDataset;
@@ -74,6 +75,7 @@ public class ReportDatasetExecutionServiceImpl
     private final GraphCapabilityCatalog capabilityCatalog;
     private final DatasetExecutionProofService proofService;
     private final ObjectMapper objectMapper;
+    private final DatasetAccessWorkflowExecutor accessWorkflowExecutor;
 
     @Override
     public DatasetExecutionResult execute(
@@ -97,44 +99,22 @@ public class ReportDatasetExecutionServiceImpl
             );
         }
 
-        WorkflowExecutionOutcome accessOutcome;
-        try {
-            PublishedWorkflow accessWorkflow = snapshotResolver.resolveByCode(
-                    dataset.getAccessWorkflowCode()
-            );
-            Map<String, Object> accessInput = canonicalInputMapper.map(
-                    selectCanonicalInput(request.canonicalInput(), mappings.access()),
-                    mappings.access(),
-                    accessWorkflow.inputSchema()
-            );
-            accessOutcome = executionFacade.execute(buildCommand(
-                    request,
-                    dataset.getAccessWorkflowCode(),
-                    accessWorkflow.version().getId(),
-                    accessInput
-            ));
-        } catch (RuntimeException exception) {
+        DatasetAccessWorkflowExecutor.AccessDecision accessDecision =
+                accessWorkflowExecutor.authorize(
+                        new DatasetAccessWorkflowExecutor.AccessRequest(
+                                request.agentRunId(), request.userId(), request.authorization(),
+                                request.secureContext(), request.canonicalInput()
+                        ),
+                        dataset
+                );
+        if (accessDecision == DatasetAccessWorkflowExecutor.AccessDecision.FAILED) {
             return failed(
                     executionSource,
                     "ACCESS_CHECK_FAILED",
                     "权限校验失败"
             );
         }
-
-        AccessDecision accessDecision;
-        try {
-            accessDecision = parseAccessDecision(accessOutcome);
-        } catch (RuntimeException exception) {
-            accessDecision = AccessDecision.INVALID;
-        }
-        if (accessDecision == AccessDecision.INVALID) {
-            return failed(
-                    executionSource,
-                    "ACCESS_CHECK_FAILED",
-                    "权限校验失败"
-            );
-        }
-        if (accessDecision == AccessDecision.DENIED) {
+        if (accessDecision == DatasetAccessWorkflowExecutor.AccessDecision.DENIED) {
             /*
              * 权限拒绝不能查询业务数据，也不能通过事实、数量或提示文字泄露记录是否存在。
              */
@@ -339,27 +319,6 @@ public class ReportDatasetExecutionServiceImpl
                 .authorization(request.authorization())
                 .secureContext(request.secureContext())
                 .build();
-    }
-
-    private AccessDecision parseAccessDecision(
-            WorkflowExecutionOutcome outcome) {
-        if (outcome == null || !outcome.success()) {
-            return AccessDecision.INVALID;
-        }
-        Object result = outcome.result();
-        if (result instanceof Boolean allowed) {
-            return allowed ? AccessDecision.ALLOWED : AccessDecision.DENIED;
-        }
-        JsonNode root = objectMapper.valueToTree(result);
-        JsonNode allowed = root == null || !root.isObject()
-                ? null
-                : root.get("allowed");
-        if (allowed == null || !allowed.isBoolean()) {
-            return AccessDecision.INVALID;
-        }
-        return allowed.booleanValue()
-                ? AccessDecision.ALLOWED
-                : AccessDecision.DENIED;
     }
 
     private DatasetExecutionResult buildSafeResult(
@@ -669,12 +628,6 @@ public class ReportDatasetExecutionServiceImpl
         return StringUtils.hasText(value)
                 ? value.trim().toUpperCase(Locale.ROOT)
                 : "";
-    }
-
-    private enum AccessDecision {
-        ALLOWED,
-        DENIED,
-        INVALID
     }
 
     private record DatasetInputMappings(
