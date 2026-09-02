@@ -1,9 +1,10 @@
 package org.example.ai.agent.business.snapshot;
 
 import org.example.ai.agent.business.dataset.ReportDatasetValidator;
-import org.example.ai.agent.business.dataset.entity.ReportDataset;
 import org.example.ai.agent.business.dataset.model.DatasetExecutionResult;
 import org.example.ai.agent.business.snapshot.entity.BusinessSnapshot;
+import org.example.ai.agent.business.model.AssociationType;
+import org.example.ai.agent.business.model.BusinessSubjectType;
 
 import java.util.List;
 import java.util.Map;
@@ -23,16 +24,15 @@ public interface BusinessSnapshotService {
     record CreateCommand(
             String userId,
             String sessionId,
-            String subjectType,
+            BusinessSubjectType subjectType,
             String subjectId,
-            ReportDataset dataset,
+            String datasetCode,
             Map<String, Object> canonicalQuery,
             String sourceSnapshotId,
             List<ItemCommand> items) {
 
         @SuppressWarnings("unchecked")
         public CreateCommand {
-            dataset = copyDataset(dataset);
             Object frozen = ReportDatasetValidator.freezeSafeValue(
                     canonicalQuery == null ? Map.of() : canonicalQuery
             );
@@ -40,23 +40,6 @@ public interface BusinessSnapshotService {
             items = items == null ? List.of() : List.copyOf(items);
         }
 
-        /**
-         * ReportDataset 是可变持久化实体，进入异步或事务边界前只复制本任务需要的配置，
-         * 防止调用方后续修改实体导致快照口径漂移。
-         */
-        private static ReportDataset copyDataset(ReportDataset source) {
-            if (source == null) {
-                return null;
-            }
-            ReportDataset copy = new ReportDataset();
-            copy.setDatasetCode(source.getDatasetCode());
-            copy.setQueryWorkflowCode(source.getQueryWorkflowCode());
-            copy.setTtlMinutes(source.getTtlMinutes());
-            copy.setEnabled(source.getEnabled());
-            copy.setConfigChecksum(source.getConfigChecksum());
-            copy.setFieldPolicyChecksum(source.getFieldPolicyChecksum());
-            return copy;
-        }
     }
 
     /**
@@ -64,7 +47,7 @@ public interface BusinessSnapshotService {
      */
     record ItemCommand(
             String itemKey,
-            String associationType,
+            AssociationType associationType,
             DatasetExecutionResult result,
             Integer totalCount,
             Integer successCount,

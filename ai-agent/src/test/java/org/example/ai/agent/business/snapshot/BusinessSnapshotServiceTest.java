@@ -1,8 +1,17 @@
 package org.example.ai.agent.business.snapshot;
 
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.SharedString;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.example.ai.agent.business.dataset.ReportDatasetValidator;
 import org.example.ai.agent.business.dataset.entity.ReportDataset;
+import org.example.ai.agent.business.dataset.entity.ReportDatasetField;
+import org.example.ai.agent.business.dataset.mapper.ReportDatasetFieldMapper;
+import org.example.ai.agent.business.dataset.mapper.ReportDatasetMapper;
 import org.example.ai.agent.business.dataset.model.DatasetExecutionResult;
+import org.example.ai.agent.business.dataset.model.DatasetExecutionSource;
+import org.example.ai.agent.business.model.AssociationType;
+import org.example.ai.agent.business.model.BusinessSubjectType;
 import org.example.ai.agent.business.model.DatasetExecutionStatus;
 import org.example.ai.agent.business.snapshot.BusinessSnapshotService.CreateCommand;
 import org.example.ai.agent.business.snapshot.BusinessSnapshotService.ItemCommand;
@@ -11,6 +20,7 @@ import org.example.ai.agent.business.snapshot.entity.BusinessSnapshotItem;
 import org.example.ai.agent.business.snapshot.impl.BusinessSnapshotServiceImpl;
 import org.example.ai.agent.business.snapshot.mapper.BusinessSnapshotItemMapper;
 import org.example.ai.agent.business.snapshot.mapper.BusinessSnapshotMapper;
+import org.example.ai.agent.chat.support.ContentHashUtils;
 import org.example.ai.agent.common.exception.BusinessException;
 import org.example.ai.agent.workflow.answer.artifact.entity.ResultArtifact;
 import org.example.ai.agent.workflow.answer.artifact.mapper.ResultArtifactMapper;
@@ -22,6 +32,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.test.util.ReflectionTestUtils;
 
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
@@ -29,7 +40,7 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
-import java.util.LinkedHashMap;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -43,296 +54,320 @@ import static org.mockito.Mockito.when;
 @ExtendWith(MockitoExtension.class)
 class BusinessSnapshotServiceTest {
 
+    private static final String DATASET_CHECKSUM = "a".repeat(64);
+    private static final String POLICY_CHECKSUM = "b".repeat(64);
+    private static final String WORKFLOW_CHECKSUM = "c".repeat(64);
     private static final LocalDateTime NOW = LocalDateTime.of(2026, 9, 2, 10, 0);
 
-    @Mock
-    private BusinessSnapshotMapper snapshotMapper;
-
-    @Mock
-    private BusinessSnapshotItemMapper itemMapper;
-
-    @Mock
-    private ResultArtifactMapper artifactMapper;
-
-    @Mock
-    private WorkflowRunMapper workflowRunMapper;
+    @Mock private BusinessSnapshotMapper snapshotMapper;
+    @Mock private BusinessSnapshotItemMapper itemMapper;
+    @Mock private ResultArtifactMapper artifactMapper;
+    @Mock private WorkflowRunMapper workflowRunMapper;
+    @Mock private ReportDatasetMapper datasetMapper;
+    @Mock private ReportDatasetFieldMapper datasetFieldMapper;
 
     private BusinessSnapshotService service;
 
     @BeforeEach
     void setUp() {
-        Clock clock = Clock.fixed(
-                Instant.parse("2026-09-02T02:00:00Z"),
-                ZoneId.of("Asia/Shanghai")
-        );
-        service = new BusinessSnapshotServiceImpl(
-                snapshotMapper,
-                itemMapper,
-                artifactMapper,
-                workflowRunMapper,
-                new ObjectMapper(),
-                clock
-        );
+        service = service(256 * 1024, 1000);
     }
 
     @Test
-    void shouldPersistOnlySafeFactsAndExecutionReferences() throws Exception {
+    void shouldPersistBoundSafeFactsAndActualExecutionReferences() {
+        stubCurrentConfiguration(120);
         stubSuccessfulInsert();
-        ReportDataset dataset = dataset(120);
-        ResultArtifact artifact = artifact("artifact-1", NOW.plusHours(3));
-        when(artifactMapper.selectOne(any())).thenReturn(artifact);
-        when(workflowRunMapper.selectOne(any())).thenReturn(workflowRun());
-        Map<String, Object> query = new LinkedHashMap<>();
-        query.put("projectCode", "XXXT2674040");
-        DatasetExecutionResult result = result(
-                DatasetExecutionStatus.SUCCESS,
-                true,
-                safeFacts(Map.of("contractAmount", 8600)),
-                "run-1",
-                "artifact-1"
-        );
-
-        BusinessSnapshot created = service.create(command(dataset, query, result));
-
-        ArgumentCaptor<BusinessSnapshot> snapshotCaptor =
-                ArgumentCaptor.forClass(BusinessSnapshot.class);
-        verify(snapshotMapper).insert(snapshotCaptor.capture());
-        BusinessSnapshot saved = snapshotCaptor.getValue();
-        assertThat(saved.getUserId()).isEqualTo("user-1");
-        assertThat(saved.getSessionId()).isEqualTo("session-1");
-        assertThat(saved.getSubjectType()).isEqualTo("PROJECT");
-        assertThat(saved.getSubjectId()).isEqualTo("project-1");
-        assertThat(saved.getDatasetCode()).isEqualTo("CONTRACT");
-        assertThat(saved.getConfigChecksum()).isEqualTo("config-checksum");
-        assertThat(saved.getFieldPolicyChecksum()).isEqualTo("policy-checksum");
-        assertThat(saved.getQueryHash()).hasSize(64);
-        assertThat(saved.getFactsJson())
-                .contains("contractAmount")
-                .doesNotContain("Authorization", "rawResponse", "Bearer");
-        assertThat(created).isSameAs(saved);
-
-        ArgumentCaptor<BusinessSnapshotItem> itemCaptor =
-                ArgumentCaptor.forClass(BusinessSnapshotItem.class);
-        verify(itemMapper).insert(itemCaptor.capture());
-        BusinessSnapshotItem item = itemCaptor.getValue();
-        assertThat(item.getSnapshotId()).isEqualTo(saved.getSnapshotId());
-        assertThat(item.getStatus()).isEqualTo("SUCCESS");
-        assertThat(item.getWorkflowCode()).isEqualTo("contract.query");
-        assertThat(item.getWorkflowVersionId()).isEqualTo(7L);
-        assertThat(item.getWorkflowRunId()).isEqualTo("run-1");
-        assertThat(item.getResultArtifactId()).isEqualTo("artifact-1");
-    }
-
-    @Test
-    void shouldUseDatasetTtlWhenItIsShorterThanGlobalLimit() {
-        stubSuccessfulInsert();
-        ReportDataset dataset = dataset(30);
-        when(artifactMapper.selectOne(any()))
-                .thenReturn(artifact("artifact-1", NOW.plusHours(3)));
-        when(workflowRunMapper.selectOne(any())).thenReturn(workflowRun());
+        when(workflowRunMapper.selectOne(any())).thenReturn(workflowRun("SUCCESS"));
+        when(artifactMapper.selectOne(any())).thenReturn(artifact(NOW.plusHours(3)));
 
         BusinessSnapshot snapshot = service.create(command(
-                dataset,
-                Map.of("year", 2026),
-                result(DatasetExecutionStatus.SUCCESS, true, safeFacts(Map.of()), "run-1", "artifact-1")
+                query(),
+                List.of(item(successResult(query(), "run-1", "artifact-1")))
         ));
 
-        assertThat(snapshot.getExpiresAt()).isEqualTo(NOW.plusMinutes(30));
-    }
-
-    @Test
-    void shouldNeverRetainSnapshotLongerThanTwentyFourHours() {
-        stubSuccessfulInsert();
-        ReportDataset dataset = dataset(1440);
-        when(artifactMapper.selectOne(any()))
-                .thenReturn(artifact("artifact-1", NOW.plusDays(3)));
-        when(workflowRunMapper.selectOne(any())).thenReturn(workflowRun());
-
-        BusinessSnapshot snapshot = service.create(command(
-                dataset,
-                Map.of("year", 2026),
-                result(DatasetExecutionStatus.SUCCESS, true, safeFacts(Map.of()), "run-1", "artifact-1")
-        ));
-
-        assertThat(snapshot.getExpiresAt()).isEqualTo(NOW.plusHours(24));
-    }
-
-    @Test
-    void shouldClampExpiryToReferencedArtifact() {
-        stubSuccessfulInsert();
-        ReportDataset dataset = dataset(120);
-        when(artifactMapper.selectOne(any()))
-                .thenReturn(artifact("artifact-1", NOW.plusMinutes(12)));
-        when(workflowRunMapper.selectOne(any())).thenReturn(workflowRun());
-
-        BusinessSnapshot snapshot = service.create(command(
-                dataset,
-                Map.of("year", 2026),
-                result(DatasetExecutionStatus.SUCCESS, true, safeFacts(Map.of()), "run-1", "artifact-1")
-        ));
-
-        assertThat(snapshot.getExpiresAt()).isEqualTo(NOW.plusMinutes(12));
-    }
-
-    @Test
-    void shouldRejectArtifactOwnedByAnotherSessionWithoutPersisting() {
-        ReportDataset dataset = dataset(120);
-        ResultArtifact artifact = artifact("artifact-1", NOW.plusHours(1));
-        artifact.setSessionId("another-session");
-        when(artifactMapper.selectOne(any())).thenReturn(artifact);
-        when(workflowRunMapper.selectOne(any())).thenReturn(workflowRun());
-
-        assertThatThrownBy(() -> service.create(command(
-                dataset,
-                Map.of("year", 2026),
-                result(DatasetExecutionStatus.SUCCESS, true, safeFacts(Map.of()), "run-1", "artifact-1")
-        )))
-                .isInstanceOf(BusinessException.class)
-                .hasMessageContaining("结果制品");
-        verify(snapshotMapper, never()).insert(any(BusinessSnapshot.class));
-    }
-
-    @Test
-    void shouldRejectExpiredOrMismatchedArtifactReference() {
-        ReportDataset dataset = dataset(120);
-        ResultArtifact expired = artifact("artifact-1", NOW.minusSeconds(1));
-        when(artifactMapper.selectOne(any())).thenReturn(expired);
-        when(workflowRunMapper.selectOne(any())).thenReturn(workflowRun());
-
-        assertThatThrownBy(() -> service.create(command(
-                dataset,
-                Map.of("year", 2026),
-                result(DatasetExecutionStatus.SUCCESS, true, safeFacts(Map.of()), "run-1", "artifact-1")
-        )))
-                .isInstanceOf(BusinessException.class)
-                .hasMessageContaining("过期");
-        verify(snapshotMapper, never()).insert(any(BusinessSnapshot.class));
-    }
-
-    @Test
-    void shouldValidateSourceSnapshotOwnershipAndExpiry() {
-        ReportDataset dataset = dataset(120);
-        BusinessSnapshot source = new BusinessSnapshot();
-        source.setSnapshotId("source-1");
-        source.setUserId("another-user");
-        source.setSessionId("session-1");
-        source.setSubjectType("PROJECT");
-        source.setSubjectId("project-1");
-        source.setDatasetCode("CONTRACT");
-        source.setStatus("COMPLETE");
-        source.setExpiresAt(NOW.plusHours(1));
-        when(snapshotMapper.selectOne(any())).thenReturn(source);
-
-        CreateCommand command = new CreateCommand(
-                "user-1",
-                "session-1",
-                "PROJECT",
-                "project-1",
-                dataset,
-                Map.of("year", 2026),
-                "source-1",
-                List.of(item(result(
-                        DatasetExecutionStatus.SUCCESS,
-                        true,
-                        safeFacts(Map.of()),
-                        null,
-                        null
-                )))
-        );
-
-        assertThatThrownBy(() -> service.create(command))
-                .isInstanceOf(BusinessException.class)
-                .hasMessageContaining("来源快照");
-        verify(snapshotMapper, never()).insert(any(BusinessSnapshot.class));
-    }
-
-    @Test
-    void shouldMapTerminalItemStatusesAndSnapshotCompleteness() {
-        stubSuccessfulInsert();
-        ReportDataset dataset = dataset(120);
-        when(workflowRunMapper.selectOne(any())).thenReturn(workflowRun());
-        CreateCommand command = new CreateCommand(
-                "user-1",
-                "session-1",
-                "PROJECT",
-                "project-1",
-                dataset,
-                Map.of("year", 2026),
-                null,
-                List.of(
-                        item(result(DatasetExecutionStatus.SUCCESS, true, safeFacts(Map.of("x", 1)), "run-1", null)),
-                        new ItemCommand(
-                                "employee-2",
-                                "DIRECT",
-                                result(DatasetExecutionStatus.TIMEOUT, false, Map.of(), null, null),
-                                1,
-                                0,
-                                1
-                        )
-                )
-        );
-
-        BusinessSnapshot snapshot = service.create(command);
-
-        assertThat(snapshot.getStatus()).isEqualTo("PARTIAL_SUCCESS");
-        assertThat(snapshot.getDataComplete()).isFalse();
-        ArgumentCaptor<BusinessSnapshotItem> itemCaptor =
-                ArgumentCaptor.forClass(BusinessSnapshotItem.class);
-        verify(itemMapper, org.mockito.Mockito.times(2)).insert(itemCaptor.capture());
-        assertThat(itemCaptor.getAllValues())
-                .extracting(BusinessSnapshotItem::getStatus)
-                .containsExactly("SUCCESS", "TIMEOUT");
-    }
-
-    @Test
-    void shouldRejectRestrictedAndNonTerminalItems() {
-        ReportDataset dataset = dataset(120);
-
-        assertThatThrownBy(() -> service.create(command(
-                dataset,
-                Map.of("year", 2026),
-                result(DatasetExecutionStatus.DENIED, false, Map.of(), null, null)
-        )))
-                .isInstanceOf(BusinessException.class)
-                .hasMessageContaining("无权");
-        assertThatThrownBy(() -> service.create(command(
-                dataset,
-                Map.of("year", 2026),
-                result(DatasetExecutionStatus.RUNNING, false, Map.of(), null, null)
-        )))
-                .isInstanceOf(BusinessException.class)
-                .hasMessageContaining("终态");
-        verify(snapshotMapper, never()).insert(any(BusinessSnapshot.class));
-    }
-
-    @Test
-    void shouldResolveActualWorkflowVersionWithoutArtifact() {
-        stubSuccessfulInsert();
-        ReportDataset dataset = dataset(120);
-        when(workflowRunMapper.selectOne(any())).thenReturn(workflowRun());
-
-        service.create(command(
-                dataset,
-                Map.of("year", 2026),
-                result(
-                        DatasetExecutionStatus.SUCCESS,
-                        true,
-                        safeFacts(Map.of("amount", 12)),
-                        "run-1",
-                        null
-                )
-        ));
-
+        assertThat(snapshot.getStatus()).isEqualTo("COMPLETE");
+        assertThat(snapshot.getConfigChecksum()).isEqualTo(DATASET_CHECKSUM);
+        assertThat(snapshot.getFieldPolicyChecksum()).isEqualTo(POLICY_CHECKSUM);
+        assertThat(snapshot.getQueryHash()).isEqualTo(queryHash(query()));
+        assertThat(snapshot.getFactsJson()).contains("amount").doesNotContain("rawResponse");
         ArgumentCaptor<BusinessSnapshotItem> itemCaptor =
                 ArgumentCaptor.forClass(BusinessSnapshotItem.class);
         verify(itemMapper).insert(itemCaptor.capture());
         assertThat(itemCaptor.getValue().getWorkflowVersionId()).isEqualTo(7L);
         assertThat(itemCaptor.getValue().getWorkflowConfigChecksum())
-                .isEqualTo("workflow-checksum");
+                .isEqualTo(WORKFLOW_CHECKSUM);
     }
 
     @Test
-    void shouldCreateFullV13RuntimeSchema() throws Exception {
+    void shouldRejectSourceConfigurationQueryAndSubjectMismatch() {
+        stubCurrentConfiguration(120);
+        DatasetExecutionSource wrongConfig = source(query(), 7L, "d".repeat(64), POLICY_CHECKSUM);
+        assertRejected(result(wrongConfig, DatasetExecutionStatus.SUCCESS, safeFacts(), "run-1", null));
+
+        DatasetExecutionSource wrongPolicy = source(query(), 7L, DATASET_CHECKSUM, "d".repeat(64));
+        assertRejected(result(wrongPolicy, DatasetExecutionStatus.SUCCESS, safeFacts(), "run-1", null));
+
+        DatasetExecutionSource wrongQuery = source(Map.of("year", 2025), 7L, DATASET_CHECKSUM, POLICY_CHECKSUM);
+        assertRejected(result(wrongQuery, DatasetExecutionStatus.SUCCESS, safeFacts(), "run-1", null));
+
+        DatasetExecutionSource wrongSubject = new DatasetExecutionSource(
+                "user-1", "session-1", BusinessSubjectType.PERSON, "project-1",
+                "CONTRACT", queryHash(query()), "contract.query", 7L,
+                DATASET_CHECKSUM, POLICY_CHECKSUM
+        );
+        assertRejected(result(wrongSubject, DatasetExecutionStatus.SUCCESS, safeFacts(), "run-1", null));
+
+        DatasetExecutionSource wrongWorkflow = new DatasetExecutionSource(
+                "user-1", "session-1", BusinessSubjectType.PROJECT, "project-1",
+                "CONTRACT", queryHash(query()), "other.query", 7L,
+                DATASET_CHECKSUM, POLICY_CHECKSUM
+        );
+        assertRejected(result(wrongWorkflow, DatasetExecutionStatus.SUCCESS, safeFacts(), "run-1", null));
+        verify(snapshotMapper, never()).insert(any(BusinessSnapshot.class));
+    }
+
+    @Test
+    void shouldRejectForgedFactCodeInAnySafeChannel() {
+        stubCurrentConfiguration(120);
+        Map<String, Object> forged = Map.of(
+                "calculation", Map.of("amount", 1),
+                "display", Map.of("rawSalary", 99),
+                "export", Map.of("amount", 1),
+                "model", Map.of("amount", 1)
+        );
+
+        assertThatThrownBy(() -> service.create(command(
+                query(),
+                List.of(item(result(
+                        source(query(), 7L, DATASET_CHECKSUM, POLICY_CHECKSUM),
+                        DatasetExecutionStatus.SUCCESS, forged, "run-1", null
+                )))
+        ))).isInstanceOf(BusinessException.class).hasMessageContaining("字段策略");
+    }
+
+    @Test
+    void shouldLockSourceSnapshotAndPreventDerivedExpiryExtension() {
+        stubCurrentConfiguration(120);
+        stubSuccessfulInsert();
+        when(workflowRunMapper.selectOne(any())).thenReturn(workflowRun("SUCCESS"));
+        when(snapshotMapper.selectOne(any())).thenReturn(sourceSnapshot(NOW.plusMinutes(10)));
+
+        BusinessSnapshot created = service.create(new CreateCommand(
+                "user-1", "session-1", BusinessSubjectType.PROJECT, "project-1",
+                "CONTRACT", query(), "source-1",
+                List.of(item(successResult(query(), "run-1", null)))
+        ));
+
+        assertThat(created.getExpiresAt()).isEqualTo(NOW.plusMinutes(10));
+        ArgumentCaptor<LambdaQueryWrapper<BusinessSnapshot>> wrapperCaptor =
+                ArgumentCaptor.forClass(LambdaQueryWrapper.class);
+        verify(snapshotMapper).selectOne(wrapperCaptor.capture());
+        SharedString lastSql = (SharedString) ReflectionTestUtils.getField(
+                wrapperCaptor.getValue(), "lastSql"
+        );
+        assertThat(lastSql).isNotNull();
+        assertThat(lastSql.getStringValue()).containsIgnoringCase("FOR UPDATE");
+    }
+
+    @Test
+    void shouldRejectSourceSnapshotWhenDatasetChecksumChanged() {
+        stubCurrentConfiguration(120);
+        BusinessSnapshot source = sourceSnapshot(NOW.plusMinutes(10));
+        source.setConfigChecksum("d".repeat(64));
+        when(snapshotMapper.selectOne(any())).thenReturn(source);
+
+        assertThatThrownBy(() -> service.create(new CreateCommand(
+                "user-1", "session-1", BusinessSubjectType.PROJECT, "project-1",
+                "CONTRACT", query(), "source-1",
+                List.of(item(successResult(query(), "run-1", null)))
+        ))).isInstanceOf(BusinessException.class).hasMessageContaining("来源快照");
+    }
+
+    @Test
+    void shouldCreateFailedSnapshotWhenEveryItemFailedOrTimedOut() {
+        stubCurrentConfiguration(120);
+        stubSuccessfulInsert();
+        when(workflowRunMapper.selectOne(any())).thenReturn(workflowRun("FAILED"));
+        DatasetExecutionSource source = source(query(), 7L, DATASET_CHECKSUM, POLICY_CHECKSUM);
+
+        BusinessSnapshot snapshot = service.create(command(query(), List.of(
+                item(result(source, DatasetExecutionStatus.FAILED, Map.of(), "run-1", null)),
+                new ItemCommand(
+                        "batch-2", AssociationType.DIRECT,
+                        result(source, DatasetExecutionStatus.TIMEOUT, Map.of(), null, null),
+                        1, 0, 1
+                )
+        )));
+
+        assertThat(snapshot.getStatus()).isEqualTo("FAILED");
+        assertThat(snapshot.getDataComplete()).isFalse();
+        assertThat(snapshot.getFactsJson()).isEqualTo("{}");
+    }
+
+    @Test
+    void shouldRejectSnapshotWithoutAnyVerifiableWorkflowRun() {
+        stubCurrentConfiguration(120);
+        DatasetExecutionSource source = source(query(), null, DATASET_CHECKSUM, POLICY_CHECKSUM);
+
+        assertThatThrownBy(() -> service.create(command(query(), List.of(
+                item(result(source, DatasetExecutionStatus.FAILED, Map.of(), null, null)),
+                new ItemCommand(
+                        "batch-2", AssociationType.DIRECT,
+                        result(source, DatasetExecutionStatus.TIMEOUT, Map.of(), null, null),
+                        1, 0, 1
+                )
+        )))).isInstanceOf(BusinessException.class)
+                .hasMessageContaining("工作流运行引用");
+    }
+
+    @Test
+    void shouldCreatePartialSnapshotForMixedTerminalResults() {
+        stubCurrentConfiguration(120);
+        stubSuccessfulInsert();
+        when(workflowRunMapper.selectOne(any())).thenReturn(workflowRun("SUCCESS"));
+        DatasetExecutionSource source = source(query(), 7L, DATASET_CHECKSUM, POLICY_CHECKSUM);
+
+        BusinessSnapshot snapshot = service.create(command(query(), List.of(
+                item(successResult(query(), "run-1", null)),
+                new ItemCommand(
+                        "batch-2", AssociationType.DIRECT,
+                        result(source, DatasetExecutionStatus.FAILED, Map.of(), null, null),
+                        1, 0, 1
+                )
+        )));
+
+        assertThat(snapshot.getStatus()).isEqualTo("PARTIAL_SUCCESS");
+        assertThat(snapshot.getDataComplete()).isFalse();
+    }
+
+    @Test
+    void shouldRejectFailedRunStatusAndFailedArtifactContradictions() {
+        stubCurrentConfiguration(120);
+        when(workflowRunMapper.selectOne(any())).thenReturn(workflowRun("SUCCESS"));
+        DatasetExecutionSource source = source(query(), 7L, DATASET_CHECKSUM, POLICY_CHECKSUM);
+        assertThatThrownBy(() -> service.create(command(query(), List.of(item(result(
+                source, DatasetExecutionStatus.FAILED, Map.of(), "run-1", null
+        )))))).isInstanceOf(BusinessException.class).hasMessageContaining("状态");
+
+        assertThatThrownBy(() -> service.create(command(query(), List.of(item(result(
+                source, DatasetExecutionStatus.TIMEOUT, Map.of(), null, "artifact-1"
+        )))))).isInstanceOf(BusinessException.class).hasMessageContaining("结果制品");
+    }
+
+    @Test
+    void shouldAllowSuccessfulRunForFactMappingFailureOnly() {
+        stubCurrentConfiguration(120);
+        stubSuccessfulInsert();
+        when(workflowRunMapper.selectOne(any())).thenReturn(workflowRun("SUCCESS"));
+        DatasetExecutionSource source = source(query(), 7L, DATASET_CHECKSUM, POLICY_CHECKSUM);
+
+        BusinessSnapshot snapshot = service.create(command(query(), List.of(item(result(
+                source, DatasetExecutionStatus.FAILED, Map.of(), "run-1", null,
+                "FACT_MAPPING_FAILED"
+        )))));
+
+        assertThat(snapshot.getStatus()).isEqualTo("FAILED");
+        verify(itemMapper).insert(any(BusinessSnapshotItem.class));
+    }
+
+    @Test
+    void shouldUseArtifactDatasetAndGlobalExpiryMinimum() {
+        stubCurrentConfiguration(1440);
+        stubSuccessfulInsert();
+        when(workflowRunMapper.selectOne(any())).thenReturn(workflowRun("SUCCESS"));
+        when(artifactMapper.selectOne(any())).thenReturn(artifact(NOW.plusMinutes(12)));
+
+        BusinessSnapshot snapshot = service.create(command(
+                query(),
+                List.of(item(successResult(query(), "run-1", "artifact-1")))
+        ));
+        assertThat(snapshot.getExpiresAt()).isEqualTo(NOW.plusMinutes(12));
+    }
+
+    @Test
+    void shouldRejectInvalidLengthsAndChecksumsBeforeInsert() {
+        ReportDataset invalid = dataset(120);
+        invalid.setConfigChecksum("short");
+        when(datasetMapper.selectOne(any())).thenReturn(invalid);
+        assertThatThrownBy(() -> service.create(command(
+                query(), List.of(item(successResult(query(), "run-1", null)))
+        ))).isInstanceOf(BusinessException.class).hasMessageContaining("校验和");
+
+        stubCurrentConfiguration(120);
+        assertThatThrownBy(() -> service.create(command(
+                query(),
+                List.of(new ItemCommand(
+                        "x".repeat(129), AssociationType.DIRECT,
+                        successResult(query(), "run-1", null), 1, 1, 0
+                ))
+        ))).isInstanceOf(BusinessException.class).hasMessageContaining("itemKey");
+        verify(snapshotMapper, never()).insert(any(BusinessSnapshot.class));
+    }
+
+    @Test
+    void shouldRejectFactsBeyondConfiguredUtf8ByteLimit() {
+        service = service(80, 1000);
+        stubCurrentConfiguration(120);
+        when(workflowRunMapper.selectOne(any())).thenReturn(workflowRun("SUCCESS"));
+        Map<String, Object> facts = safeFacts("金额".repeat(100));
+
+        assertThatThrownBy(() -> service.create(command(query(), List.of(item(result(
+                source(query(), 7L, DATASET_CHECKSUM, POLICY_CHECKSUM),
+                DatasetExecutionStatus.SUCCESS, facts, "run-1", null
+        )))))).isInstanceOf(BusinessException.class).hasMessageContaining("ResultArtifact");
+    }
+
+    @Test
+    void shouldRejectQueryBeyondConfiguredUtf8ByteLimit() {
+        service = service(256 * 1024, 80, 1000);
+        stubCurrentConfiguration(120);
+        when(workflowRunMapper.selectOne(any())).thenReturn(workflowRun("FAILED"));
+        Map<String, Object> largeQuery = Map.of("keyword", "项目".repeat(100));
+        DatasetExecutionSource source = source(
+                largeQuery, 7L, DATASET_CHECKSUM, POLICY_CHECKSUM
+        );
+
+        assertThatThrownBy(() -> service.create(command(
+                largeQuery,
+                List.of(item(result(
+                        source, DatasetExecutionStatus.FAILED, Map.of(), "run-1", null
+                )))
+        ))).isInstanceOf(BusinessException.class).hasMessageContaining("查询条件");
+    }
+
+    @Test
+    void shouldFailClosedWhenFieldPolicyBooleanIsNull() {
+        when(datasetMapper.selectOne(any())).thenReturn(dataset(120));
+        ReportDatasetField invalid = field();
+        invalid.setModelVisible(null);
+        when(datasetFieldMapper.selectList(any())).thenReturn(List.of(invalid));
+
+        assertThatThrownBy(() -> service.create(command(
+                query(),
+                List.of(item(successResult(query(), "run-1", null)))
+        ))).isInstanceOf(BusinessException.class).hasMessageContaining("布尔值");
+    }
+
+    @Test
+    void shouldAllowMoreThanTwoHundredItemsButRejectConfiguredMaximum() {
+        service = service(256 * 1024, 201);
+        List<ItemCommand> items = new ArrayList<>();
+        DatasetExecutionSource source = source(query(), 7L, DATASET_CHECKSUM, POLICY_CHECKSUM);
+        for (int index = 0; index < 202; index++) {
+            items.add(new ItemCommand(
+                    "item-" + index, AssociationType.DIRECT,
+                    result(source, DatasetExecutionStatus.FAILED, Map.of(), null, null),
+                    1, 0, 1
+            ));
+        }
+
+        assertThatThrownBy(() -> service.create(command(query(), items)))
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("201");
+    }
+
+    @Test
+    void shouldCreateFullV13RuntimeSchemaWithoutDuplicateSectionIndex() throws Exception {
         try (InputStream input = getClass().getResourceAsStream(
                 "/db/migration/V13__create_business_snapshot_and_report_task.sql"
         )) {
@@ -343,28 +378,37 @@ class BusinessSnapshotServiceTest {
                     "CREATE TABLE ai_business_snapshot_item",
                     "CREATE TABLE ai_composite_report_task",
                     "CREATE TABLE ai_composite_report_section",
-                    "UNIQUE KEY uk_report_request_key",
-                    "KEY idx_snapshot_owner_subject",
-                    "KEY idx_report_task_claim"
+                    "RUNNING",
+                    "RETRY",
+                    "CANCELLED"
             );
-            assertThat(sql).doesNotContain("raw_response", "authorization", "token");
+            assertThat(count(sql, "idx_report_section_order")).isEqualTo(0);
+            assertThat(sql).contains("UNIQUE KEY uk_report_section_order");
         }
     }
 
-    private CreateCommand command(
-            ReportDataset dataset,
-            Map<String, Object> query,
-            DatasetExecutionResult result) {
-        return new CreateCommand(
-                "user-1",
-                "session-1",
-                "PROJECT",
-                "project-1",
-                dataset,
-                query,
-                null,
-                List.of(item(result))
+    private BusinessSnapshotService service(int maxFactBytes, int maxItems) {
+        return service(maxFactBytes, 64 * 1024, maxItems);
+    }
+
+    private BusinessSnapshotService service(
+            int maxFactBytes,
+            int maxQueryBytes,
+            int maxItems) {
+        Clock clock = Clock.fixed(
+                Instant.parse("2026-09-02T02:00:00Z"),
+                ZoneId.of("Asia/Shanghai")
         );
+        return new BusinessSnapshotServiceImpl(
+                snapshotMapper, itemMapper, artifactMapper, workflowRunMapper,
+                datasetMapper, datasetFieldMapper, new ObjectMapper(), clock,
+                maxFactBytes, maxQueryBytes, maxItems
+        );
+    }
+
+    private void stubCurrentConfiguration(int ttlMinutes) {
+        when(datasetMapper.selectOne(any())).thenReturn(dataset(ttlMinutes));
+        when(datasetFieldMapper.selectList(any())).thenReturn(List.of(field()));
     }
 
     private void stubSuccessfulInsert() {
@@ -372,24 +416,132 @@ class BusinessSnapshotServiceTest {
         when(itemMapper.insert(any(BusinessSnapshotItem.class))).thenReturn(1);
     }
 
+    private void assertRejected(DatasetExecutionResult result) {
+        assertThatThrownBy(() -> service.create(command(query(), List.of(item(result)))))
+                .isInstanceOf(BusinessException.class);
+    }
+
+    private CreateCommand command(Map<String, Object> canonicalQuery, List<ItemCommand> items) {
+        return new CreateCommand(
+                "user-1", "session-1", BusinessSubjectType.PROJECT, "project-1",
+                "CONTRACT", canonicalQuery, null, items
+        );
+    }
+
     private ItemCommand item(DatasetExecutionResult result) {
-        return new ItemCommand("dataset", "DIRECT", result, 1, 1, 0);
+        return new ItemCommand("dataset", AssociationType.DIRECT, result, 1, 1, 0);
+    }
+
+    private DatasetExecutionResult successResult(
+            Map<String, Object> canonicalQuery,
+            String runId,
+            String artifactId) {
+        return result(
+                source(canonicalQuery, 7L, DATASET_CHECKSUM, POLICY_CHECKSUM),
+                DatasetExecutionStatus.SUCCESS,
+                safeFacts(),
+                runId,
+                artifactId
+        );
+    }
+
+    private DatasetExecutionResult result(
+            DatasetExecutionSource source,
+            DatasetExecutionStatus status,
+            Map<String, Object> facts,
+            String runId,
+            String artifactId) {
+        return result(source, status, facts, runId, artifactId, null);
+    }
+
+    private DatasetExecutionResult result(
+            DatasetExecutionSource source,
+            DatasetExecutionStatus status,
+            Map<String, Object> facts,
+            String runId,
+            String artifactId,
+            String safeErrorCode) {
+        return new DatasetExecutionResult(
+                source, status, status == DatasetExecutionStatus.SUCCESS,
+                facts, runId, artifactId, safeErrorCode, null
+        );
+    }
+
+    private DatasetExecutionSource source(
+            Map<String, Object> canonicalQuery,
+            Long workflowVersionId,
+            String datasetChecksum,
+            String policyChecksum) {
+        return new DatasetExecutionSource(
+                "user-1", "session-1", BusinessSubjectType.PROJECT, "project-1",
+                "CONTRACT", queryHash(canonicalQuery), "contract.query", workflowVersionId,
+                datasetChecksum, policyChecksum
+        );
+    }
+
+    private String queryHash(Map<String, Object> canonicalQuery) {
+        return ContentHashUtils.sha256(
+                ReportDatasetValidator.canonicalSafeValue(canonicalQuery)
+        );
+    }
+
+    private Map<String, Object> query() {
+        return Map.of("year", 2026);
+    }
+
+    private Map<String, Object> safeFacts() {
+        return safeFacts(8600);
+    }
+
+    private Map<String, Object> safeFacts(Object amount) {
+        Map<String, Object> channel = Map.of("amount", amount);
+        return Map.of(
+                "calculation", channel,
+                "display", channel,
+                "export", channel,
+                "model", channel
+        );
     }
 
     private ReportDataset dataset(int ttlMinutes) {
         ReportDataset dataset = new ReportDataset();
+        dataset.setId(1L);
         dataset.setDatasetCode("CONTRACT");
         dataset.setQueryWorkflowCode("contract.query");
         dataset.setTtlMinutes(ttlMinutes);
-        dataset.setConfigChecksum("config-checksum");
-        dataset.setFieldPolicyChecksum("policy-checksum");
+        dataset.setConfigChecksum(DATASET_CHECKSUM);
+        dataset.setFieldPolicyChecksum(POLICY_CHECKSUM);
         dataset.setEnabled(true);
         return dataset;
     }
 
-    private ResultArtifact artifact(String id, LocalDateTime expiresAt) {
+    private ReportDatasetField field() {
+        ReportDatasetField field = new ReportDatasetField();
+        field.setDatasetId(1L);
+        field.setFactCode("amount");
+        field.setCalculable(true);
+        field.setDisplayable(true);
+        field.setExportable(true);
+        field.setModelVisible(true);
+        return field;
+    }
+
+    private WorkflowRun workflowRun(String status) {
+        WorkflowRun run = new WorkflowRun();
+        run.setRunId("run-1");
+        run.setUserId("user-1");
+        run.setWorkflowCode("contract.query");
+        run.setWorkflowVersionId(7L);
+        run.setWorkflowVersionNo(3);
+        run.setConfigChecksum(WORKFLOW_CHECKSUM);
+        run.setStatus(status);
+        run.setErrorCode("FAILED".equals(status) ? "DOWNSTREAM_FAILURE" : null);
+        return run;
+    }
+
+    private ResultArtifact artifact(LocalDateTime expiresAt) {
         ResultArtifact artifact = new ResultArtifact();
-        artifact.setId(id);
+        artifact.setId("artifact-1");
         artifact.setRunId("run-1");
         artifact.setSessionId("session-1");
         artifact.setUserId("user-1");
@@ -400,42 +552,22 @@ class BusinessSnapshotServiceTest {
         return artifact;
     }
 
-    private WorkflowRun workflowRun() {
-        WorkflowRun run = new WorkflowRun();
-        run.setRunId("run-1");
-        run.setUserId("user-1");
-        run.setWorkflowCode("contract.query");
-        run.setWorkflowVersionId(7L);
-        run.setWorkflowVersionNo(3);
-        run.setConfigChecksum("workflow-checksum");
-        run.setStatus("SUCCESS");
-        return run;
+    private BusinessSnapshot sourceSnapshot(LocalDateTime expiresAt) {
+        BusinessSnapshot snapshot = new BusinessSnapshot();
+        snapshot.setSnapshotId("source-1");
+        snapshot.setUserId("user-1");
+        snapshot.setSessionId("session-1");
+        snapshot.setSubjectType("PROJECT");
+        snapshot.setSubjectId("project-1");
+        snapshot.setDatasetCode("CONTRACT");
+        snapshot.setConfigChecksum(DATASET_CHECKSUM);
+        snapshot.setFieldPolicyChecksum(POLICY_CHECKSUM);
+        snapshot.setStatus("COMPLETE");
+        snapshot.setExpiresAt(expiresAt);
+        return snapshot;
     }
 
-    private Map<String, Object> safeFacts(Map<String, Object> visibleFacts) {
-        return Map.of(
-                "calculation", visibleFacts,
-                "display", visibleFacts,
-                "export", visibleFacts,
-                "model", visibleFacts
-        );
-    }
-
-    private DatasetExecutionResult result(
-            DatasetExecutionStatus status,
-            boolean complete,
-            Map<String, Object> facts,
-            String runId,
-            String artifactId) {
-        return new DatasetExecutionResult(
-                "CONTRACT",
-                status,
-                complete,
-                facts,
-                runId,
-                artifactId,
-                null,
-                null
-        );
+    private int count(String value, String needle) {
+        return value.split(needle, -1).length - 1;
     }
 }

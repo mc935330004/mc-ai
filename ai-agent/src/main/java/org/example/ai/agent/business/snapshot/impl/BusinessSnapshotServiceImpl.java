@@ -6,7 +6,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import org.example.ai.agent.business.dataset.ReportDatasetValidator;
 import org.example.ai.agent.business.dataset.entity.ReportDataset;
+import org.example.ai.agent.business.dataset.entity.ReportDatasetField;
+import org.example.ai.agent.business.dataset.mapper.ReportDatasetFieldMapper;
+import org.example.ai.agent.business.dataset.mapper.ReportDatasetMapper;
 import org.example.ai.agent.business.dataset.model.DatasetExecutionResult;
+import org.example.ai.agent.business.dataset.model.DatasetExecutionSource;
 import org.example.ai.agent.business.model.DatasetExecutionStatus;
 import org.example.ai.agent.business.snapshot.BusinessSnapshotService;
 import org.example.ai.agent.business.snapshot.entity.BusinessSnapshot;
@@ -21,20 +25,24 @@ import org.example.ai.agent.workflow.answer.artifact.mapper.ResultArtifactMapper
 import org.example.ai.agent.workflow.run.entity.WorkflowRun;
 import org.example.ai.agent.workflow.run.mapper.WorkflowRunMapper;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 /**
  * 安全业务快照持久化实现。
@@ -42,20 +50,23 @@ import java.util.UUID;
 @Service
 public class BusinessSnapshotServiceImpl implements BusinessSnapshotService {
 
-    private static final int MAX_TTL_MINUTES = 24 * 60;
-    private static final Set<String> SAFE_FACT_CHANNELS = Set.of(
-            "calculation",
-            "display",
-            "export",
-            "model"
+    private static final int GLOBAL_MAX_TTL_MINUTES = 24 * 60;
+    private static final Pattern SHA256 = Pattern.compile("[0-9a-fA-F]{64}");
+    private static final Set<String> FACT_CHANNELS = Set.of(
+            "calculation", "display", "export", "model"
     );
 
     private final BusinessSnapshotMapper snapshotMapper;
     private final BusinessSnapshotItemMapper itemMapper;
     private final ResultArtifactMapper artifactMapper;
     private final WorkflowRunMapper workflowRunMapper;
+    private final ReportDatasetMapper datasetMapper;
+    private final ReportDatasetFieldMapper datasetFieldMapper;
     private final ObjectMapper objectMapper;
     private final Clock clock;
+    private final int maxFactBytes;
+    private final int maxQueryBytes;
+    private final int maxItems;
 
     @Autowired
     public BusinessSnapshotServiceImpl(
@@ -63,258 +74,384 @@ public class BusinessSnapshotServiceImpl implements BusinessSnapshotService {
             BusinessSnapshotItemMapper itemMapper,
             ResultArtifactMapper artifactMapper,
             WorkflowRunMapper workflowRunMapper,
-            ObjectMapper objectMapper) {
+            ReportDatasetMapper datasetMapper,
+            ReportDatasetFieldMapper datasetFieldMapper,
+            ObjectMapper objectMapper,
+            @Value("${ai.business.snapshot.max-fact-bytes:262144}") int maxFactBytes,
+            @Value("${ai.business.snapshot.max-query-bytes:65536}") int maxQueryBytes,
+            @Value("${ai.business.snapshot.max-items:1000}") int maxItems) {
         this(
-                snapshotMapper,
-                itemMapper,
-                artifactMapper,
-                workflowRunMapper,
-                objectMapper,
-                Clock.systemDefaultZone()
+                snapshotMapper, itemMapper, artifactMapper, workflowRunMapper,
+                datasetMapper, datasetFieldMapper, objectMapper,
+                Clock.systemDefaultZone(), maxFactBytes, maxQueryBytes, maxItems
         );
     }
 
     /**
-     * 可控时钟构造器用于验证有效期边界，生产环境仍由 Spring 使用上方构造器。
+     * 测试构造器允许固定时钟和容量边界，生产配置仍由上方构造器注入。
      */
     public BusinessSnapshotServiceImpl(
             BusinessSnapshotMapper snapshotMapper,
             BusinessSnapshotItemMapper itemMapper,
             ResultArtifactMapper artifactMapper,
             WorkflowRunMapper workflowRunMapper,
+            ReportDatasetMapper datasetMapper,
+            ReportDatasetFieldMapper datasetFieldMapper,
             ObjectMapper objectMapper,
-            Clock clock) {
+            Clock clock,
+            int maxFactBytes,
+            int maxQueryBytes,
+            int maxItems) {
         this.snapshotMapper = Objects.requireNonNull(snapshotMapper, "snapshotMapper不能为空");
         this.itemMapper = Objects.requireNonNull(itemMapper, "itemMapper不能为空");
         this.artifactMapper = Objects.requireNonNull(artifactMapper, "artifactMapper不能为空");
         this.workflowRunMapper = Objects.requireNonNull(workflowRunMapper, "workflowRunMapper不能为空");
+        this.datasetMapper = Objects.requireNonNull(datasetMapper, "datasetMapper不能为空");
+        this.datasetFieldMapper = Objects.requireNonNull(datasetFieldMapper, "datasetFieldMapper不能为空");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper不能为空");
         this.clock = Objects.requireNonNull(clock, "clock不能为空");
+        if (maxFactBytes <= 0 || maxQueryBytes <= 0 || maxItems <= 0) {
+            throw new IllegalArgumentException("快照容量限制必须大于0");
+        }
+        this.maxFactBytes = maxFactBytes;
+        this.maxQueryBytes = maxQueryBytes;
+        this.maxItems = maxItems;
     }
 
     /**
-     * 元数据和全部执行项必须在同一事务完成，任何一项失败都不能留下半个快照。
+     * 当前配置重读、来源校验和快照写入必须处于同一事务，避免配置或来源快照并发漂移。
      */
     @Override
     @Transactional(rollbackFor = Exception.class)
     public BusinessSnapshot create(CreateCommand command) {
-        SnapshotContext context = validateCommand(command);
+        ValidatedCommand validated = validateCommand(command);
+        DatasetContext dataset = loadCurrentDataset(validated.datasetCode());
         LocalDateTime now = LocalDateTime.now(clock);
-        validateSourceSnapshot(command.sourceSnapshotId(), context, now);
-
-        List<VerifiedItem> verifiedItems = verifyItems(command.items(), context, now);
-        if (verifiedItems.stream().noneMatch(VerifiedItem::successfulExecution)) {
-            throw badRequest("快照至少需要一个已校验的成功或无数据执行项");
-        }
-
-        LocalDateTime expiresAt = calculateExpiry(context.ttlMinutes(), verifiedItems, now);
-        BusinessSnapshot snapshot = buildSnapshot(
-                command,
-                context,
-                verifiedItems,
-                now,
-                expiresAt
+        BusinessSnapshot sourceSnapshot = lockAndValidateSource(
+                validated,
+                dataset,
+                now
         );
-        if (snapshotMapper.insert(snapshot) != 1) {
-            throw new BusinessException(ErrorCode.INTERNAL_ERROR, "业务快照写入失败");
+        List<VerifiedItem> items = verifyItems(validated, dataset, now);
+        if (items.stream().noneMatch(item -> item.run() != null)) {
+            /* 无运行的失败项可参与快照，但至少需一个已校验运行锁定实际工作流版本。 */
+            throw badRequest("快照缺少可验证的工作流运行引用");
         }
-        for (VerifiedItem verified : verifiedItems) {
-            if (itemMapper.insert(toEntity(snapshot.getSnapshotId(), verified, now)) != 1) {
-                throw new BusinessException(ErrorCode.INTERNAL_ERROR, "业务快照执行项写入失败");
+
+        LocalDateTime expiresAt = calculateExpiry(dataset.ttlMinutes(), sourceSnapshot, items, now);
+        BusinessSnapshot snapshot = buildSnapshot(validated, dataset, items, expiresAt, now);
+        List<BusinessSnapshotItem> entities = items.stream()
+                .map(item -> toEntity(snapshot.getSnapshotId(), item, now))
+                .toList();
+
+        if (snapshotMapper.insert(snapshot) != 1) {
+            throw internal("业务快照写入失败");
+        }
+        for (BusinessSnapshotItem entity : entities) {
+            if (itemMapper.insert(entity) != 1) {
+                throw internal("业务快照执行项写入失败");
             }
         }
         return snapshot;
     }
 
-    private SnapshotContext validateCommand(CreateCommand command) {
-        if (command == null) {
-            throw badRequest("快照创建命令不能为空");
+    private ValidatedCommand validateCommand(CreateCommand command) {
+        if (command == null || command.subjectType() == null) {
+            throw badRequest("快照创建命令不完整");
         }
-        String userId = requireText(command.userId(), "userId不能为空");
-        String sessionId = requireText(command.sessionId(), "sessionId不能为空");
-        String subjectType = requireText(command.subjectType(), "subjectType不能为空");
-        String subjectId = requireText(command.subjectId(), "subjectId不能为空");
-        ReportDataset dataset = Objects.requireNonNull(command.dataset(), "dataset不能为空");
-        String datasetCode = requireText(dataset.getDatasetCode(), "datasetCode不能为空");
-        String workflowCode = requireText(
-                dataset.getQueryWorkflowCode(),
-                "queryWorkflowCode不能为空"
-        );
-        String configChecksum = requireChecksum(
-                dataset.getConfigChecksum(),
-                "数据集配置校验和不能为空"
-        );
-        String fieldPolicyChecksum = requireChecksum(
-                dataset.getFieldPolicyChecksum(),
-                "字段策略校验和不能为空"
-        );
-        if (!Boolean.TRUE.equals(dataset.getEnabled())) {
-            throw badRequest("数据集已停用，不能创建新快照");
-        }
-        Integer ttlMinutes = dataset.getTtlMinutes();
-        if (ttlMinutes == null || ttlMinutes < 1 || ttlMinutes > MAX_TTL_MINUTES) {
-            throw badRequest("数据集TTL必须在1至1440分钟之间");
-        }
+        String userId = requireText(command.userId(), 128, "userId");
+        String sessionId = requireText(command.sessionId(), 64, "sessionId");
+        String subjectId = requireText(command.subjectId(), 128, "subjectId");
+        String datasetCode = requireText(command.datasetCode(), 128, "datasetCode");
+        String sourceSnapshotId = optionalText(command.sourceSnapshotId(), 32, "sourceSnapshotId");
         if (command.items().isEmpty()) {
             throw badRequest("快照执行项不能为空");
         }
-        return new SnapshotContext(
+        if (command.items().size() > maxItems) {
+            throw badRequest("快照执行项不能超过" + maxItems + "个");
+        }
+        String queryHash = ContentHashUtils.sha256(
+                ReportDatasetValidator.canonicalSafeValue(command.canonicalQuery())
+        );
+        return new ValidatedCommand(
                 userId,
                 sessionId,
-                subjectType,
+                command.subjectType().name(),
                 subjectId,
+                datasetCode,
+                command.canonicalQuery(),
+                queryHash,
+                sourceSnapshotId,
+                command.items()
+        );
+    }
+
+    private DatasetContext loadCurrentDataset(String datasetCode) {
+        ReportDataset dataset = datasetMapper.selectOne(
+                Wrappers.<ReportDataset>lambdaQuery()
+                        .eq(ReportDataset::getDatasetCode, datasetCode)
+                        .eq(ReportDataset::getEnabled, true)
+                        .last("LIMIT 1")
+        );
+        if (dataset == null
+                || dataset.getId() == null
+                || !Boolean.TRUE.equals(dataset.getEnabled())
+                || !Objects.equals(dataset.getDatasetCode(), datasetCode)) {
+            throw badRequest("数据集当前不可用，请重新查询");
+        }
+        String workflowCode = requireText(
+                dataset.getQueryWorkflowCode(), 128, "queryWorkflowCode"
+        );
+        String configChecksum = requireChecksum(dataset.getConfigChecksum(), "数据集配置校验和");
+        String policyChecksum = requireChecksum(dataset.getFieldPolicyChecksum(), "字段策略校验和");
+        Integer ttlMinutes = dataset.getTtlMinutes();
+        if (ttlMinutes == null || ttlMinutes < 1 || ttlMinutes > GLOBAL_MAX_TTL_MINUTES) {
+            throw badRequest("数据集TTL必须在1至1440分钟之间");
+        }
+
+        List<ReportDatasetField> fields = datasetFieldMapper.selectList(
+                Wrappers.<ReportDatasetField>lambdaQuery()
+                        .eq(ReportDatasetField::getDatasetId, dataset.getId())
+                        .orderByAsc(ReportDatasetField::getDisplayOrder, ReportDatasetField::getId)
+        );
+        if (fields == null || fields.isEmpty()) {
+            throw badRequest("数据集字段策略不可用，请重新查询");
+        }
+        FactChannels channels = buildExpectedChannels(fields);
+        return new DatasetContext(
                 datasetCode,
                 workflowCode,
                 configChecksum,
-                fieldPolicyChecksum,
-                ttlMinutes
+                policyChecksum,
+                ttlMinutes,
+                channels
         );
     }
 
-    private void validateSourceSnapshot(
-            String sourceSnapshotId,
-            SnapshotContext context,
+    private FactChannels buildExpectedChannels(List<ReportDatasetField> fields) {
+        Set<String> allFacts = new HashSet<>();
+        Set<String> calculation = new LinkedHashSet<>();
+        Set<String> display = new LinkedHashSet<>();
+        Set<String> export = new LinkedHashSet<>();
+        Set<String> model = new LinkedHashSet<>();
+        for (ReportDatasetField field : fields) {
+            if (field == null) {
+                throw badRequest("数据集字段策略包含空项");
+            }
+            String factCode = requireText(field.getFactCode(), 128, "factCode");
+            if (!allFacts.add(factCode)) {
+                throw badRequest("数据集字段策略factCode重复");
+            }
+            if (field.getCalculable() == null
+                    || field.getDisplayable() == null
+                    || field.getExportable() == null
+                    || field.getModelVisible() == null) {
+                throw badRequest("数据集字段策略布尔值不能为空");
+            }
+            addWhen(calculation, factCode, field.getCalculable());
+            addWhen(display, factCode, field.getDisplayable());
+            addWhen(export, factCode, field.getExportable());
+            addWhen(model, factCode, field.getModelVisible());
+        }
+        return new FactChannels(
+                Set.copyOf(calculation),
+                Set.copyOf(display),
+                Set.copyOf(export),
+                Set.copyOf(model)
+        );
+    }
+
+    private void addWhen(Set<String> target, String factCode, Boolean enabled) {
+        if (Boolean.TRUE.equals(enabled)) {
+            target.add(factCode);
+        }
+    }
+
+    private BusinessSnapshot lockAndValidateSource(
+            ValidatedCommand command,
+            DatasetContext dataset,
             LocalDateTime now) {
-        if (!StringUtils.hasText(sourceSnapshotId)) {
-            return;
+        if (command.sourceSnapshotId() == null) {
+            return null;
         }
         BusinessSnapshot source = snapshotMapper.selectOne(
                 Wrappers.<BusinessSnapshot>lambdaQuery()
-                        .eq(BusinessSnapshot::getSnapshotId, sourceSnapshotId)
-                        .eq(BusinessSnapshot::getUserId, context.userId())
-                        .eq(BusinessSnapshot::getSessionId, context.sessionId())
-                        .last("LIMIT 1")
+                        .eq(BusinessSnapshot::getSnapshotId, command.sourceSnapshotId())
+                        .eq(BusinessSnapshot::getUserId, command.userId())
+                        .eq(BusinessSnapshot::getSessionId, command.sessionId())
+                        .last("LIMIT 1 FOR UPDATE")
         );
         boolean usable = source != null
-                && Objects.equals(source.getUserId(), context.userId())
-                && Objects.equals(source.getSessionId(), context.sessionId())
-                && Objects.equals(source.getSubjectType(), context.subjectType())
-                && Objects.equals(source.getSubjectId(), context.subjectId())
-                && Objects.equals(source.getDatasetCode(), context.datasetCode())
-                && Objects.equals(source.getFieldPolicyChecksum(), context.fieldPolicyChecksum())
+                && Objects.equals(source.getUserId(), command.userId())
+                && Objects.equals(source.getSessionId(), command.sessionId())
+                && Objects.equals(source.getSubjectType(), command.subjectType())
+                && Objects.equals(source.getSubjectId(), command.subjectId())
+                && Objects.equals(source.getDatasetCode(), command.datasetCode())
+                && Objects.equals(source.getConfigChecksum(), dataset.configChecksum())
+                && Objects.equals(source.getFieldPolicyChecksum(), dataset.fieldPolicyChecksum())
                 && Set.of("COMPLETE", "PARTIAL_SUCCESS").contains(source.getStatus())
                 && source.getExpiresAt() != null
                 && source.getExpiresAt().isAfter(now);
-        /*
-         * 不区分来源快照不存在与归属不匹配，避免向当前用户泄露他人快照是否存在。
-         */
+        /* 不区分不存在和归属、配置不匹配，避免泄露其他用户快照。 */
         if (!usable) {
             throw badRequest("来源快照不可用，请重新查询业务数据");
         }
+        return source;
     }
 
     private List<VerifiedItem> verifyItems(
-            List<ItemCommand> items,
-            SnapshotContext context,
+            ValidatedCommand command,
+            DatasetContext dataset,
             LocalDateTime now) {
         Set<String> itemKeys = new HashSet<>();
-        List<VerifiedItem> verified = new ArrayList<>(items.size());
-        for (ItemCommand item : items) {
+        List<VerifiedItem> verified = new ArrayList<>(command.items().size());
+        for (ItemCommand item : command.items()) {
             if (item == null || item.result() == null) {
                 throw badRequest("快照执行项及结果不能为空");
             }
-            String itemKey = requireText(item.itemKey(), "itemKey不能为空");
+            String itemKey = requireText(item.itemKey(), 128, "itemKey");
             if (!itemKeys.add(itemKey)) {
-                throw badRequest("itemKey重复：" + itemKey);
+                throw badRequest("itemKey重复");
             }
-            if (!Objects.equals(item.result().datasetCode(), context.datasetCode())) {
-                throw badRequest("执行结果与快照数据集不一致");
-            }
-            DatasetExecutionStatus executionStatus = item.result().status();
-            if (executionStatus == DatasetExecutionStatus.DENIED) {
-                throw new BusinessException(
-                        ErrorCode.FORBIDDEN,
-                        "无权执行的数据集不能创建业务快照"
-                );
-            }
-            if (!Set.of(
-                    DatasetExecutionStatus.SUCCESS,
-                    DatasetExecutionStatus.EMPTY,
-                    DatasetExecutionStatus.FAILED,
-                    DatasetExecutionStatus.TIMEOUT
-            ).contains(executionStatus)) {
-                throw badRequest("数据集执行项尚未进入可持久化终态");
-            }
-            validateSafeFacts(item.result());
-            WorkflowRun run = resolveWorkflowRun(item.result(), context);
-            ResultArtifact artifact = validateArtifact(item.result(), context, run, now);
-            verified.add(new VerifiedItem(item, persistedStatus(executionStatus), run, artifact));
+            verifySource(item.result().source(), command, dataset);
+            DatasetExecutionStatus status = requireTerminalStatus(item.result().status());
+            verifySafeFacts(item.result(), status, dataset.factChannels());
+            WorkflowRun run = verifyWorkflowRun(item.result(), status, dataset);
+            ResultArtifact artifact = verifyArtifact(item.result(), status, command, run, now);
+            verified.add(new VerifiedItem(item, itemKey, persistedStatus(status), run, artifact));
         }
         return List.copyOf(verified);
     }
 
-    private void validateSafeFacts(DatasetExecutionResult result) {
-        if (result.status() == DatasetExecutionStatus.FAILED
-                || result.status() == DatasetExecutionStatus.TIMEOUT) {
+    private void verifySource(
+            DatasetExecutionSource source,
+            ValidatedCommand command,
+            DatasetContext dataset) {
+        boolean sameSource = source != null
+                && Objects.equals(source.userId(), command.userId())
+                && Objects.equals(source.sessionId(), command.sessionId())
+                && Objects.equals(source.subjectType().name(), command.subjectType())
+                && Objects.equals(source.subjectId(), command.subjectId())
+                && Objects.equals(source.datasetCode(), command.datasetCode())
+                && Objects.equals(source.canonicalInputHash(), command.queryHash())
+                && Objects.equals(source.queryWorkflowCode(), dataset.workflowCode())
+                && Objects.equals(source.datasetConfigChecksum(), dataset.configChecksum())
+                && Objects.equals(source.fieldPolicyChecksum(), dataset.fieldPolicyChecksum());
+        if (!sameSource) {
+            throw badRequest("执行来源与当前查询或配置不一致，请重新查询");
+        }
+    }
+
+    private DatasetExecutionStatus requireTerminalStatus(DatasetExecutionStatus status) {
+        if (status == null || !Set.of(
+                DatasetExecutionStatus.SUCCESS,
+                DatasetExecutionStatus.EMPTY,
+                DatasetExecutionStatus.FAILED,
+                DatasetExecutionStatus.TIMEOUT
+        ).contains(status)) {
+            throw badRequest("数据集执行项尚未进入可持久化终态");
+        }
+        return status;
+    }
+
+    private void verifySafeFacts(
+            DatasetExecutionResult result,
+            DatasetExecutionStatus status,
+            FactChannels expected) {
+        if (status == DatasetExecutionStatus.FAILED || status == DatasetExecutionStatus.TIMEOUT) {
             if (!result.safeFacts().isEmpty()) {
                 throw badRequest("失败或超时执行项不能携带业务事实");
             }
             return;
         }
-        if (!result.safeFacts().keySet().equals(SAFE_FACT_CHANNELS)) {
-            throw badRequest("执行结果必须使用字段策略生成的四个安全事实通道");
+        if (!result.safeFacts().keySet().equals(FACT_CHANNELS)) {
+            throw badRequest("安全事实通道与字段策略不一致");
         }
-        for (Object channel : result.safeFacts().values()) {
-            if (!(channel instanceof Map<?, ?>)) {
-                throw badRequest("安全事实通道必须是Map");
-            }
+        verifyChannel(result.safeFacts().get("calculation"), expected.calculation());
+        verifyChannel(result.safeFacts().get("display"), expected.display());
+        verifyChannel(result.safeFacts().get("export"), expected.export());
+        verifyChannel(result.safeFacts().get("model"), expected.model());
+    }
+
+    private void verifyChannel(Object value, Set<String> expectedFacts) {
+        if (!(value instanceof Map<?, ?> channel)
+                || !channel.keySet().equals(expectedFacts)) {
+            throw badRequest("安全事实字段与当前字段策略不一致");
         }
     }
 
-    private WorkflowRun resolveWorkflowRun(
+    private WorkflowRun verifyWorkflowRun(
             DatasetExecutionResult result,
-            SnapshotContext context) {
+            DatasetExecutionStatus status,
+            DatasetContext dataset) {
         if (!StringUtils.hasText(result.workflowRunId())) {
-            if (result.status() == DatasetExecutionStatus.SUCCESS
-                    || result.status() == DatasetExecutionStatus.EMPTY) {
+            if (isSuccessful(status)) {
                 throw badRequest("成功或无数据执行项缺少工作流运行引用");
             }
             return null;
         }
+        requireText(result.workflowRunId(), 64, "workflowRunId");
         WorkflowRun run = workflowRunMapper.selectOne(
                 Wrappers.<WorkflowRun>lambdaQuery()
                         .eq(WorkflowRun::getRunId, result.workflowRunId())
-                        .eq(WorkflowRun::getUserId, context.userId())
-                        .eq(WorkflowRun::getWorkflowCode, context.workflowCode())
+                        .eq(WorkflowRun::getUserId, result.source().userId())
+                        .eq(WorkflowRun::getWorkflowCode, dataset.workflowCode())
                         .last("LIMIT 1")
         );
-        boolean sameExecution = run != null
-                && Objects.equals(run.getUserId(), context.userId())
-                && Objects.equals(run.getWorkflowCode(), context.workflowCode());
-        if (!sameExecution) {
-            throw badRequest("工作流运行引用不可用");
+        if (run == null
+                || !Objects.equals(run.getUserId(), result.source().userId())
+                || !Objects.equals(run.getWorkflowCode(), dataset.workflowCode())
+                || !Objects.equals(run.getWorkflowVersionId(), result.source().queryWorkflowVersionId())) {
+            throw badRequest("工作流运行引用与执行来源不一致");
         }
-        if ((result.status() == DatasetExecutionStatus.SUCCESS
-                || result.status() == DatasetExecutionStatus.EMPTY)
-                && !Set.of("SUCCESS", "PARTIAL_SUCCESS").contains(run.getStatus())) {
-            throw badRequest("工作流运行状态与数据集成功结果不一致");
+        requireText(run.getWorkflowCode(), 128, "workflowCode");
+        requireChecksum(run.getConfigChecksum(), "工作流配置校验和");
+        boolean successfulRun = Set.of("SUCCESS", "PARTIAL_SUCCESS").contains(run.getStatus());
+        if (isSuccessful(status) && !successfulRun) {
+            throw badRequest("工作流运行状态与成功结果不一致");
         }
-        requireChecksum(run.getConfigChecksum(), "工作流配置校验和不能为空");
+        /* 字段映射失败发生在查询运行成功之后，只对该错误允许成功运行引用。 */
+        boolean factMappingFailure = status == DatasetExecutionStatus.FAILED
+                && "FACT_MAPPING_FAILED".equals(result.safeErrorCode());
+        if (!isSuccessful(status)
+                && factMappingFailure != successfulRun) {
+            throw badRequest("工作流运行状态与失败结果不一致");
+        }
+        if (status == DatasetExecutionStatus.TIMEOUT
+                && StringUtils.hasText(run.getErrorCode())
+                && !run.getErrorCode().toUpperCase().contains("TIMEOUT")) {
+            throw badRequest("工作流运行状态与超时结果不一致");
+        }
         return run;
     }
 
-    private ResultArtifact validateArtifact(
+    private ResultArtifact verifyArtifact(
             DatasetExecutionResult result,
-            SnapshotContext context,
+            DatasetExecutionStatus status,
+            ValidatedCommand command,
             WorkflowRun run,
             LocalDateTime now) {
         if (!StringUtils.hasText(result.resultArtifactId())) {
             return null;
         }
+        if (!isSuccessful(status)) {
+            throw badRequest("失败或超时执行项不能引用结果制品");
+        }
+        requireText(result.resultArtifactId(), 32, "resultArtifactId");
         if (run == null) {
             throw badRequest("结果制品缺少对应工作流运行引用");
         }
         ResultArtifact artifact = artifactMapper.selectOne(
                 Wrappers.<ResultArtifact>lambdaQuery()
                         .eq(ResultArtifact::getId, result.resultArtifactId())
-                        .eq(ResultArtifact::getUserId, context.userId())
-                        .eq(ResultArtifact::getSessionId, context.sessionId())
+                        .eq(ResultArtifact::getUserId, command.userId())
+                        .eq(ResultArtifact::getSessionId, command.sessionId())
                         .last("LIMIT 1")
         );
         boolean sameExecution = artifact != null
-                && Objects.equals(artifact.getUserId(), context.userId())
-                && Objects.equals(artifact.getSessionId(), context.sessionId())
-                && Objects.equals(artifact.getStatus(), "COMPLETE")
+                && Objects.equals(artifact.getUserId(), command.userId())
+                && Objects.equals(artifact.getSessionId(), command.sessionId())
+                && "COMPLETE".equals(artifact.getStatus())
                 && Objects.equals(artifact.getRunId(), run.getRunId())
                 && Objects.equals(artifact.getWorkflowCode(), run.getWorkflowCode())
                 && Objects.equals(artifact.getWorkflowVersionId(), run.getWorkflowVersionId());
@@ -329,16 +466,15 @@ public class BusinessSnapshotServiceImpl implements BusinessSnapshotService {
 
     private LocalDateTime calculateExpiry(
             int ttlMinutes,
+            BusinessSnapshot sourceSnapshot,
             List<VerifiedItem> items,
             LocalDateTime now) {
-        LocalDateTime expiresAt = now.plusHours(24);
-        LocalDateTime datasetExpiry = now.plusMinutes(ttlMinutes);
-        if (datasetExpiry.isBefore(expiresAt)) {
-            expiresAt = datasetExpiry;
+        LocalDateTime expiresAt = now.plusMinutes(Math.min(ttlMinutes, GLOBAL_MAX_TTL_MINUTES));
+        if (sourceSnapshot != null && sourceSnapshot.getExpiresAt().isBefore(expiresAt)) {
+            expiresAt = sourceSnapshot.getExpiresAt();
         }
         for (VerifiedItem item : items) {
-            if (item.artifact() != null
-                    && item.artifact().getExpiresAt().isBefore(expiresAt)) {
+            if (item.artifact() != null && item.artifact().getExpiresAt().isBefore(expiresAt)) {
                 expiresAt = item.artifact().getExpiresAt();
             }
         }
@@ -346,38 +482,48 @@ public class BusinessSnapshotServiceImpl implements BusinessSnapshotService {
     }
 
     private BusinessSnapshot buildSnapshot(
-            CreateCommand command,
-            SnapshotContext context,
+            ValidatedCommand command,
+            DatasetContext dataset,
             List<VerifiedItem> items,
-            LocalDateTime now,
-            LocalDateTime expiresAt) {
+            LocalDateTime expiresAt,
+            LocalDateTime now) {
         Map<String, Object> facts = new LinkedHashMap<>();
         for (VerifiedItem item : items) {
-            if (item.successfulExecution()) {
-                facts.put(item.command().itemKey(), item.command().result().safeFacts());
+            if (item.successful()) {
+                facts.put(item.itemKey(), item.command().result().safeFacts());
             }
         }
-        boolean allSuccessful = items.stream().allMatch(VerifiedItem::successfulExecution);
-        boolean dataComplete = allSuccessful
+        String factsJson = writeCanonicalJson(facts, "安全事实");
+        if (factsJson.getBytes(StandardCharsets.UTF_8).length > maxFactBytes) {
+            throw badRequest("安全小事实超过容量限制，请将大明细保存到ResultArtifact");
+        }
+
+        long successCount = items.stream().filter(VerifiedItem::successful).count();
+        String status = successCount == items.size()
+                ? "COMPLETE"
+                : successCount == 0 ? "FAILED" : "PARTIAL_SUCCESS";
+        boolean dataComplete = "COMPLETE".equals(status)
                 && items.stream().allMatch(item -> item.command().result().dataComplete());
 
         BusinessSnapshot snapshot = new BusinessSnapshot();
         snapshot.setSnapshotId(UUID.randomUUID().toString().replace("-", ""));
-        snapshot.setSessionId(context.sessionId());
-        snapshot.setUserId(context.userId());
-        snapshot.setSubjectType(context.subjectType());
-        snapshot.setSubjectId(context.subjectId());
-        snapshot.setDatasetCode(context.datasetCode());
-        snapshot.setQueryJson(writeCanonicalJson(command.canonicalQuery(), "查询条件"));
-        snapshot.setQueryHash(ContentHashUtils.sha256(
-                ReportDatasetValidator.canonicalSafeValue(command.canonicalQuery())
-        ));
-        snapshot.setStatus(allSuccessful ? "COMPLETE" : "PARTIAL_SUCCESS");
+        snapshot.setSessionId(command.sessionId());
+        snapshot.setUserId(command.userId());
+        snapshot.setSubjectType(command.subjectType());
+        snapshot.setSubjectId(command.subjectId());
+        snapshot.setDatasetCode(command.datasetCode());
+        String queryJson = writeCanonicalJson(command.canonicalQuery(), "查询条件");
+        if (queryJson.getBytes(StandardCharsets.UTF_8).length > maxQueryBytes) {
+            throw badRequest("规范查询条件超过容量限制，请缩小查询范围");
+        }
+        snapshot.setQueryJson(queryJson);
+        snapshot.setQueryHash(command.queryHash());
+        snapshot.setStatus(status);
         snapshot.setDataComplete(dataComplete);
-        snapshot.setFactsJson(writeCanonicalJson(facts, "安全事实"));
-        snapshot.setConfigChecksum(context.configChecksum());
-        snapshot.setFieldPolicyChecksum(context.fieldPolicyChecksum());
-        snapshot.setSourceSnapshotId(normalizeOptional(command.sourceSnapshotId()));
+        snapshot.setFactsJson(factsJson);
+        snapshot.setConfigChecksum(dataset.configChecksum());
+        snapshot.setFieldPolicyChecksum(dataset.fieldPolicyChecksum());
+        snapshot.setSourceSnapshotId(command.sourceSnapshotId());
         snapshot.setExpiresAt(expiresAt);
         snapshot.setCreatedAt(now);
         snapshot.setCompletedAt(now);
@@ -390,34 +536,35 @@ public class BusinessSnapshotServiceImpl implements BusinessSnapshotService {
             LocalDateTime now) {
         ItemCommand command = verified.command();
         DatasetExecutionResult result = command.result();
-        WorkflowRun run = verified.run();
-
-        BusinessSnapshotItem item = new BusinessSnapshotItem();
-        item.setSnapshotId(snapshotId);
-        item.setItemKey(command.itemKey());
-        if (run != null) {
-            item.setWorkflowCode(run.getWorkflowCode());
-            item.setWorkflowVersionId(run.getWorkflowVersionId());
-            item.setWorkflowVersionNo(run.getWorkflowVersionNo());
-            item.setWorkflowConfigChecksum(run.getConfigChecksum());
-            item.setWorkflowRunId(run.getRunId());
-        }
-        item.setResultArtifactId(normalizeOptional(result.resultArtifactId()));
-        item.setStatus(verified.persistedStatus());
-        item.setAssociationType(normalizeOptional(command.associationType()));
-        int totalCount = nonNegative(command.totalCount(), "totalCount");
-        int successCount = nonNegative(command.successCount(), "successCount");
-        int failureCount = nonNegative(command.failureCount(), "failureCount");
-        if (successCount + failureCount > totalCount) {
+        int total = nonNegative(command.totalCount(), "totalCount");
+        int success = nonNegative(command.successCount(), "successCount");
+        int failure = nonNegative(command.failureCount(), "failureCount");
+        if (success + failure > total) {
             throw badRequest("成功和失败数量之和不能大于总数");
         }
-        item.setTotalCount(totalCount);
-        item.setSuccessCount(successCount);
-        item.setFailureCount(failureCount);
-        item.setSafeErrorCode(limit(result.safeErrorCode(), 128, "safeErrorCode"));
-        item.setSafeErrorMessage(limit(result.safeMessage(), 1000, "safeMessage"));
-        item.setCreatedAt(now);
-        return item;
+
+        BusinessSnapshotItem entity = new BusinessSnapshotItem();
+        entity.setSnapshotId(snapshotId);
+        entity.setItemKey(verified.itemKey());
+        entity.setWorkflowCode(result.source().queryWorkflowCode());
+        entity.setWorkflowVersionId(result.source().queryWorkflowVersionId());
+        if (verified.run() != null) {
+            entity.setWorkflowVersionNo(verified.run().getWorkflowVersionNo());
+            entity.setWorkflowConfigChecksum(verified.run().getConfigChecksum());
+            entity.setWorkflowRunId(verified.run().getRunId());
+        }
+        entity.setResultArtifactId(optionalText(result.resultArtifactId(), 32, "resultArtifactId"));
+        entity.setStatus(verified.persistedStatus());
+        entity.setAssociationType(command.associationType() == null
+                ? null
+                : command.associationType().name());
+        entity.setTotalCount(total);
+        entity.setSuccessCount(success);
+        entity.setFailureCount(failure);
+        entity.setSafeErrorCode(optionalText(result.safeErrorCode(), 128, "safeErrorCode"));
+        entity.setSafeErrorMessage(optionalText(result.safeMessage(), 1000, "safeMessage"));
+        entity.setCreatedAt(now);
+        return entity;
     }
 
     private String writeCanonicalJson(Object value, String label) {
@@ -426,12 +573,12 @@ public class BusinessSnapshotServiceImpl implements BusinessSnapshotService {
                     .with(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS)
                     .writeValueAsString(value);
         } catch (JsonProcessingException exception) {
-            throw new BusinessException(
-                    ErrorCode.BAD_REQUEST,
-                    label + "无法安全序列化",
-                    exception
-            );
+            throw new BusinessException(ErrorCode.BAD_REQUEST, label + "无法安全序列化", exception);
         }
+    }
+
+    private boolean isSuccessful(DatasetExecutionStatus status) {
+        return status == DatasetExecutionStatus.SUCCESS || status == DatasetExecutionStatus.EMPTY;
     }
 
     private String persistedStatus(DatasetExecutionStatus status) {
@@ -444,7 +591,7 @@ public class BusinessSnapshotServiceImpl implements BusinessSnapshotService {
         };
     }
 
-    private Integer nonNegative(Integer value, String field) {
+    private int nonNegative(Integer value, String field) {
         int normalized = value == null ? 0 : value;
         if (normalized < 0) {
             throw badRequest(field + "不能小于0");
@@ -452,31 +599,26 @@ public class BusinessSnapshotServiceImpl implements BusinessSnapshotService {
         return normalized;
     }
 
-    private String requireText(String value, String message) {
+    private String requireText(String value, int maxLength, String field) {
         if (!StringUtils.hasText(value) || !value.equals(value.trim())) {
-            throw badRequest(message);
+            throw badRequest(field + "不能为空或包含首尾空白");
+        }
+        if (value.length() > maxLength) {
+            throw badRequest(field + "长度不能超过" + maxLength);
         }
         return value;
     }
 
-    private String requireChecksum(String value, String message) {
-        String checksum = requireText(value, message);
-        if (checksum.length() > 64) {
-            throw badRequest(message);
-        }
-        return checksum;
-    }
-
-    private String normalizeOptional(String value) {
-        return StringUtils.hasText(value) ? value.trim() : null;
-    }
-
-    private String limit(String value, int maxLength, String field) {
-        if (value == null) {
+    private String optionalText(String value, int maxLength, String field) {
+        if (!StringUtils.hasText(value)) {
             return null;
         }
-        if (value.length() > maxLength) {
-            throw badRequest(field + "长度不能超过" + maxLength);
+        return requireText(value, maxLength, field);
+    }
+
+    private String requireChecksum(String value, String field) {
+        if (value == null || !SHA256.matcher(value).matches()) {
+            throw badRequest(field + "必须是64位SHA-256十六进制");
         }
         return value;
     }
@@ -485,25 +627,46 @@ public class BusinessSnapshotServiceImpl implements BusinessSnapshotService {
         return new BusinessException(ErrorCode.BAD_REQUEST, message);
     }
 
-    private record SnapshotContext(
+    private BusinessException internal(String message) {
+        return new BusinessException(ErrorCode.INTERNAL_ERROR, message);
+    }
+
+    private record ValidatedCommand(
             String userId,
             String sessionId,
             String subjectType,
             String subjectId,
             String datasetCode,
+            Map<String, Object> canonicalQuery,
+            String queryHash,
+            String sourceSnapshotId,
+            List<ItemCommand> items) {
+    }
+
+    private record DatasetContext(
+            String datasetCode,
             String workflowCode,
             String configChecksum,
             String fieldPolicyChecksum,
-            int ttlMinutes) {
+            int ttlMinutes,
+            FactChannels factChannels) {
+    }
+
+    private record FactChannels(
+            Set<String> calculation,
+            Set<String> display,
+            Set<String> export,
+            Set<String> model) {
     }
 
     private record VerifiedItem(
             ItemCommand command,
+            String itemKey,
             String persistedStatus,
             WorkflowRun run,
             ResultArtifact artifact) {
 
-        private boolean successfulExecution() {
+        private boolean successful() {
             return "SUCCESS".equals(persistedStatus) || "NO_DATA".equals(persistedStatus);
         }
     }

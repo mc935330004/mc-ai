@@ -82,7 +82,7 @@ CREATE TABLE ai_composite_report_task
     template_code         VARCHAR(128)  NOT NULL COMMENT '组合报告模板编码',
     template_checksum     CHAR(64)      NOT NULL COMMENT '实际模板配置校验和',
     format                VARCHAR(16)   NOT NULL COMMENT '格式：XLSX/DOCX/PDF',
-    status                VARCHAR(32)   NOT NULL COMMENT '状态：PENDING/COLLECTING/RENDERING/SUCCESS/PARTIAL_SUCCESS/FAILED/EXPIRED',
+    status                VARCHAR(32)   NOT NULL COMMENT '状态：PENDING/RETRY/RUNNING/COLLECTING/RENDERING/SUCCESS/PARTIAL_SUCCESS/FAILED/CANCELLED/EXPIRED',
     data_complete         TINYINT(1)    NOT NULL DEFAULT 0 COMMENT '报告数据是否完整',
     worker_id             VARCHAR(128)  NULL COMMENT '当前租约执行者',
     lease_until           DATETIME(3)   NULL COMMENT '当前租约失效时间',
@@ -129,7 +129,6 @@ CREATE TABLE ai_composite_report_section
 
     PRIMARY KEY (id),
     UNIQUE KEY uk_report_section_order (task_id, display_order),
-    KEY idx_report_section_order (task_id, display_order),
     KEY idx_report_section_snapshot (snapshot_id),
     KEY idx_report_section_dataset (task_id, dataset_code)
 ) ENGINE = InnoDB

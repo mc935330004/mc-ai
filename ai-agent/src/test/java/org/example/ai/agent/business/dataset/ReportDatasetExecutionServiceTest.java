@@ -233,6 +233,16 @@ class ReportDatasetExecutionServiceTest {
         assertThat(result.toString()).doesNotContain("Secret Project", SECRET, "tenant-secret");
         assertThat(result.status()).isEqualTo(DatasetExecutionStatus.SUCCESS);
         assertThat(result.workflowRunId()).isEqualTo("query-run");
+        assertThat(result.source().userId()).isEqualTo("user-1");
+        assertThat(result.source().sessionId()).isEqualTo("session-1");
+        assertThat(result.source().subjectType()).isEqualTo(BusinessSubjectType.PROJECT);
+        assertThat(result.source().subjectId()).isEqualTo("P100");
+        assertThat(result.source().datasetCode()).isEqualTo("PROJECT_BASE");
+        assertThat(result.source().canonicalInputHash()).hasSize(64);
+        assertThat(result.source().queryWorkflowCode()).isEqualTo(QUERY);
+        assertThat(result.source().queryWorkflowVersionId()).isEqualTo(22L);
+        assertThat(result.source().datasetConfigChecksum()).isEqualTo("a".repeat(64));
+        assertThat(result.source().fieldPolicyChecksum()).isEqualTo("b".repeat(64));
     }
 
     @Test
@@ -282,6 +292,7 @@ class ReportDatasetExecutionServiceTest {
         ));
         assertThat(timeout.status()).isEqualTo(DatasetExecutionStatus.TIMEOUT);
         assertThat(timeout.safeMessage()).doesNotContain("raw timeout details");
+        assertThat(timeout.source().queryWorkflowVersionId()).isEqualTo(22L);
 
         resetExecutions();
         DatasetExecutionResult failed = executeQueryOutcome(outcome(
@@ -492,7 +503,7 @@ class ReportDatasetExecutionServiceTest {
     @Test
     void resultUsesSharedSafeValuePolicyForUnsupportedFacts() {
         assertThatThrownBy(() -> new DatasetExecutionResult(
-                "PROJECT_BASE",
+                null,
                 DatasetExecutionStatus.SUCCESS,
                 true,
                 Map.of("calculation", Map.of("bad", new StringBuilder("mutable"))),
@@ -566,6 +577,8 @@ class ReportDatasetExecutionServiceTest {
         dataset.setAccessWorkflowCode(ACCESS);
         dataset.setQueryWorkflowCode(QUERY);
         dataset.setInputMappingJson(mappingJson);
+        dataset.setConfigChecksum("a".repeat(64));
+        dataset.setFieldPolicyChecksum("b".repeat(64));
         dataset.setEnabled(true);
         when(datasetMapper.selectOne(any(Wrapper.class))).thenReturn(dataset);
     }

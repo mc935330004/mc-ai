@@ -4,6 +4,7 @@ import org.example.ai.agent.business.dataset.ReportDatasetValidator;
 import org.example.ai.agent.business.model.DatasetExecutionStatus;
 
 import java.util.Map;
+import java.util.Objects;
 
 /**
  * 报告数据集安全执行结果。
@@ -11,7 +12,7 @@ import java.util.Map;
  * safeFacts 只能包含经过字段策略处理后的安全事实，字符串表示只展示通道名称。
  */
 public record DatasetExecutionResult(
-        String datasetCode,
+        DatasetExecutionSource source,
         DatasetExecutionStatus status,
         boolean dataComplete,
         Map<String, Object> safeFacts,
@@ -29,6 +30,11 @@ public record DatasetExecutionResult(
             throw new IllegalArgumentException("safeFacts必须是Map");
         }
         safeFacts = (Map<String, Object>) frozen;
+        source = Objects.requireNonNull(source, "source不能为空");
+    }
+
+    public String datasetCode() {
+        return source.datasetCode();
     }
 
     /**
@@ -37,7 +43,8 @@ public record DatasetExecutionResult(
     @Override
     public String toString() {
         return "DatasetExecutionResult["
-                + "datasetCode=" + datasetCode
+                + "sourcePresent=true"
+                + ", workflowVersionPresent=" + (source.queryWorkflowVersionId() != null)
                 + ", status=" + status
                 + ", dataComplete=" + dataComplete
                 + ", safeFactChannels=" + safeFacts.keySet()

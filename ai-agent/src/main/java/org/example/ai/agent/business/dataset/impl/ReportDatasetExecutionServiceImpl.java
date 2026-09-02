@@ -11,14 +11,19 @@ import org.example.ai.agent.answer.model.UnifiedFactSet;
 import org.example.ai.agent.business.dataset.BusinessFactSanitizer;
 import org.example.ai.agent.business.dataset.CanonicalInputMapper;
 import org.example.ai.agent.business.dataset.ReportDatasetExecutionService;
+import org.example.ai.agent.business.dataset.ReportDatasetValidator;
 import org.example.ai.agent.business.dataset.entity.ReportDataset;
 import org.example.ai.agent.business.dataset.entity.ReportDatasetField;
 import org.example.ai.agent.business.dataset.mapper.ReportDatasetFieldMapper;
 import org.example.ai.agent.business.dataset.mapper.ReportDatasetMapper;
 import org.example.ai.agent.business.dataset.model.DatasetExecutionRequest;
 import org.example.ai.agent.business.dataset.model.DatasetExecutionResult;
+import org.example.ai.agent.business.dataset.model.DatasetExecutionSource;
 import org.example.ai.agent.business.dataset.model.FieldPolicy;
 import org.example.ai.agent.business.model.DatasetExecutionStatus;
+import org.example.ai.agent.chat.support.ContentHashUtils;
+import org.example.ai.agent.common.exception.BusinessException;
+import org.example.ai.agent.common.exception.ErrorCode;
 import org.example.ai.agent.capability.entity.FieldDictionary;
 import org.example.ai.agent.capability.mapper.FieldDictionaryMapper;
 import org.example.ai.agent.capability.service.FieldMetadataService;
@@ -72,21 +77,22 @@ public class ReportDatasetExecutionServiceImpl
     @Override
     public DatasetExecutionResult execute(
             DatasetExecutionRequest request) {
-        String datasetCode = request == null
-                ? null
-                : request.datasetCode();
-
         ReportDataset dataset;
         DatasetInputMappings mappings;
+        DatasetExecutionSource executionSource;
         try {
             validateRequest(request);
             dataset = loadEnabledDataset(request);
             mappings = parseInputMappings(dataset.getInputMappingJson());
+            executionSource = executionSource(request, dataset, null);
         } catch (RuntimeException exception) {
-            return failed(
-                    datasetCode,
-                    "DATASET_CONFIG_INVALID",
-                    "数据集配置不可用"
+            /*
+             * 数据集不存在或校验和非法时无法形成可信执行来源，禁止制造占位来源继续流转。
+             */
+            throw new BusinessException(
+                    ErrorCode.BAD_REQUEST,
+                    "数据集配置不可用",
+                    exception
             );
         }
 
@@ -108,7 +114,7 @@ public class ReportDatasetExecutionServiceImpl
             ));
         } catch (RuntimeException exception) {
             return failed(
-                    datasetCode,
+                    executionSource,
                     "ACCESS_CHECK_FAILED",
                     "权限校验失败"
             );
@@ -122,7 +128,7 @@ public class ReportDatasetExecutionServiceImpl
         }
         if (accessDecision == AccessDecision.INVALID) {
             return failed(
-                    datasetCode,
+                    executionSource,
                     "ACCESS_CHECK_FAILED",
                     "权限校验失败"
             );
@@ -132,7 +138,7 @@ public class ReportDatasetExecutionServiceImpl
              * 权限拒绝不能查询业务数据，也不能通过事实、数量或提示文字泄露记录是否存在。
              */
             return new DatasetExecutionResult(
-                    datasetCode,
+                    executionSource,
                     DatasetExecutionStatus.DENIED,
                     false,
                     Map.of(),
@@ -145,9 +151,15 @@ public class ReportDatasetExecutionServiceImpl
 
         Set<String> queryReadCapabilities;
         WorkflowExecutionOutcome queryOutcome;
+        DatasetExecutionSource querySource = executionSource;
         try {
             PublishedWorkflow queryWorkflow = snapshotResolver.resolveByCode(
                     dataset.getQueryWorkflowCode()
+            );
+            querySource = executionSource(
+                    request,
+                    dataset,
+                    queryWorkflow.version().getId()
             );
             queryReadCapabilities = resolveReadCapabilities(queryWorkflow);
             Map<String, Object> queryInput = canonicalInputMapper.map(
@@ -163,7 +175,7 @@ public class ReportDatasetExecutionServiceImpl
             ));
         } catch (RuntimeException exception) {
             return failed(
-                    datasetCode,
+                    querySource,
                     "QUERY_FAILED",
                     "数据查询失败"
             );
@@ -173,7 +185,7 @@ public class ReportDatasetExecutionServiceImpl
             boolean timeout = queryOutcome != null
                     && "TIMEOUT".equals(normalize(queryOutcome.errorCode()));
             return new DatasetExecutionResult(
-                    datasetCode,
+                    querySource,
                     timeout
                             ? DatasetExecutionStatus.TIMEOUT
                             : DatasetExecutionStatus.FAILED,
@@ -187,13 +199,18 @@ public class ReportDatasetExecutionServiceImpl
         }
 
         try {
-            return buildSafeResult(dataset, queryReadCapabilities, queryOutcome);
+            return buildSafeResult(
+                    dataset,
+                    queryReadCapabilities,
+                    queryOutcome,
+                    querySource
+            );
         } catch (RuntimeException exception) {
             /*
              * 字段字典、事实映射或字段策略任一异常都必须失败关闭，不能退回原始响应。
              */
             return failed(
-                    datasetCode,
+                    querySource,
                     "FACT_MAPPING_FAILED",
                     "数据处理失败",
                     queryOutcome.runId()
@@ -347,7 +364,8 @@ public class ReportDatasetExecutionServiceImpl
     private DatasetExecutionResult buildSafeResult(
             ReportDataset dataset,
             Set<String> readCapabilities,
-            WorkflowExecutionOutcome queryOutcome) {
+            WorkflowExecutionOutcome queryOutcome,
+            DatasetExecutionSource executionSource) {
         List<ReportDatasetField> datasetFields = loadDatasetFields(dataset.getId());
         DictionaryMaterial dictionaryMaterial = loadDictionaryMaterial(
                 datasetFields,
@@ -374,7 +392,7 @@ public class ReportDatasetExecutionServiceImpl
                 && !queryOutcome.partialSuccess()
                 && extracted.dataComplete();
         return new DatasetExecutionResult(
-                dataset.getDatasetCode(),
+                executionSource,
                 empty
                         ? DatasetExecutionStatus.EMPTY
                         : DatasetExecutionStatus.SUCCESS,
@@ -578,19 +596,19 @@ public class ReportDatasetExecutionServiceImpl
     }
 
     private DatasetExecutionResult failed(
-            String datasetCode,
+            DatasetExecutionSource source,
             String errorCode,
             String message) {
-        return failed(datasetCode, errorCode, message, null);
+        return failed(source, errorCode, message, null);
     }
 
     private DatasetExecutionResult failed(
-            String datasetCode,
+            DatasetExecutionSource source,
             String errorCode,
             String message,
             String workflowRunId) {
         return new DatasetExecutionResult(
-                datasetCode,
+                source,
                 DatasetExecutionStatus.FAILED,
                 false,
                 Map.of(),
@@ -598,6 +616,27 @@ public class ReportDatasetExecutionServiceImpl
                 null,
                 errorCode,
                 message
+        );
+    }
+
+    private DatasetExecutionSource executionSource(
+            DatasetExecutionRequest request,
+            ReportDataset dataset,
+            Long queryWorkflowVersionId) {
+        String canonicalInputHash = ContentHashUtils.sha256(
+                ReportDatasetValidator.canonicalSafeValue(request.canonicalInput())
+        );
+        return new DatasetExecutionSource(
+                request.userId(),
+                request.sessionId(),
+                request.subjectType(),
+                request.subjectId(),
+                dataset.getDatasetCode(),
+                canonicalInputHash,
+                dataset.getQueryWorkflowCode(),
+                queryWorkflowVersionId,
+                dataset.getConfigChecksum(),
+                dataset.getFieldPolicyChecksum()
         );
     }
 
