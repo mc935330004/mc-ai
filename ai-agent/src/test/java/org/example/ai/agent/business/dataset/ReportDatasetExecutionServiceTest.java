@@ -17,7 +17,14 @@ import org.example.ai.agent.business.model.DatasetExecutionStatus;
 import org.example.ai.agent.capability.entity.FieldDictionary;
 import org.example.ai.agent.capability.mapper.FieldDictionaryMapper;
 import org.example.ai.agent.capability.service.FieldMetadataService;
+import org.example.ai.agent.common.enums.GraphNodeType;
 import org.example.ai.agent.common.exception.BusinessException;
+import org.example.ai.agent.graph.compiler.CompiledGraphNode;
+import org.example.ai.agent.graph.compiler.CompiledGraphSpec;
+import org.example.ai.agent.graph.compiler.GraphCapabilityCatalog;
+import org.example.ai.agent.graph.config.CapabilityNodeConfig;
+import org.example.ai.agent.graph.config.CompiledForEachNodeConfig;
+import org.example.ai.agent.workflow.answer.WorkflowCapabilityCodeCollector;
 import org.example.ai.agent.workflow.entity.WorkflowDefinition;
 import org.example.ai.agent.workflow.entity.WorkflowVersion;
 import org.example.ai.agent.workflow.runtime.PublishedWorkflow;
@@ -57,6 +64,7 @@ class ReportDatasetExecutionServiceTest {
     private WorkflowRuntimeSnapshotResolver snapshotResolver;
     private WorkflowExecutionFacade executionFacade;
     private FieldDictionaryMapper fieldDictionaryMapper;
+    private GraphCapabilityCatalog capabilityCatalog;
     private ReportDatasetExecutionService service;
 
     @BeforeEach
@@ -66,6 +74,8 @@ class ReportDatasetExecutionServiceTest {
         snapshotResolver = mock(WorkflowRuntimeSnapshotResolver.class);
         executionFacade = mock(WorkflowExecutionFacade.class);
         fieldDictionaryMapper = mock(FieldDictionaryMapper.class);
+        capabilityCatalog = mock(GraphCapabilityCatalog.class);
+        when(capabilityCatalog.sideEffect(any())).thenReturn("READ");
         FieldMetadataService metadataService = new FieldMetadataService(fieldDictionaryMapper);
         DictionaryFactExtractor extractor = new DictionaryFactExtractor(
                 objectMapper,
@@ -82,6 +92,8 @@ class ReportDatasetExecutionServiceTest {
                 fieldDictionaryMapper,
                 metadataService,
                 extractor,
+                new WorkflowCapabilityCodeCollector(),
+                capabilityCatalog,
                 objectMapper
         );
     }
@@ -369,6 +381,132 @@ class ReportDatasetExecutionServiceTest {
     }
 
     @Test
+    void refusesExportPolicyThatBreaksPublishedDictionaryUserVisibility() throws Exception {
+        arrangeDataset(defaultMapping());
+        arrangeWorkflow(ACCESS, 11L, schema("employee_code"));
+        arrangeWorkflow(QUERY, 22L, schema("project_no"));
+        ReportDatasetField exportOnly = datasetField(
+                101L, "private_export", false, false, true, false
+        );
+        when(datasetFieldMapper.selectList(any(Wrapper.class))).thenReturn(List.of(exportOnly));
+        when(fieldDictionaryMapper.selectBatchIds(any())).thenReturn(List.of(
+                dictionary(101L, "private_export", "$.data.value", 0, 1)
+        ));
+        when(executionFacade.execute(any())).thenReturn(
+                outcome(true, false, "access-run", ACCESS, true, null, null),
+                outcome(true, false, "query-run", QUERY,
+                        Map.of("data", Map.of("value", SECRET)), null, null)
+        );
+
+        DatasetExecutionResult result = service.execute(request());
+
+        assertThat(result.status()).isEqualTo(DatasetExecutionStatus.FAILED);
+        assertThat(result.safeFacts()).isEmpty();
+        assertThat(result.toString()).doesNotContain(SECRET);
+    }
+
+    @Test
+    void refusesDictionaryFromCapabilityOutsideCurrentQueryWorkflow() throws Exception {
+        arrangeDataset(defaultMapping());
+        arrangeWorkflow(ACCESS, 11L, schema("employee_code"));
+        arrangeWorkflow(
+                QUERY,
+                22L,
+                schema("project_no"),
+                graphWithCapability("PROJECT_READ")
+        );
+        arrangeSingleField("project_name", "$.data.name", true, true, true, true);
+        FieldDictionary unrelated = dictionary(
+                101L, "source_project_name", "$.data.name", 1, 1
+        );
+        unrelated.setCapabilityCode("OTHER_READ");
+        when(fieldDictionaryMapper.selectBatchIds(any())).thenReturn(List.of(unrelated));
+        when(executionFacade.execute(any())).thenReturn(
+                outcome(true, false, "access-run", ACCESS, true, null, null),
+                outcome(true, false, "query-run", QUERY,
+                        Map.of("data", Map.of("name", SECRET)), null, null)
+        );
+
+        DatasetExecutionResult result = service.execute(request());
+
+        assertThat(result.status()).isEqualTo(DatasetExecutionStatus.FAILED);
+        assertThat(result.safeFacts()).isEmpty();
+    }
+
+    @Test
+    void refusesDictionaryWhenCurrentWorkflowCapabilityIsNotReadOnly() throws Exception {
+        arrangeDataset(defaultMapping());
+        arrangeWorkflow(ACCESS, 11L, schema("employee_code"));
+        arrangeWorkflow(
+                QUERY,
+                22L,
+                schema("project_no"),
+                graphWithCapability("PROJECT_WRITE")
+        );
+        ReportDatasetField field = datasetField(
+                101L, "project_name", true, true, true, true
+        );
+        FieldDictionary dictionary = dictionary(
+                101L, "source_project_name", "$.data.name", 1, 1
+        );
+        dictionary.setCapabilityCode("PROJECT_WRITE");
+        when(datasetFieldMapper.selectList(any(Wrapper.class))).thenReturn(List.of(field));
+        when(fieldDictionaryMapper.selectBatchIds(any())).thenReturn(List.of(dictionary));
+        when(capabilityCatalog.sideEffect("PROJECT_WRITE")).thenReturn("WRITE");
+        when(executionFacade.execute(any())).thenReturn(
+                outcome(true, false, "access-run", ACCESS, true, null, null),
+                outcome(true, false, "query-run", QUERY,
+                        Map.of("data", Map.of("name", SECRET)), null, null)
+        );
+
+        DatasetExecutionResult result = service.execute(request());
+
+        assertThat(result.status()).isEqualTo(DatasetExecutionStatus.FAILED);
+        assertThat(result.safeFacts()).isEmpty();
+        verify(executionFacade, times(1)).execute(any());
+    }
+
+    @Test
+    void failsClosedBeforeDictionaryLookupWhenDatasetFieldIdIsMissing() throws Exception {
+        arrangeDataset(defaultMapping());
+        arrangeWorkflow(ACCESS, 11L, schema("employee_code"));
+        arrangeWorkflow(QUERY, 22L, schema("project_no"));
+        ReportDatasetField field = datasetField(
+                101L, "project_name", true, true, true, true
+        );
+        field.setFieldId(null);
+        when(datasetFieldMapper.selectList(any(Wrapper.class))).thenReturn(List.of(field));
+        when(executionFacade.execute(any())).thenReturn(
+                outcome(true, false, "access-run", ACCESS, true, null, null),
+                outcome(true, false, "query-run", QUERY,
+                        Map.of("data", Map.of("name", SECRET)), null, null)
+        );
+
+        DatasetExecutionResult result = service.execute(request());
+
+        assertThat(result.status()).isEqualTo(DatasetExecutionStatus.FAILED);
+        assertThat(result.safeFacts()).isEmpty();
+        verify(fieldDictionaryMapper, never()).selectBatchIds(any());
+    }
+
+    @Test
+    void resultUsesSharedSafeValuePolicyForUnsupportedFacts() {
+        assertThatThrownBy(() -> new DatasetExecutionResult(
+                "PROJECT_BASE",
+                DatasetExecutionStatus.SUCCESS,
+                true,
+                Map.of("calculation", Map.of("bad", new StringBuilder("mutable"))),
+                "query-run",
+                null,
+                null,
+                "数据查询完成"
+        ))
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("StringBuilder")
+                .hasMessageContaining("不支持");
+    }
+
+    @Test
     void freezesNestedFactsAndDoesNotRetainMutableRawResult() throws Exception {
         arrangeDataset(defaultMapping());
         arrangeWorkflow(ACCESS, 11L, schema("employee_code"));
@@ -433,12 +571,23 @@ class ReportDatasetExecutionServiceTest {
     }
 
     private void arrangeWorkflow(String code, long versionId, JsonNode inputSchema) {
+        CompiledGraphSpec graph = QUERY.equals(code)
+                ? graphWithForEachBody(graphWithCapability("PROJECT_READ"))
+                : graphWithCapability("ACCESS_READ");
+        arrangeWorkflow(code, versionId, inputSchema, graph);
+    }
+
+    private void arrangeWorkflow(
+            String code,
+            long versionId,
+            JsonNode inputSchema,
+            CompiledGraphSpec graph) {
         WorkflowDefinition definition = new WorkflowDefinition();
         definition.setWorkflowCode(code);
         WorkflowVersion version = new WorkflowVersion();
         version.setId(versionId);
         when(snapshotResolver.resolveByCode(code)).thenReturn(
-                new PublishedWorkflow(definition, version, null, inputSchema)
+                new PublishedWorkflow(definition, version, graph, inputSchema)
         );
     }
 
@@ -489,7 +638,7 @@ class ReportDatasetExecutionServiceTest {
             int modelVisible) {
         FieldDictionary dictionary = new FieldDictionary();
         dictionary.setId(id);
-        dictionary.setCapabilityCode(QUERY);
+        dictionary.setCapabilityCode("PROJECT_READ");
         dictionary.setFieldPath(path);
         dictionary.setFieldName(fieldCode);
         dictionary.setFieldCode(fieldCode);
@@ -502,6 +651,63 @@ class ReportDatasetExecutionServiceTest {
         dictionary.setDisplayOrder((int) id);
         dictionary.setPublishStatus("PUBLISHED");
         return dictionary;
+    }
+
+    private CompiledGraphSpec graphWithCapability(String capabilityCode) {
+        CompiledGraphNode node = new CompiledGraphNode(
+                "capability",
+                GraphNodeType.CAPABILITY,
+                "能力",
+                null,
+                "result",
+                new CapabilityNodeConfig(capabilityCode, Map.of(), null)
+        );
+        return graph(Map.of(node.id(), node), List.of(node.id()));
+    }
+
+    private CompiledGraphSpec graphWithForEachBody(CompiledGraphSpec body) {
+        CompiledGraphNode node = new CompiledGraphNode(
+                "foreach",
+                GraphNodeType.FOREACH,
+                "循环",
+                null,
+                "items",
+                new CompiledForEachNodeConfig(
+                        "$.items",
+                        10,
+                        2,
+                        false,
+                        false,
+                        null,
+                        body
+                )
+        );
+        return graph(Map.of(node.id(), node), List.of(node.id()));
+    }
+
+    private CompiledGraphSpec graph(
+            Map<String, CompiledGraphNode> nodes,
+            List<String> topologicalOrder) {
+        Map<String, List<org.example.ai.agent.graph.model.GraphEdgeSpec>> outgoing =
+                new LinkedHashMap<>();
+        Map<String, List<org.example.ai.agent.graph.model.GraphEdgeSpec>> incoming =
+                new LinkedHashMap<>();
+        nodes.keySet().forEach(nodeId -> {
+            outgoing.put(nodeId, List.of());
+            incoming.put(nodeId, List.of());
+        });
+        return new CompiledGraphSpec(
+                "1.0",
+                "test_graph",
+                "测试图",
+                topologicalOrder.get(0),
+                topologicalOrder.get(topologicalOrder.size() - 1),
+                nodes,
+                List.of(),
+                outgoing,
+                incoming,
+                topologicalOrder
+        );
     }
 
     private DatasetExecutionRequest request() {

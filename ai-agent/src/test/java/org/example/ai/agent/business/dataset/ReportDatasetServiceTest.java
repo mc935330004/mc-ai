@@ -295,7 +295,9 @@ class ReportDatasetServiceTest {
         }
 
         assertThat(migration)
-                .containsPattern("(?i)version\\s+INT\\s+NOT\\s+NULL\\s+DEFAULT\\s+0");
+                .containsPattern("(?i)version\\s+INT\\s+NOT\\s+NULL\\s+DEFAULT\\s+0")
+                .containsPattern("(?i)field_id\\s+BIGINT\\s+NOT\\s+NULL")
+                .doesNotContain("可为空表示仅使用标准事实");
         assertThat(ReportDataset.class.getDeclaredField("version").getAnnotation(Version.class))
                 .isNotNull();
     }
@@ -340,6 +342,29 @@ class ReportDatasetServiceTest {
                 .hasMessageContaining("不能为空");
 
         verify(datasetMapper, never()).updateById(any(ReportDataset.class));
+    }
+
+    @Test
+    void rejectsDatasetFieldWithoutPublishedDictionaryId() {
+        when(workflowResolver.resolveByCode("QUERY_EMPLOYEE"))
+                .thenReturn(publishedWorkflow(
+                        "QUERY_EMPLOYEE",
+                        "{\"type\":\"object\"}",
+                        graphWithCapability("EMPLOYEE_QUERY")
+                ));
+        ReportDatasetField field = validField("employee_name", 10);
+        field.setFieldId(null);
+
+        assertThatThrownBy(() -> service.saveCurrent(
+                validDataset("{}"),
+                List.of(field),
+                "admin"
+        ))
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("fieldId")
+                .hasMessageContaining("不能为空");
+
+        verify(workflowResolver, never()).resolveByCode(anyString());
     }
 
     @Test

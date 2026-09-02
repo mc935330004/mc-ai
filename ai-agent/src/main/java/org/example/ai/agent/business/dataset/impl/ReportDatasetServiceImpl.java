@@ -137,6 +137,9 @@ public class ReportDatasetServiceImpl
             if (field == null) {
                 throw new BusinessException(400, "数据集字段策略不能包含空项");
             }
+            if (field.getFieldId() == null) {
+                throw new BusinessException(400, "fieldId不能为空");
+            }
             field.setFactCode(requireText(field.getFactCode(), "factCode不能为空"));
             field.setFactName(requireText(field.getFactName(), "factName不能为空"));
             field.setFactType(requireText(field.getFactType(), "factType不能为空"));

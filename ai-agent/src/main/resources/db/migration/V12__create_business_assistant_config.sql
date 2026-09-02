@@ -44,7 +44,7 @@ CREATE TABLE ai_report_dataset_field
 (
     id             BIGINT PRIMARY KEY AUTO_INCREMENT COMMENT '数据集字段策略ID',
     dataset_id     BIGINT       NOT NULL COMMENT '报告数据集ID，逻辑引用ai_report_dataset.id',
-    field_id       BIGINT       NULL COMMENT '已发布字段字典ID，可为空表示仅使用标准事实',
+    field_id       BIGINT       NOT NULL COMMENT '已发布字段字典ID',
     fact_code      VARCHAR(128) NOT NULL COMMENT '标准事实编码',
     fact_name      VARCHAR(128) NOT NULL COMMENT '标准事实名称',
     fact_type      VARCHAR(32)  NOT NULL COMMENT '标准事实类型',

@@ -22,7 +22,9 @@ import org.example.ai.agent.business.model.DatasetExecutionStatus;
 import org.example.ai.agent.capability.entity.FieldDictionary;
 import org.example.ai.agent.capability.mapper.FieldDictionaryMapper;
 import org.example.ai.agent.capability.service.FieldMetadataService;
+import org.example.ai.agent.graph.compiler.GraphCapabilityCatalog;
 import org.example.ai.agent.tool.FieldMeta;
+import org.example.ai.agent.workflow.answer.WorkflowCapabilityCodeCollector;
 import org.example.ai.agent.workflow.runtime.PublishedWorkflow;
 import org.example.ai.agent.workflow.runtime.WorkflowExecutionCommand;
 import org.example.ai.agent.workflow.runtime.WorkflowExecutionFacade;
@@ -63,6 +65,8 @@ public class ReportDatasetExecutionServiceImpl
     private final FieldDictionaryMapper fieldDictionaryMapper;
     private final FieldMetadataService fieldMetadataService;
     private final DictionaryFactExtractor factExtractor;
+    private final WorkflowCapabilityCodeCollector capabilityCodeCollector;
+    private final GraphCapabilityCatalog capabilityCatalog;
     private final ObjectMapper objectMapper;
 
     @Override
@@ -139,11 +143,13 @@ public class ReportDatasetExecutionServiceImpl
             );
         }
 
+        Set<String> queryReadCapabilities;
         WorkflowExecutionOutcome queryOutcome;
         try {
             PublishedWorkflow queryWorkflow = snapshotResolver.resolveByCode(
                     dataset.getQueryWorkflowCode()
             );
+            queryReadCapabilities = resolveReadCapabilities(queryWorkflow);
             Map<String, Object> queryInput = canonicalInputMapper.map(
                     selectCanonicalInput(request.canonicalInput(), mappings.query()),
                     mappings.query(),
@@ -181,7 +187,7 @@ public class ReportDatasetExecutionServiceImpl
         }
 
         try {
-            return buildSafeResult(dataset, queryOutcome);
+            return buildSafeResult(dataset, queryReadCapabilities, queryOutcome);
         } catch (RuntimeException exception) {
             /*
              * 字段字典、事实映射或字段策略任一异常都必须失败关闭，不能退回原始响应。
@@ -340,11 +346,12 @@ public class ReportDatasetExecutionServiceImpl
 
     private DatasetExecutionResult buildSafeResult(
             ReportDataset dataset,
+            Set<String> readCapabilities,
             WorkflowExecutionOutcome queryOutcome) {
         List<ReportDatasetField> datasetFields = loadDatasetFields(dataset.getId());
         DictionaryMaterial dictionaryMaterial = loadDictionaryMaterial(
                 datasetFields,
-                dataset.getQueryWorkflowCode()
+                readCapabilities
         );
 
         UnifiedFactSet extracted = factExtractor.extract(
@@ -401,7 +408,7 @@ public class ReportDatasetExecutionServiceImpl
 
     private DictionaryMaterial loadDictionaryMaterial(
             List<ReportDatasetField> datasetFields,
-            String queryWorkflowCode) {
+            Set<String> readCapabilities) {
         Set<Long> dictionaryIds = new LinkedHashSet<>();
         for (ReportDatasetField field : datasetFields) {
             if (field == null || field.getFieldId() == null) {
@@ -431,6 +438,7 @@ public class ReportDatasetExecutionServiceImpl
                     || !"PUBLISHED".equals(dictionary.getPublishStatus())) {
                 throw new IllegalArgumentException("数据集引用的字段字典未发布");
             }
+            validateDictionaryCapability(dictionary, readCapabilities);
 
             FieldMeta meta = fieldMetadataService.toFieldMeta(dictionary);
             validateVisibilityBoundary(datasetField, meta);
@@ -456,9 +464,60 @@ public class ReportDatasetExecutionServiceImpl
                 && !Integer.valueOf(1).equals(meta.getUserVisible())) {
             throw new IllegalArgumentException("数据集展示策略突破字段字典边界");
         }
+        if (Boolean.TRUE.equals(datasetField.getExportable())
+                && !Integer.valueOf(1).equals(meta.getUserVisible())) {
+            throw new IllegalArgumentException("数据集导出策略突破字段字典边界");
+        }
         if (Boolean.TRUE.equals(datasetField.getModelVisible())
                 && !Integer.valueOf(1).equals(meta.getModelVisible())) {
             throw new IllegalArgumentException("数据集模型策略突破字段字典边界");
+        }
+    }
+
+    /**
+     * 使用统一收集器覆盖 FOREACH 等嵌套子图，并在事实提取前重新确认所有来源能力仍为 READ。
+     */
+    private Set<String> resolveReadCapabilities(
+            PublishedWorkflow queryWorkflow) {
+        if (queryWorkflow == null || queryWorkflow.compiledGraph() == null) {
+            throw new IllegalArgumentException("查询工作流缺少编译图");
+        }
+        List<String> collected = capabilityCodeCollector.collect(
+                queryWorkflow.compiledGraph()
+        );
+        if (collected.isEmpty()) {
+            throw new IllegalArgumentException("查询工作流没有可用READ能力");
+        }
+
+        Set<String> readCapabilities = new LinkedHashSet<>();
+        for (String capabilityCode : collected) {
+            if (!StringUtils.hasText(capabilityCode)) {
+                throw new IllegalArgumentException("查询工作流包含非READ能力");
+            }
+            String normalized = capabilityCode.trim();
+            if (!"READ".equalsIgnoreCase(
+                    capabilityCatalog.sideEffect(normalized)
+            )) {
+                throw new IllegalArgumentException("查询工作流包含非READ能力");
+            }
+            readCapabilities.add(normalized);
+        }
+        return Collections.unmodifiableSet(readCapabilities);
+    }
+
+    /**
+     * 字段路径只能来自当前查询工作流实际调用的已确认 READ 能力，禁止跨能力借用字典。
+     */
+    private void validateDictionaryCapability(
+            FieldDictionary dictionary,
+            Set<String> readCapabilities) {
+        String capabilityCode = dictionary.getCapabilityCode();
+        if (!StringUtils.hasText(capabilityCode)) {
+            throw new IllegalArgumentException("字段字典缺少capabilityCode");
+        }
+        String normalized = capabilityCode.trim();
+        if (!readCapabilities.contains(normalized)) {
+            throw new IllegalArgumentException("字段字典不属于当前查询工作流READ能力");
         }
     }
 
