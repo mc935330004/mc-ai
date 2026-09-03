@@ -229,7 +229,7 @@ class ReportDatasetExecutionServiceTest {
         verify(executionFacade, times(2)).execute(commands.capture());
         WorkflowExecutionCommand accessCommand = commands.getAllValues().get(0);
         WorkflowExecutionCommand queryCommand = commands.getAllValues().get(1);
-        assertThat(accessCommand.getInput()).containsExactly(Map.entry("employee_code", "E1001"));
+        assertThat(accessCommand.getInput()).containsExactly(Map.entry("employee_code", "P100"));
         assertThat(queryCommand.getInput()).containsExactly(Map.entry("project_no", "P100"));
         assertThat(accessCommand.getAuthorization()).isEqualTo(SECRET);
         assertThat(queryCommand.getAuthorization()).isEqualTo(SECRET);
@@ -263,7 +263,7 @@ class ReportDatasetExecutionServiceTest {
     @Test
     void failsClosedWhenQueryMappingIsMissingAndDoesNotExecuteQuery() throws Exception {
         arrangeDataset("""
-                {"access":{"employeeNo":"employee_code"},"query":{}}
+                {"access":{"subjectId":"employee_code"},"query":{}}
                 """);
         arrangeWorkflow(ACCESS, 11L, schema("employee_code"));
         arrangeWorkflow(QUERY, 22L, schema("project_no"));
@@ -792,7 +792,7 @@ class ReportDatasetExecutionServiceTest {
     private String defaultMapping() {
         return """
                 {
-                  "access":{"employeeNo":"employee_code"},
+                  "access":{"subjectId":"employee_code"},
                   "query":{"projectCode":"project_no"}
                 }
                 """;

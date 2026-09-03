@@ -56,7 +56,8 @@ public class BusinessSnapshotAccessService {
             DatasetAccessWorkflowExecutor.AccessDecision decision = accessExecutor.authorize(
                     new DatasetAccessWorkflowExecutor.AccessRequest(
                             command.agentRunId(), command.userId(), command.authorization(),
-                            command.secureContext(), command.canonicalQuery()
+                            command.secureContext(), command.subjectType(), command.subjectId(),
+                            command.canonicalQuery()
                     ),
                     dataset
             );

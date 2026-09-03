@@ -728,7 +728,7 @@ public class BusinessSnapshotServiceImpl implements BusinessSnapshotService {
     private String persistedStatus(DatasetExecutionStatus status) {
         return switch (status) {
             case SUCCESS -> "SUCCESS";
-            case EMPTY -> "NO_DATA";
+            case EMPTY -> org.example.ai.agent.business.snapshot.BusinessSnapshotItemStatus.NO_DATA.name();
             case FAILED -> "FAILED";
             case TIMEOUT -> "TIMEOUT";
             default -> throw badRequest("不支持的快照执行项状态");

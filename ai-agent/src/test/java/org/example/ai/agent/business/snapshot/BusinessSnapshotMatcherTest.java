@@ -1,5 +1,8 @@
 package org.example.ai.agent.business.snapshot;
 
+import com.baomidou.mybatisplus.core.conditions.Wrapper;
+import com.baomidou.mybatisplus.core.MybatisConfiguration;
+import com.baomidou.mybatisplus.core.metadata.TableInfoHelper;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.ai.agent.business.dataset.entity.ReportDatasetField;
 import org.example.ai.agent.business.dataset.mapper.ReportDatasetFieldMapper;
@@ -14,6 +17,8 @@ import org.example.ai.agent.business.snapshot.mapper.BusinessSnapshotMapper;
 import org.example.ai.agent.workflow.answer.artifact.mapper.ResultArtifactMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.apache.ibatis.builder.MapperBuilderAssistant;
+import org.mockito.ArgumentCaptor;
 
 import java.time.Clock;
 import java.time.Instant;
@@ -29,6 +34,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.when;
 
 class BusinessSnapshotMatcherTest {
@@ -46,6 +52,10 @@ class BusinessSnapshotMatcherTest {
 
     @BeforeEach
     void setUp() {
+        TableInfoHelper.initTableInfo(
+                new MapperBuilderAssistant(new MybatisConfiguration(), "snapshot-test"),
+                BusinessSnapshot.class
+        );
         snapshotMapper = mock(BusinessSnapshotMapper.class);
         itemMapper = mock(BusinessSnapshotItemMapper.class);
         fieldMapper = mock(ReportDatasetFieldMapper.class);
@@ -76,6 +86,20 @@ class BusinessSnapshotMatcherTest {
         assertThat(result.decision()).isEqualTo(SnapshotMatchDecision.REUSE);
         assertThat(result.snapshotId()).isEqualTo("exact");
         verify(accessService).reauthorize(any());
+    }
+
+    @Test
+    void shouldReuseNoDataItemUsingPersistedStatusContract() {
+        Map<String, Object> query = Map.of("year", 2026, "grain", "YEAR");
+        BusinessSnapshotItem noData = item(AssociationType.DIRECT);
+        noData.setStatus(BusinessSnapshotItemStatus.NO_DATA.name());
+        when(itemMapper.selectList(any())).thenReturn(List.of(noData));
+        when(snapshotMapper.selectList(any())).thenReturn(List.of(snapshot(
+                "empty", "PROJECT", "P100", query, POLICY, NOW.plusHours(1)
+        )));
+
+        assertThat(matcher.match(command("P100", query, "YEAR", false)).decision())
+                .isEqualTo(SnapshotMatchDecision.REUSE);
     }
 
     @Test
@@ -185,9 +209,62 @@ class BusinessSnapshotMatcherTest {
                 BusinessSubjectType.PROJECT, "P100", "ATTENDANCE",
                 Map.of("startDate", "2026-01-01", "endDate", "2026-03-31",
                         "grain", "QUARTER", "status", "ACTIVE"),
-                AssociationType.DIRECT, "QUARTER", Set.of(), false
+                AssociationType.DIRECT, "QUARTER", Set.of(),
+                Set.of(SnapshotFactChannel.CALCULATION), false
         );
         assertThat(matcher.match(noFacts).decision()).isEqualTo(SnapshotMatchDecision.REQUERY);
+    }
+
+    @Test
+    void shouldRejectConflictingGrainAndMixedTimeConditions() {
+        Map<String, Object> conflict = Map.of(
+                "startDate", "2026-01-01", "endDate", "2026-03-31", "grain", "MONTH"
+        );
+        assertThat(matcher.match(command("P100", conflict, "DAY", false)).decision())
+                .isEqualTo(SnapshotMatchDecision.REQUERY);
+
+        Map<String, Object> mixed = Map.of(
+                "year", 2026, "startDate", "2026-01-01",
+                "endDate", "2026-03-31", "grain", "QUARTER"
+        );
+        when(snapshotMapper.selectList(any())).thenReturn(List.of(snapshot(
+                "annual", "PROJECT", "P100",
+                Map.of("year", 2026, "grain", "YEAR"), POLICY, NOW.plusHours(1)
+        )));
+        assertThat(matcher.match(command("P100", mixed, "QUARTER", false)).decision())
+                .isEqualTo(SnapshotMatchDecision.REQUERY);
+    }
+
+    @Test
+    void exactReuseMustContainEveryRequiredFactInRequestedChannel() {
+        Map<String, Object> query = Map.of("year", 2026, "grain", "YEAR");
+        BusinessSnapshot missing = snapshot(
+                "missing", "PROJECT", "P100", query, POLICY, NOW.plusHours(1)
+        );
+        missing.setFactsJson(write(Map.of(
+                "item-1", Map.of(
+                        "calculation", Map.of(), "display", Map.of(),
+                        "export", Map.of(), "model", Map.of()
+                )
+        )));
+        when(snapshotMapper.selectList(any())).thenReturn(List.of(missing));
+
+        assertThat(matcher.match(command("P100", query, "YEAR", false)).decision())
+                .isEqualTo(SnapshotMatchDecision.REQUERY);
+    }
+
+    @Test
+    void exactLookupMustUseQueryHashBeforeBoundedDerivationLookup() {
+        Map<String, Object> query = Map.of("year", 2026, "grain", "YEAR");
+        when(snapshotMapper.selectList(any())).thenReturn(List.of());
+
+        matcher.match(command("P100", query, "YEAR", false));
+
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<Wrapper<BusinessSnapshot>> captor = ArgumentCaptor.forClass(Wrapper.class);
+        verify(snapshotMapper, times(2)).selectList(captor.capture());
+        assertThat(captor.getAllValues().get(0).getCustomSqlSegment())
+                .contains("query_hash", "LIMIT 50");
     }
 
     private MatchCommand command(String subjectId, Map<String, Object> query,
@@ -201,7 +278,8 @@ class BusinessSnapshotMatcherTest {
                 "agent-1", "user-1", "session-1", "Bearer current",
                 Map.of("roles", List.of("employee")), type, subjectId,
                 "ATTENDANCE", query, AssociationType.DIRECT, grain,
-                Set.of("attendanceDetails"), refresh
+                Set.of("attendanceDetails"),
+                Set.of(SnapshotFactChannel.CALCULATION), refresh
         );
     }
 
@@ -220,6 +298,14 @@ class BusinessSnapshotMatcherTest {
                 org.example.ai.agent.business.dataset.ReportDatasetValidator.canonicalSafeValue(query)
         ));
         snapshot.setStatus("COMPLETE");
+        snapshot.setFactsJson(write(Map.of(
+                "item-1", Map.of(
+                        "calculation", Map.of("attendanceDetails", List.of()),
+                        "display", Map.of("attendanceDetails", List.of()),
+                        "export", Map.of("attendanceDetails", List.of()),
+                        "model", Map.of("attendanceDetails", List.of())
+                )
+        )));
         snapshot.setConfigChecksum(CONFIG);
         snapshot.setFieldPolicyChecksum(policy);
         snapshot.setExpiresAt(expiresAt);
@@ -229,6 +315,7 @@ class BusinessSnapshotMatcherTest {
     private BusinessSnapshotItem item(AssociationType associationType) {
         BusinessSnapshotItem item = new BusinessSnapshotItem();
         item.setSnapshotId("ignored");
+        item.setItemKey("item-1");
         item.setAssociationType(associationType.name());
         item.setStatus("SUCCESS");
         return item;

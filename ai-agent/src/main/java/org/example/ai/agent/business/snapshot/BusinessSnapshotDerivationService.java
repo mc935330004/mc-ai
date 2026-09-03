@@ -4,8 +4,10 @@ import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.ai.agent.business.dataset.ReportDatasetValidator;
+import org.example.ai.agent.business.dataset.BusinessFactSanitizer;
 import org.example.ai.agent.business.dataset.entity.ReportDatasetField;
 import org.example.ai.agent.business.dataset.mapper.ReportDatasetFieldMapper;
+import org.example.ai.agent.business.dataset.model.FieldPolicy;
 import org.example.ai.agent.business.model.AssociationType;
 import org.example.ai.agent.business.model.BusinessSubjectType;
 import org.example.ai.agent.business.snapshot.entity.BusinessSnapshot;
@@ -30,6 +32,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
+import java.nio.charset.StandardCharsets;
 
 /**
  * 从已复权的安全快照确定性派生更窄时间范围。
@@ -42,11 +45,15 @@ public class BusinessSnapshotDerivationService {
     private static final Set<String> CHANNELS = Set.of(
             "calculation", "display", "export", "model"
     );
+    private static final int MAX_QUERY_BYTES = 64 * 1024;
+    private static final int MAX_FACT_BYTES = 256 * 1024;
+    private static final int MAX_ITEMS = 1000;
 
     private final BusinessSnapshotMapper snapshotMapper;
     private final BusinessSnapshotItemMapper itemMapper;
     private final ReportDatasetFieldMapper fieldMapper;
     private final BusinessSnapshotAccessService accessService;
+    private final BusinessFactSanitizer factSanitizer;
     private final ObjectMapper objectMapper;
     private final Clock clock;
 
@@ -56,8 +63,9 @@ public class BusinessSnapshotDerivationService {
             BusinessSnapshotItemMapper itemMapper,
             ReportDatasetFieldMapper fieldMapper,
             BusinessSnapshotAccessService accessService,
+            BusinessFactSanitizer factSanitizer,
             ObjectMapper objectMapper) {
-        this(snapshotMapper, itemMapper, fieldMapper, accessService,
+        this(snapshotMapper, itemMapper, fieldMapper, accessService, factSanitizer,
                 objectMapper, Clock.systemDefaultZone());
     }
 
@@ -67,12 +75,14 @@ public class BusinessSnapshotDerivationService {
             BusinessSnapshotItemMapper itemMapper,
             ReportDatasetFieldMapper fieldMapper,
             BusinessSnapshotAccessService accessService,
+            BusinessFactSanitizer factSanitizer,
             ObjectMapper objectMapper,
             Clock clock) {
         this.snapshotMapper = Objects.requireNonNull(snapshotMapper, "snapshotMapper不能为空");
         this.itemMapper = Objects.requireNonNull(itemMapper, "itemMapper不能为空");
         this.fieldMapper = Objects.requireNonNull(fieldMapper, "fieldMapper不能为空");
         this.accessService = Objects.requireNonNull(accessService, "accessService不能为空");
+        this.factSanitizer = Objects.requireNonNull(factSanitizer, "factSanitizer不能为空");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper不能为空");
         this.clock = Objects.requireNonNull(clock, "clock不能为空");
     }
@@ -106,6 +116,7 @@ public class BusinessSnapshotDerivationService {
                         .eq(ReportDatasetField::getDatasetId, grant.datasetId())
                         .orderByAsc(ReportDatasetField::getDisplayOrder, ReportDatasetField::getId)
         );
+        rejectOversized(source.getQueryJson(), MAX_QUERY_BYTES);
         Map<String, Object> sourceQuery = readMap(source.getQueryJson(), "来源查询条件");
         if (!canDerive(
                 sourceQuery, command.targetQuery(), command.requestedGrain(),
@@ -117,7 +128,7 @@ public class BusinessSnapshotDerivationService {
                 Wrappers.<BusinessSnapshotItem>lambdaQuery()
                         .eq(BusinessSnapshotItem::getSnapshotId, source.getSnapshotId())
                         .orderByAsc(BusinessSnapshotItem::getId)
-                        .last("FOR UPDATE")
+                        .last("LIMIT " + (MAX_ITEMS + 1) + " FOR UPDATE")
         );
         if (!itemsUsable(sourceItems, command)) {
             throw unavailable();
@@ -126,15 +137,22 @@ public class BusinessSnapshotDerivationService {
         Map<String, ReportDatasetField> fieldsByCode = fieldMap(fields);
         BusinessSnapshotMatcher.DateRange targetRange = BusinessSnapshotMatcher.DateRange
                 .parse(command.targetQuery()).orElseThrow(this::unavailable);
+        rejectOversized(source.getFactsJson(), MAX_FACT_BYTES);
         DerivationFacts derived = deriveFacts(
                 readMap(source.getFactsJson(), "来源安全事实"),
                 sourceItems, fieldsByCode, command.requiredFactCodes(), targetRange
         );
+        String derivedFactsJson = writeJson(derived.facts(), "派生安全事实");
+        if (derivedFactsJson.getBytes(StandardCharsets.UTF_8).length > MAX_FACT_BYTES) {
+            throw unavailable();
+        }
         LocalDateTime expiresAt = source.getExpiresAt();
         if (expiresAt == null || !expiresAt.isAfter(now)) {
             throw unavailable();
         }
-        BusinessSnapshot child = childSnapshot(source, command, derived.facts(), expiresAt, now);
+        BusinessSnapshot child = childSnapshot(
+                source, command, derivedFactsJson, expiresAt, now
+        );
         if (snapshotMapper.insert(child) != 1) {
             throw internal("派生快照写入失败");
         }
@@ -160,7 +178,32 @@ public class BusinessSnapshotDerivationService {
                 || !StringUtils.hasText(command.subjectId())
                 || !StringUtils.hasText(command.datasetCode())
                 || !StringUtils.hasText(command.sourceSnapshotId())
-                || command.requiredFactCodes().isEmpty()) {
+                || command.requiredFactCodes().isEmpty()
+                || command.requiredFactCodes().size() > MAX_ITEMS) {
+            throw unavailable();
+        }
+        requireLength(command.userId(), 128);
+        requireLength(command.sessionId(), 64);
+        requireLength(command.subjectId(), 128);
+        requireLength(command.datasetCode(), 128);
+        requireLength(command.sourceSnapshotId(), 32);
+        for (String factCode : command.requiredFactCodes()) {
+            requireLength(factCode, 128);
+        }
+        String queryJson = writeJson(command.targetQuery(), "目标查询条件");
+        if (queryJson.getBytes(StandardCharsets.UTF_8).length > MAX_QUERY_BYTES) {
+            throw unavailable();
+        }
+    }
+
+    private void requireLength(String value, int maxLength) {
+        if (!StringUtils.hasText(value) || value.length() > maxLength) {
+            throw unavailable();
+        }
+    }
+
+    private void rejectOversized(String value, int maxBytes) {
+        if (value == null || value.getBytes(StandardCharsets.UTF_8).length > maxBytes) {
             throw unavailable();
         }
     }
@@ -195,7 +238,10 @@ public class BusinessSnapshotDerivationService {
                 .parse(targetQuery).orElse(null);
         BusinessSnapshotMatcher.TimeGrain grain = BusinessSnapshotMatcher.TimeGrain
                 .parse(requestedGrain).orElse(null);
-        if (source == null || target == null || grain == null || !source.strictlyCovers(target)) {
+        BusinessSnapshotMatcher.TimeGrain canonicalGrain = BusinessSnapshotMatcher.TimeGrain
+                .parse(Objects.toString(targetQuery.get("grain"), null)).orElse(null);
+        if (source == null || target == null || grain == null
+                || canonicalGrain != grain || !source.strictlyCovers(target)) {
             return false;
         }
         Map<String, Object> sourceOther = nonTemporal(sourceQuery);
@@ -229,14 +275,19 @@ public class BusinessSnapshotDerivationService {
     private boolean itemsUsable(
             List<BusinessSnapshotItem> items,
             DeriveCommand command) {
-        if (items == null || items.isEmpty()) {
+        if (items == null || items.isEmpty() || items.size() > MAX_ITEMS) {
             return false;
         }
         for (BusinessSnapshotItem item : items) {
             /* 大明细的日期语义未在当前制品结构中声明，禁止猜测分块字段后裁剪。 */
             if (item == null
+                    || !StringUtils.hasText(item.getItemKey())
+                    || item.getItemKey().length() > 128
                     || StringUtils.hasText(item.getResultArtifactId())
-                    || !Set.of("SUCCESS", "EMPTY").contains(item.getStatus())
+                    || !Set.of(
+                    BusinessSnapshotItemStatus.SUCCESS.name(),
+                    BusinessSnapshotItemStatus.NO_DATA.name()
+            ).contains(item.getStatus())
                     || !Objects.equals(item.getAssociationType(), command.associationType().name())) {
                 return false;
             }
@@ -265,50 +316,57 @@ public class BusinessSnapshotDerivationService {
                 throw unavailable();
             }
             Map<String, Object> derivedEnvelope = new LinkedHashMap<>();
-            int calculationCount = -1;
-            for (String channel : CHANNELS) {
-                Object channelValue = envelope.get(channel);
-                if (!(channelValue instanceof Map<?, ?> channelFacts)) {
-                    throw unavailable();
-                }
-                Map<String, Object> derivedChannel = new LinkedHashMap<>();
-                for (Map.Entry<?, ?> entry : channelFacts.entrySet()) {
-                    String factCode = Objects.toString(entry.getKey(), "");
-                    ReportDatasetField field = fields.get(factCode);
-                    if (field == null || !allowedInChannel(field, channel)) {
-                        throw unavailable();
-                    }
-                    if (!requiredFactCodes.contains(factCode)) {
-                        continue;
-                    }
-                    DerivedValue value = deriveValue(entry.getValue(), range);
-                    derivedChannel.put(factCode, value.value());
-                    if ("calculation".equals(channel)) {
-                        calculationCount = calculationCount < 0
-                                ? value.count()
-                                : Math.min(calculationCount, value.count());
-                    }
-                }
-                if ("calculation".equals(channel)
-                        && !derivedChannel.keySet().containsAll(requiredFactCodes)) {
-                    throw unavailable();
-                }
-                derivedEnvelope.put(channel, derivedChannel);
+            Object calculationValue = envelope.get("calculation");
+            if (!(calculationValue instanceof Map<?, ?> calculationFacts)) {
+                throw unavailable();
             }
+            Map<String, Object> derivedStandardFacts = new LinkedHashMap<>();
+            int calculationCount = -1;
+            for (String factCode : requiredFactCodes) {
+                ReportDatasetField field = fields.get(factCode);
+                if (field == null || !Boolean.TRUE.equals(field.getCalculable())
+                        || !calculationFacts.containsKey(factCode)) {
+                    throw unavailable();
+                }
+                DerivedValue value = deriveValue(calculationFacts.get(factCode), range);
+                derivedStandardFacts.put(factCode, value.value());
+                calculationCount = calculationCount < 0
+                        ? value.count()
+                        : Math.min(calculationCount, value.count());
+            }
+            List<FieldPolicy> policies = requiredFactCodes.stream()
+                    .map(fields::get)
+                    .map(this::toPolicy)
+                    .toList();
+            BusinessFactSanitizer.SanitizedFacts sanitized = factSanitizer.sanitize(
+                    derivedStandardFacts, policies
+            );
+            derivedEnvelope.put("calculation", sanitized.calculationFacts());
+            derivedEnvelope.put("display", sanitized.displayFacts());
+            derivedEnvelope.put("export", sanitized.exportFacts());
+            derivedEnvelope.put("model", sanitized.modelFacts());
             result.put(itemKey, derivedEnvelope);
             counts.put(itemKey, Math.max(calculationCount, 0));
         }
         return new DerivationFacts(result, counts);
     }
 
-    private boolean allowedInChannel(ReportDatasetField field, String channel) {
-        return switch (channel) {
-            case "calculation" -> Boolean.TRUE.equals(field.getCalculable());
-            case "display" -> Boolean.TRUE.equals(field.getDisplayable());
-            case "export" -> Boolean.TRUE.equals(field.getExportable());
-            case "model" -> Boolean.TRUE.equals(field.getModelVisible());
-            default -> false;
-        };
+    private FieldPolicy toPolicy(ReportDatasetField field) {
+        if (field == null
+                || field.getCalculable() == null
+                || field.getDisplayable() == null
+                || field.getExportable() == null
+                || field.getModelVisible() == null
+                || !StringUtils.hasText(field.getFactType())
+                || !StringUtils.hasText(field.getMaskStrategy())
+                || !StringUtils.hasText(field.getGrain())) {
+            throw unavailable();
+        }
+        return new FieldPolicy(
+                field.getFactCode(), field.getFactType(), field.getCalculable(),
+                field.getDisplayable(), field.getExportable(), field.getModelVisible(),
+                field.getMaskStrategy(), field.getGrain()
+        );
     }
 
     private DerivedValue deriveValue(
@@ -352,7 +410,7 @@ public class BusinessSnapshotDerivationService {
     private BusinessSnapshot childSnapshot(
             BusinessSnapshot source,
             DeriveCommand command,
-            Map<String, Object> facts,
+            String factsJson,
             LocalDateTime expiresAt,
             LocalDateTime now) {
         BusinessSnapshot child = new BusinessSnapshot();
@@ -368,7 +426,7 @@ public class BusinessSnapshotDerivationService {
         ));
         child.setStatus(source.getStatus());
         child.setDataComplete(source.getDataComplete());
-        child.setFactsJson(writeJson(facts, "派生安全事实"));
+        child.setFactsJson(factsJson);
         child.setConfigChecksum(source.getConfigChecksum());
         child.setFieldPolicyChecksum(source.getFieldPolicyChecksum());
         child.setSourceSnapshotId(source.getSnapshotId());

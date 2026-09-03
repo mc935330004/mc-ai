@@ -1,6 +1,7 @@
 package org.example.ai.agent.business.snapshot;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.ai.agent.business.dataset.ReportDatasetValidator;
@@ -31,6 +32,7 @@ import java.util.LinkedHashMap;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.nio.charset.StandardCharsets;
 
 /**
  * 业务快照确定性匹配器。
@@ -41,6 +43,10 @@ import java.util.Set;
 public class BusinessSnapshotMatcher {
 
     public static final String GENERIC_REQUERY_REASON = "业务快照不可用，请重新查询";
+    private static final int MAX_CANDIDATES = 50;
+    private static final int MAX_ITEMS = 1000;
+    private static final int MAX_QUERY_BYTES = 64 * 1024;
+    private static final int MAX_FACT_BYTES = 256 * 1024;
     private static final Set<String> REUSABLE_STATUS = Set.of("COMPLETE", "PARTIAL_SUCCESS");
 
     private final BusinessSnapshotMapper snapshotMapper;
@@ -98,28 +104,61 @@ public class BusinessSnapshotMatcher {
             return requery(GENERIC_REQUERY_REASON);
         }
         LocalDateTime now = LocalDateTime.now(clock);
-        List<BusinessSnapshot> snapshots = snapshotMapper.selectList(
-                Wrappers.<BusinessSnapshot>lambdaQuery()
-                        .eq(BusinessSnapshot::getUserId, command.userId())
-                        .eq(BusinessSnapshot::getSessionId, command.sessionId())
-                        .eq(BusinessSnapshot::getSubjectType, command.subjectType().name())
-                        .eq(BusinessSnapshot::getSubjectId, command.subjectId())
-                        .eq(BusinessSnapshot::getDatasetCode, command.datasetCode())
-                        .in(BusinessSnapshot::getStatus, REUSABLE_STATUS)
-                        .gt(BusinessSnapshot::getExpiresAt, now)
-                        .orderByDesc(BusinessSnapshot::getCompletedAt)
+        String requestedHash = ContentHashUtils.sha256(
+                ReportDatasetValidator.canonicalSafeValue(command.canonicalQuery())
         );
-        if (snapshots == null || snapshots.isEmpty()) {
-            return requery(GENERIC_REQUERY_REASON);
-        }
         List<ReportDatasetField> fields = fieldMapper.selectList(
                 Wrappers.<ReportDatasetField>lambdaQuery()
                         .eq(ReportDatasetField::getDatasetId, grant.orElseThrow().datasetId())
                         .orderByAsc(ReportDatasetField::getDisplayOrder, ReportDatasetField::getId)
         );
-        String requestedHash = ContentHashUtils.sha256(
-                ReportDatasetValidator.canonicalSafeValue(command.canonicalQuery())
+        SnapshotMatchResult exact = findMatch(
+                loadCandidates(command, now, requestedHash, true), command,
+                grant.orElseThrow(), fields, now, requestedHash, true
         );
+        if (exact != null) {
+            return exact;
+        }
+        SnapshotMatchResult derived = findMatch(
+                loadCandidates(command, now, requestedHash, false), command,
+                grant.orElseThrow(), fields, now, requestedHash, false
+        );
+        return derived == null ? requery(GENERIC_REQUERY_REASON) : derived;
+    }
+
+    private List<BusinessSnapshot> loadCandidates(
+            MatchCommand command,
+            LocalDateTime now,
+            String requestedHash,
+            boolean exact) {
+        LambdaQueryWrapper<BusinessSnapshot> query = Wrappers.<BusinessSnapshot>lambdaQuery()
+                .eq(BusinessSnapshot::getUserId, command.userId())
+                .eq(BusinessSnapshot::getSessionId, command.sessionId())
+                .eq(BusinessSnapshot::getSubjectType, command.subjectType().name())
+                .eq(BusinessSnapshot::getSubjectId, command.subjectId())
+                .eq(BusinessSnapshot::getDatasetCode, command.datasetCode())
+                .in(BusinessSnapshot::getStatus, REUSABLE_STATUS)
+                .gt(BusinessSnapshot::getExpiresAt, now);
+        if (exact) {
+            query.eq(BusinessSnapshot::getQueryHash, requestedHash);
+        } else {
+            query.ne(BusinessSnapshot::getQueryHash, requestedHash);
+        }
+        List<BusinessSnapshot> snapshots = snapshotMapper.selectList(
+                query.orderByDesc(BusinessSnapshot::getCompletedAt)
+                        .last("LIMIT " + MAX_CANDIDATES)
+        );
+        return snapshots == null ? List.of() : snapshots;
+    }
+
+    private SnapshotMatchResult findMatch(
+            List<BusinessSnapshot> snapshots,
+            MatchCommand command,
+            BusinessSnapshotAccessService.AccessGrant grant,
+            List<ReportDatasetField> fields,
+            LocalDateTime now,
+            String requestedHash,
+            boolean exactOnly) {
         List<BusinessSnapshot> ordered = snapshots.stream()
                 .filter(Objects::nonNull)
                 .sorted(Comparator.comparing(
@@ -129,7 +168,7 @@ public class BusinessSnapshotMatcher {
                 .toList();
 
         for (BusinessSnapshot snapshot : ordered) {
-            if (!usable(snapshot, command, grant.orElseThrow(), now)) {
+            if (!usable(snapshot, command, grant, now)) {
                 continue;
             }
             List<BusinessSnapshotItem> items = loadUsableItems(snapshot, command, now);
@@ -138,6 +177,9 @@ public class BusinessSnapshotMatcher {
             }
             Map<String, Object> sourceQuery = readQuery(snapshot.getQueryJson());
             if (sourceQuery == null) {
+                continue;
+            }
+            if (!factsUsable(snapshot, items, fields, command)) {
                 continue;
             }
             String actualSourceHash = ContentHashUtils.sha256(
@@ -154,10 +196,16 @@ public class BusinessSnapshotMatcher {
                         SnapshotMatchDecision.REUSE, snapshot.getSnapshotId(), "查询条件完全一致"
                 );
             }
+            if (exactOnly) {
+                continue;
+            }
             boolean smallFactsOnly = items.stream().noneMatch(
                     item -> StringUtils.hasText(item.getResultArtifactId())
             );
-            if (smallFactsOnly && canDerive(
+            boolean hasData = items.stream().anyMatch(item ->
+                    BusinessSnapshotItemStatus.SUCCESS.name().equals(item.getStatus())
+            );
+            if (smallFactsOnly && hasData && canDerive(
                     sourceQuery, command.canonicalQuery(), command.requestedGrain(),
                     command.requiredFactCodes(), fields
             )) {
@@ -166,7 +214,7 @@ public class BusinessSnapshotMatcher {
                 );
             }
         }
-        return requery(GENERIC_REQUERY_REASON);
+        return null;
     }
 
     private boolean valid(MatchCommand command) {
@@ -178,7 +226,26 @@ public class BusinessSnapshotMatcher {
                 && command.subjectType() != null
                 && StringUtils.hasText(command.subjectId())
                 && StringUtils.hasText(command.datasetCode())
-                && command.associationType() != null;
+                && command.associationType() != null
+                && command.requiredFactCodes().size() <= MAX_ITEMS
+                && command.requiredFactCodes().stream().allMatch(
+                code -> StringUtils.hasText(code) && code.length() <= 128
+        )
+                && grainConsistent(command.requestedGrain(), command.canonicalQuery());
+    }
+
+    private boolean grainConsistent(
+            String requestedGrain,
+            Map<String, Object> query) {
+        String queryGrain = query == null ? null : Objects.toString(query.get("grain"), null);
+        if (!StringUtils.hasText(requestedGrain) && !StringUtils.hasText(queryGrain)) {
+            return true;
+        }
+        Optional<TimeGrain> requested = TimeGrain.parse(requestedGrain);
+        Optional<TimeGrain> canonical = TimeGrain.parse(queryGrain);
+        return requested.isPresent()
+                && canonical.isPresent()
+                && requested.get() == canonical.get();
     }
 
     private boolean usable(
@@ -206,42 +273,119 @@ public class BusinessSnapshotMatcher {
                 Wrappers.<BusinessSnapshotItem>lambdaQuery()
                         .eq(BusinessSnapshotItem::getSnapshotId, snapshot.getSnapshotId())
                         .orderByAsc(BusinessSnapshotItem::getId)
+                        .last("LIMIT " + (MAX_ITEMS + 1))
         );
-        if (items == null || items.isEmpty()) {
+        if (items == null || items.isEmpty() || items.size() > MAX_ITEMS) {
             return List.of();
         }
+        Set<String> artifactIds = new java.util.LinkedHashSet<>();
         for (BusinessSnapshotItem item : items) {
             if (item == null
                     || !Objects.equals(item.getAssociationType(), command.associationType().name())
-                    || !Set.of("SUCCESS", "EMPTY").contains(item.getStatus())
-                    || !artifactUsable(item.getResultArtifactId(), command, now)) {
+                    || !Set.of(
+                    BusinessSnapshotItemStatus.SUCCESS.name(),
+                    BusinessSnapshotItemStatus.NO_DATA.name()
+            ).contains(item.getStatus())
+            ) {
                 return List.of();
             }
+            if (StringUtils.hasText(item.getResultArtifactId())) {
+                artifactIds.add(item.getResultArtifactId());
+            }
         }
-        return List.copyOf(items);
+        return artifactsUsable(artifactIds, command, now)
+                ? List.copyOf(items)
+                : List.of();
     }
 
-    private boolean artifactUsable(
-            String artifactId,
-            MatchCommand command,
-            LocalDateTime now) {
-        if (!StringUtils.hasText(artifactId)) {
+    private boolean factsUsable(
+            BusinessSnapshot snapshot,
+            List<BusinessSnapshotItem> items,
+            List<ReportDatasetField> fields,
+            MatchCommand command) {
+        if (command.requiredFactCodes().isEmpty()) {
             return true;
         }
-        ResultArtifact artifact = artifactMapper.selectOne(
+        if (command.requiredChannels().isEmpty() || fields == null || fields.isEmpty()) {
+            return false;
+        }
+        Map<String, Object> root = readJsonMap(snapshot.getFactsJson());
+        if (root == null) {
+            return false;
+        }
+        Map<String, ReportDatasetField> byCode = new LinkedHashMap<>();
+        for (ReportDatasetField field : fields) {
+            if (field == null || !StringUtils.hasText(field.getFactCode())
+                    || byCode.putIfAbsent(field.getFactCode(), field) != null) {
+                return false;
+            }
+        }
+        for (BusinessSnapshotItem item : items) {
+            if (BusinessSnapshotItemStatus.NO_DATA.name().equals(item.getStatus())) {
+                continue;
+            }
+            Object envelopeValue = root.get(item.getItemKey());
+            if (!(envelopeValue instanceof Map<?, ?> envelope)) {
+                return false;
+            }
+            for (SnapshotFactChannel channel : command.requiredChannels()) {
+                Object channelValue = envelope.get(channel.jsonName());
+                if (!(channelValue instanceof Map<?, ?> channelFacts)) {
+                    return false;
+                }
+                for (String code : command.requiredFactCodes()) {
+                    ReportDatasetField field = byCode.get(code);
+                    if (field == null || !allowedInChannel(field, channel)
+                            || !channelFacts.containsKey(code)) {
+                        return false;
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
+    private boolean allowedInChannel(
+            ReportDatasetField field,
+            SnapshotFactChannel channel) {
+        return switch (channel) {
+            case CALCULATION -> Boolean.TRUE.equals(field.getCalculable());
+            case DISPLAY -> Boolean.TRUE.equals(field.getDisplayable());
+            case EXPORT -> Boolean.TRUE.equals(field.getExportable());
+            case MODEL -> Boolean.TRUE.equals(field.getModelVisible());
+        };
+    }
+
+    private boolean artifactsUsable(
+            Set<String> artifactIds,
+            MatchCommand command,
+            LocalDateTime now) {
+        if (artifactIds.isEmpty()) {
+            return true;
+        }
+        List<ResultArtifact> artifacts = artifactMapper.selectList(
                 Wrappers.<ResultArtifact>lambdaQuery()
-                        .eq(ResultArtifact::getId, artifactId)
+                        .in(ResultArtifact::getId, artifactIds)
                         .eq(ResultArtifact::getUserId, command.userId())
                         .eq(ResultArtifact::getSessionId, command.sessionId())
                         .eq(ResultArtifact::getStatus, "COMPLETE")
-                        .last("LIMIT 1")
         );
-        return artifact != null
-                && Objects.equals(artifact.getUserId(), command.userId())
-                && Objects.equals(artifact.getSessionId(), command.sessionId())
-                && "COMPLETE".equals(artifact.getStatus())
-                && artifact.getExpiresAt() != null
-                && artifact.getExpiresAt().isAfter(now);
+        if (artifacts == null || artifacts.size() != artifactIds.size()) {
+            return false;
+        }
+        Set<String> verified = new java.util.HashSet<>();
+        for (ResultArtifact artifact : artifacts) {
+            if (artifact == null || !artifactIds.contains(artifact.getId())
+                    || !verified.add(artifact.getId())
+                    || !Objects.equals(artifact.getUserId(), command.userId())
+                    || !Objects.equals(artifact.getSessionId(), command.sessionId())
+                    || !"COMPLETE".equals(artifact.getStatus())
+                    || artifact.getExpiresAt() == null
+                    || !artifact.getExpiresAt().isAfter(now)) {
+                return false;
+            }
+        }
+        return verified.equals(artifactIds);
     }
 
     boolean canDerive(
@@ -301,8 +445,25 @@ public class BusinessSnapshotMatcher {
         if (!StringUtils.hasText(queryJson)) {
             return null;
         }
+        if (queryJson.getBytes(StandardCharsets.UTF_8).length > MAX_QUERY_BYTES) {
+            return null;
+        }
         try {
             return objectMapper.readValue(queryJson, new TypeReference<>() { });
+        } catch (Exception exception) {
+            return null;
+        }
+    }
+
+    private Map<String, Object> readJsonMap(String json) {
+        if (!StringUtils.hasText(json)) {
+            return null;
+        }
+        if (json.getBytes(StandardCharsets.UTF_8).length > MAX_FACT_BYTES) {
+            return null;
+        }
+        try {
+            return objectMapper.readValue(json, new TypeReference<>() { });
         } catch (Exception exception) {
             return null;
         }
@@ -325,6 +486,7 @@ public class BusinessSnapshotMatcher {
             AssociationType associationType,
             String requestedGrain,
             Set<String> requiredFactCodes,
+            Set<SnapshotFactChannel> requiredChannels,
             boolean refreshRequested) {
 
         @SuppressWarnings("unchecked")
@@ -338,6 +500,9 @@ public class BusinessSnapshotMatcher {
             requiredFactCodes = requiredFactCodes == null
                     ? Set.of()
                     : Set.copyOf(requiredFactCodes);
+            requiredChannels = requiredChannels == null
+                    ? Set.of()
+                    : Set.copyOf(requiredChannels);
         }
 
         /** 日志仅保留路由摘要，认证、上下文和查询值必须隐藏。 */
@@ -394,10 +559,20 @@ public class BusinessSnapshotMatcher {
                 return Optional.empty();
             }
             try {
-                if (query.containsKey("startDate") && query.containsKey("endDate")) {
+                boolean hasStart = query.containsKey("startDate");
+                boolean hasEnd = query.containsKey("endDate");
+                boolean hasYear = query.containsKey("year");
+                boolean hasQuarter = query.containsKey("quarter");
+                if (hasStart || hasEnd) {
+                    if (!hasStart || !hasEnd || hasYear || hasQuarter) {
+                        return Optional.empty();
+                    }
                     LocalDate start = LocalDate.parse(Objects.toString(query.get("startDate"), ""));
                     LocalDate end = LocalDate.parse(Objects.toString(query.get("endDate"), ""));
                     return start.isAfter(end) ? Optional.empty() : Optional.of(new DateRange(start, end));
+                }
+                if (!hasYear || (hasQuarter && !hasYear)) {
+                    return Optional.empty();
                 }
                 Object yearValue = query.get("year");
                 int year = yearValue instanceof Number number
@@ -406,7 +581,7 @@ public class BusinessSnapshotMatcher {
                 if (year < 1900 || year > 9999) {
                     return Optional.empty();
                 }
-                if (query.containsKey("quarter")) {
+                if (hasQuarter) {
                     int quarter = Integer.parseInt(Objects.toString(query.get("quarter"), ""));
                     if (quarter < 1 || quarter > 4) {
                         return Optional.empty();

@@ -2,6 +2,8 @@ package org.example.ai.agent.business.snapshot;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.ai.agent.business.dataset.entity.ReportDatasetField;
+import org.example.ai.agent.business.dataset.BusinessFactSanitizer;
+import org.example.ai.agent.business.dataset.ReportDatasetValidator;
 import org.example.ai.agent.business.dataset.mapper.ReportDatasetFieldMapper;
 import org.example.ai.agent.business.model.AssociationType;
 import org.example.ai.agent.business.model.BusinessSubjectType;
@@ -54,6 +56,7 @@ class BusinessSnapshotDerivationServiceTest {
         objectMapper = new ObjectMapper();
         service = new BusinessSnapshotDerivationService(
                 snapshotMapper, itemMapper, fieldMapper, accessService,
+                new BusinessFactSanitizer(new ReportDatasetValidator()),
                 objectMapper, fixedClock()
         );
         when(accessService.reauthorize(any())).thenReturn(Optional.of(
@@ -136,6 +139,70 @@ class BusinessSnapshotDerivationServiceTest {
                 .isInstanceOf(BusinessException.class);
     }
 
+    @Test
+    void shouldRebuildMaskedChannelsFromDerivedCalculationFacts() throws Exception {
+        ReportDatasetField partial = field();
+        partial.setMaskStrategy("PARTIAL");
+        when(fieldMapper.selectList(any())).thenReturn(List.of(partial));
+        BusinessSnapshot source = sourceSnapshot();
+        source.setFactsJson(objectMapper.writeValueAsString(Map.of(
+                "employee-E100", Map.of(
+                        "calculation", Map.of("attendanceDetails", List.of(
+                                record("2026-01-02", 100), record("2026-04-02", 300)
+                        )),
+                        "display", Map.of("attendanceDetails", "old-mask"),
+                        "export", Map.of("attendanceDetails", "old-mask"),
+                        "model", Map.of("attendanceDetails", "old-mask")
+                )
+        )));
+        when(snapshotMapper.selectOne(any())).thenReturn(source);
+
+        BusinessSnapshot child = service.derive(command());
+
+        Map<?, ?> root = objectMapper.readValue(child.getFactsJson(), Map.class);
+        Map<?, ?> item = (Map<?, ?>) root.get("employee-E100");
+        assertThat(((Map<?, ?>) item.get("calculation")).get("attendanceDetails"))
+                .isInstanceOf(List.class);
+        assertThat(((Map<?, ?>) item.get("display")).get("attendanceDetails"))
+                .isInstanceOf(String.class)
+                .isNotEqualTo("old-mask");
+    }
+
+    @Test
+    void shouldRejectOversizedCanonicalQueryBeforeAccessOrInsert() {
+        DeriveCommand oversized = command(Map.of(
+                "startDate", "2026-01-01", "endDate", "2026-03-31",
+                "grain", "QUARTER", "filter", "中".repeat(70_000)
+        ), "QUARTER");
+
+        assertThatThrownBy(() -> service.derive(oversized))
+                .isInstanceOf(BusinessException.class);
+        verify(accessService, never()).reauthorize(any());
+        verify(snapshotMapper, never()).insert(any(BusinessSnapshot.class));
+    }
+
+    @Test
+    void shouldApplyHashAndSummaryOnlyPoliciesToDerivedVisibleChannels() throws Exception {
+        BusinessSnapshot source = sourceSnapshot();
+        source.setFactsJson(objectMapper.writeValueAsString(Map.of(
+                "employee-E100", envelope(List.of(record("2026-01-02", 100)))
+        )));
+        when(snapshotMapper.selectOne(any())).thenReturn(source);
+
+        ReportDatasetField hash = field();
+        hash.setMaskStrategy("HASH");
+        when(fieldMapper.selectList(any())).thenReturn(List.of(hash));
+        Object hashed = visibleValue(service.derive(command()));
+        assertThat(hashed).isInstanceOf(String.class);
+        assertThat((String) hashed).hasSize(64);
+
+        ReportDatasetField summary = field();
+        summary.setMaskStrategy("SUMMARY_ONLY");
+        when(fieldMapper.selectList(any())).thenReturn(List.of(summary));
+        assertThat(visibleValue(service.derive(command())))
+                .isEqualTo(BusinessFactSanitizer.SUMMARY_ONLY_VALUE);
+    }
+
     private DeriveCommand command() {
         return command(Map.of(
                 "startDate", "2026-01-01", "endDate", "2026-03-31", "grain", "QUARTER"
@@ -194,6 +261,7 @@ class BusinessSnapshotDerivationServiceTest {
         field.setExportable(true);
         field.setModelVisible(true);
         field.setFilterable(true);
+        field.setMaskStrategy("NONE");
         field.setGrain("DAY");
         return field;
     }
@@ -205,6 +273,12 @@ class BusinessSnapshotDerivationServiceTest {
                 "export", Map.of("attendanceDetails", fact),
                 "model", Map.of("attendanceDetails", fact)
         );
+    }
+
+    private Object visibleValue(BusinessSnapshot snapshot) throws Exception {
+        Map<?, ?> root = objectMapper.readValue(snapshot.getFactsJson(), Map.class);
+        Map<?, ?> item = (Map<?, ?>) root.get("employee-E100");
+        return ((Map<?, ?>) item.get("display")).get("attendanceDetails");
     }
 
     private Map<String, Object> record(String date, int amount) {

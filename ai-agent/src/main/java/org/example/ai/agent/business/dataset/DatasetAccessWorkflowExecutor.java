@@ -3,6 +3,7 @@ package org.example.ai.agent.business.dataset;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.ai.agent.business.dataset.entity.ReportDataset;
+import org.example.ai.agent.business.model.BusinessSubjectType;
 import org.example.ai.agent.workflow.runtime.PublishedWorkflow;
 import org.example.ai.agent.workflow.runtime.WorkflowExecutionCommand;
 import org.example.ai.agent.workflow.runtime.WorkflowExecutionFacade;
@@ -46,15 +47,24 @@ public class DatasetAccessWorkflowExecutor {
                 || !StringUtils.hasText(request.agentRunId())
                 || !StringUtils.hasText(request.userId())
                 || !StringUtils.hasText(request.authorization())
+                || request.subjectType() == null
+                || !StringUtils.hasText(request.subjectId())
                 || !StringUtils.hasText(dataset.getAccessWorkflowCode())) {
             return AccessDecision.FAILED;
         }
         try {
             Map<String, String> mapping = readAccessMapping(dataset.getInputMappingJson());
+            /* access工作流必须消费后端绑定的稳定主体ID，禁止只按时间等条件授权。 */
+            if (!mapping.containsKey("subjectId")) {
+                return AccessDecision.FAILED;
+            }
+            Map<String, Object> trustedCanonical = new LinkedHashMap<>(request.canonicalInput());
+            trustedCanonical.put("subjectId", request.subjectId());
+            trustedCanonical.put("subjectType", request.subjectType().name());
             Map<String, Object> selected = new LinkedHashMap<>();
             for (String canonicalName : mapping.keySet()) {
-                if (request.canonicalInput().containsKey(canonicalName)) {
-                    selected.put(canonicalName, request.canonicalInput().get(canonicalName));
+                if (trustedCanonical.containsKey(canonicalName)) {
+                    selected.put(canonicalName, trustedCanonical.get(canonicalName));
                 }
             }
             PublishedWorkflow workflow = snapshotResolver.resolveByCode(
@@ -131,6 +141,8 @@ public class DatasetAccessWorkflowExecutor {
             String userId,
             String authorization,
             Map<String, Object> secureContext,
+            BusinessSubjectType subjectType,
+            String subjectId,
             Map<String, Object> canonicalInput) {
 
         @SuppressWarnings("unchecked")
@@ -146,8 +158,10 @@ public class DatasetAccessWorkflowExecutor {
         /** 认证和安全上下文只允许驻留本次调用内存，不进入日志。 */
         @Override
         public String toString() {
-            return "AccessRequest[agentRunId=" + agentRunId
-                    + ", userId=" + userId
+            return "AccessRequest[agentRunIdPresent=" + StringUtils.hasText(agentRunId)
+                    + ", userIdPresent=" + StringUtils.hasText(userId)
+                    + ", subjectType=" + subjectType
+                    + ", subjectIdPresent=" + StringUtils.hasText(subjectId)
                     + ", authorizationPresent=" + StringUtils.hasText(authorization)
                     + ", secureContextSize=" + secureContext.size()
                     + ", canonicalInputSize=" + canonicalInput.size() + ']';

@@ -103,7 +103,8 @@ public class ReportDatasetExecutionServiceImpl
                 accessWorkflowExecutor.authorize(
                         new DatasetAccessWorkflowExecutor.AccessRequest(
                                 request.agentRunId(), request.userId(), request.authorization(),
-                                request.secureContext(), request.canonicalInput()
+                                request.secureContext(), request.subjectType(), request.subjectId(),
+                                request.canonicalInput()
                         ),
                         dataset
                 );

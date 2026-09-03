@@ -70,6 +70,7 @@ class BusinessSnapshotAccessServiceTest {
         verify(facade).execute(command.capture());
         assertThat(command.getValue().getWorkflowCode()).isEqualTo("attendance.access");
         assertThat(command.getValue().getAuthorization()).isEqualTo("Bearer current");
+        assertThat(command.getValue().getInput()).containsEntry("employee_code", "E100");
         verify(resolver, never()).resolveByCode("attendance.query");
     }
 
@@ -97,12 +98,44 @@ class BusinessSnapshotAccessServiceTest {
                 .contains("authorizationPresent=true");
     }
 
+    @Test
+    void accessRequestMustNotPrintStableIdentityOrSubjectValues() {
+        DatasetAccessWorkflowExecutor.AccessRequest request =
+                new DatasetAccessWorkflowExecutor.AccessRequest(
+                        "agent-run-secret", "user-secret", "Bearer current",
+                        Map.of("roles", List.of("employee")),
+                        BusinessSubjectType.PERSON, "E100",
+                        Map.of("subjectId", "caller-subject")
+                );
+
+        assertThat(request.toString())
+                .doesNotContain(
+                        "agent-run-secret", "user-secret", "E100", "caller-subject",
+                        "Bearer current", "employee"
+                )
+                .contains(
+                        "agentRunIdPresent=true", "userIdPresent=true",
+                        "subjectType=PERSON", "subjectIdPresent=true",
+                        "authorizationPresent=true"
+                );
+    }
+
+    @Test
+    void shouldFailClosedWhenAccessMappingDoesNotConsumeTrustedSubject() {
+        ReportDataset invalid = dataset();
+        invalid.setInputMappingJson("{\"access\":{\"year\":\"year\"},\"query\":{}}");
+        when(datasetMapper.selectOne(any())).thenReturn(invalid);
+
+        assertThat(service.reauthorize(command())).isEmpty();
+        verify(facade, never()).execute(any());
+    }
+
     private AccessCommand command() {
         return new AccessCommand(
                 "agent-1", "user-1", "session-1", "Bearer current",
                 Map.of("roles", List.of("employee")), "ATTENDANCE",
                 BusinessSubjectType.PERSON, "E100",
-                Map.of("year", 2026)
+                Map.of("year", 2026, "subjectId", "E999")
         );
     }
 
@@ -113,7 +146,7 @@ class BusinessSnapshotAccessServiceTest {
         dataset.setAccessWorkflowCode("attendance.access");
         dataset.setQueryWorkflowCode("attendance.query");
         dataset.setSubjectTypesJson("[\"PERSON\"]");
-        dataset.setInputMappingJson("{\"access\":{\"year\":\"year\"},\"query\":{}}");
+        dataset.setInputMappingJson("{\"access\":{\"subjectId\":\"employee_code\"},\"query\":{}}");
         dataset.setConfigChecksum(CONFIG);
         dataset.setFieldPolicyChecksum(POLICY);
         dataset.setEnabled(true);
@@ -131,7 +164,7 @@ class BusinessSnapshotAccessServiceTest {
         return mapper.createObjectNode()
                 .put("type", "object")
                 .set("properties", mapper.createObjectNode()
-                        .set("year", mapper.createObjectNode().put("type", "integer")));
+                        .set("employee_code", mapper.createObjectNode().put("type", "string")));
     }
 
     /**
