@@ -40,6 +40,20 @@ public interface BusinessSnapshotService {
             items = items == null ? List.of() : List.copyOf(items);
         }
 
+        /** 仅展示持久化路由摘要，隐藏主体标识和规范查询值。 */
+        @Override
+        public String toString() {
+            return "CreateCommand[userId=" + userId
+                    + ", sessionId=" + sessionId
+                    + ", subjectType=" + subjectType
+                    + ", subjectIdPresent=" + (subjectId != null && !subjectId.isBlank())
+                    + ", datasetCode=" + datasetCode
+                    + ", canonicalQuerySize=" + canonicalQuery.size()
+                    + ", sourceSnapshotPresent="
+                    + (sourceSnapshotId != null && !sourceSnapshotId.isBlank())
+                    + ", itemCount=" + items.size() + ']';
+        }
+
     }
 
     /**

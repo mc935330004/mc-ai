@@ -51,7 +51,7 @@ public record DatasetExecutionRequest(
                 + ", secureContextSize=" + secureContext.size()
                 + ", datasetCode=" + datasetCode
                 + ", subjectType=" + subjectType
-                + ", subjectId=" + subjectId
+                + ", subjectIdPresent=" + (subjectId != null && !subjectId.isBlank())
                 + ", canonicalInputPresent=" + !canonicalInput.isEmpty()
                 + ", canonicalInputSize=" + canonicalInput.size()
                 + ']';
