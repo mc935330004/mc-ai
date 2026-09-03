@@ -7,7 +7,7 @@ import java.util.List;
  */
 public record SubjectDirectoryPage(
         boolean accessible,
-        List<SubjectCandidate> candidates,
+        List<AuthorizedSubjectCandidate> candidates,
         int pageNumber,
         int pageSize,
         long totalCount,

@@ -1,7 +1,7 @@
 package org.example.ai.agent.business.subject;
 
 import org.example.ai.agent.business.model.BusinessSubjectType;
-import org.example.ai.agent.business.subject.model.SubjectCandidate;
+import org.example.ai.agent.business.subject.model.AuthorizedSubjectCandidate;
 import org.example.ai.agent.business.subject.model.SubjectDirectoryPage;
 import org.example.ai.agent.business.subject.model.SubjectResolutionRequest;
 import org.example.ai.agent.business.subject.model.SubjectResolutionResult;
@@ -16,6 +16,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.time.Clock;
 import java.time.Instant;
+import java.time.Duration;
 import java.time.ZoneId;
 import java.util.List;
 import java.util.Map;
@@ -40,23 +41,31 @@ class SubjectResolutionServiceTest {
     private DepartmentDirectoryService departmentDirectoryService;
 
     private SubjectResolutionService service;
+    private SubjectSelectionTokenService tokenService;
 
     @BeforeEach
     void setUp() {
+        Clock clock = Clock.fixed(
+                Instant.parse("2026-09-03T00:00:00Z"),
+                ZoneId.of("Asia/Shanghai")
+        );
+        tokenService = new SubjectSelectionTokenService(
+                "0123456789abcdef0123456789abcdef".getBytes(),
+                clock,
+                Duration.ofMinutes(10)
+        );
         service = new SubjectResolutionService(
                 projectDirectoryService,
                 personDirectoryService,
                 departmentDirectoryService,
-                Clock.fixed(
-                        Instant.parse("2026-09-03T00:00:00Z"),
-                        ZoneId.of("Asia/Shanghai")
-                )
+                tokenService,
+                clock
         );
     }
 
     @Test
     void resolvesAnExactAuthorizedProjectCodeWithoutCallingOtherDirectories() {
-        SubjectCandidate project = project("project-id-1", "XXXT2674040", "工程项目");
+        AuthorizedSubjectCandidate project = project("project-id-1", "XXXT2674040", "工程项目");
         when(projectDirectoryService.search(any())).thenReturn(page(project));
 
         SubjectResolutionResult result = service.resolve(request(
@@ -73,15 +82,16 @@ class SubjectResolutionServiceTest {
         ));
 
         assertThat(result.state()).isEqualTo(SubjectResolutionState.RESOLVED);
-        assertThat(result.resolvedSubject()).isEqualTo(project);
+        assertThat(result.resolvedSubject().projectCode()).isEqualTo("XXXT2674040");
+        assertThat(result.resolvedSubject().selectionToken()).doesNotContain("project-id-1");
         verify(personDirectoryService, never()).search(any());
         verify(departmentDirectoryService, never()).search(any());
     }
 
     @Test
     void returnsPagedProjectCandidatesForNameOrManagerAndNeverAutoSelects() {
-        SubjectCandidate first = project("project-id-1", "P100", "工程项目");
-        SubjectCandidate second = project("project-id-2", "P200", "维护项目");
+        AuthorizedSubjectCandidate first = project("project-id-1", "P100", "工程项目");
+        AuthorizedSubjectCandidate second = project("project-id-2", "P200", "维护项目");
         when(projectDirectoryService.search(any())).thenReturn(
                 new SubjectDirectoryPage(true, List.of(first, second), 2, 20, 67, true)
         );
@@ -101,7 +111,9 @@ class SubjectResolutionServiceTest {
 
         assertThat(result.state()).isEqualTo(SubjectResolutionState.CANDIDATES);
         assertThat(result.resolvedSubject()).isNull();
-        assertThat(result.candidates()).containsExactly(first, second);
+        assertThat(result.candidates())
+                .extracting(candidate -> candidate.projectCode())
+                .containsExactly("P100", "P200");
         assertThat(result.totalCount()).isEqualTo(67);
         assertThat(result.hasNext()).isTrue();
     }
@@ -144,7 +156,7 @@ class SubjectResolutionServiceTest {
 
     @Test
     void resolvesCurrentEmployeeOnlyFromSourceAuthorizedDirectory() {
-        SubjectCandidate self = person("E1001", "李四", "研发中心/平台组", "E***01");
+        AuthorizedSubjectCandidate self = person("E1001", "李四", "研发中心/平台组", "E***01");
         when(personDirectoryService.search(any())).thenReturn(page(self));
 
         SubjectResolutionResult result = service.resolve(request(
@@ -164,12 +176,12 @@ class SubjectResolutionServiceTest {
         verify(personDirectoryService).search(query.capture());
         assertThat(query.getValue().searchMode()).isEqualTo(SubjectSearchMode.CURRENT_PERSON);
         assertThat(result.state()).isEqualTo(SubjectResolutionState.RESOLVED);
-        assertThat(result.resolvedSubject()).isEqualTo(self);
+        assertThat(result.resolvedSubject().displayName()).isEqualTo("李四");
     }
 
     @Test
     void directEmployeeNumberStillUsesAuthorizedDirectoryBeforeResolution() {
-        SubjectCandidate employee = person("E9001", "王五", "财务中心", "E***01");
+        AuthorizedSubjectCandidate employee = person("E9001", "王五", "财务中心", "E***01");
         when(personDirectoryService.search(any())).thenReturn(page(employee));
 
         SubjectResolutionResult result = service.resolve(request(
@@ -194,8 +206,8 @@ class SubjectResolutionServiceTest {
 
     @Test
     void duplicatePersonNamesRequireExplicitSelectionFromMaskedCandidates() {
-        SubjectCandidate first = person("E1001", "张三", "工程部/一组", "E***01");
-        SubjectCandidate second = person("E2001", "张三", "工程部/二组", "E***01");
+        AuthorizedSubjectCandidate first = person("E1001", "张三", "工程部/一组", "E***01");
+        AuthorizedSubjectCandidate second = person("E2001", "张三", "工程部/二组", "E***01");
         when(personDirectoryService.search(any())).thenReturn(
                 new SubjectDirectoryPage(true, List.of(first, second), 1, 20, 2, false)
         );
@@ -215,7 +227,8 @@ class SubjectResolutionServiceTest {
 
         assertThat(result.state()).isEqualTo(SubjectResolutionState.CANDIDATES);
         assertThat(result.resolvedSubject()).isNull();
-        assertThat(result.candidates()).containsExactly(first, second);
+        assertThat(result.candidates()).extracting(candidate -> candidate.departmentPath())
+                .containsExactly("工程部/一组", "工程部/二组");
         assertThat(result.candidates()).allSatisfy(candidate ->
                 assertThat(candidate.maskedEmployeeNo()).contains("***")
         );
@@ -223,7 +236,7 @@ class SubjectResolutionServiceTest {
 
     @Test
     void neverTreatsTheFirstPageItemAsUniqueWhenDirectoryTotalIsGreaterThanOne() {
-        SubjectCandidate first = person("E1001", "张三", "工程部/一组", "E***01");
+        AuthorizedSubjectCandidate first = person("E1001", "张三", "工程部/一组", "E***01");
         when(personDirectoryService.search(any())).thenReturn(
                 new SubjectDirectoryPage(true, List.of(first), 1, 1, 2, true)
         );
@@ -248,12 +261,17 @@ class SubjectResolutionServiceTest {
 
     @Test
     void selectedSubjectIdIsRevalidatedAgainstCurrentAuthorizedDirectory() {
-        SubjectCandidate selected = person("opaque-person-id", "张三", "工程部", "E***01");
+        AuthorizedSubjectCandidate selected = person("opaque-person-id", "张三", "工程部", "E***01");
         when(personDirectoryService.search(any())).thenReturn(page(selected));
 
         SubjectResolutionResult result = service.resolve(request(
                 BusinessSubjectType.PERSON,
-                "opaque-person-id",
+                tokenService.issue(
+                        "opaque-person-id",
+                        "login-user-1",
+                        "session-1",
+                        BusinessSubjectType.PERSON
+                ),
                 null,
                 null,
                 null,
@@ -273,7 +291,7 @@ class SubjectResolutionServiceTest {
 
     @Test
     void departmentResolutionAlsoUsesSourceAuthorizedDirectory() {
-        SubjectCandidate department = new SubjectCandidate(
+        AuthorizedSubjectCandidate department = new AuthorizedSubjectCandidate(
                 BusinessSubjectType.DEPARTMENT,
                 "department-id-1",
                 "工程部",
@@ -299,7 +317,7 @@ class SubjectResolutionServiceTest {
 
         verify(departmentDirectoryService).search(any());
         assertThat(result.state()).isEqualTo(SubjectResolutionState.RESOLVED);
-        assertThat(result.resolvedSubject()).isEqualTo(department);
+        assertThat(result.resolvedSubject().displayName()).isEqualTo("工程部");
     }
 
     @Test
@@ -392,7 +410,7 @@ class SubjectResolutionServiceTest {
 
     private SubjectResolutionRequest request(
             BusinessSubjectType type,
-            String selectedSubjectId,
+            String selectionToken,
             String projectCode,
             String searchName,
             String projectManager,
@@ -408,7 +426,7 @@ class SubjectResolutionServiceTest {
                 "Bearer secret",
                 Map.of("tenantToken", "secret"),
                 type,
-                selectedSubjectId,
+                selectionToken,
                 projectCode,
                 searchName,
                 projectManager,
@@ -420,12 +438,12 @@ class SubjectResolutionServiceTest {
         );
     }
 
-    private SubjectDirectoryPage page(SubjectCandidate candidate) {
+    private SubjectDirectoryPage page(AuthorizedSubjectCandidate candidate) {
         return new SubjectDirectoryPage(true, List.of(candidate), 1, 20, 1, false);
     }
 
-    private SubjectCandidate project(String id, String code, String type) {
-        return new SubjectCandidate(
+    private AuthorizedSubjectCandidate project(String id, String code, String type) {
+        return new AuthorizedSubjectCandidate(
                 BusinessSubjectType.PROJECT,
                 id,
                 "项目" + code,
@@ -436,12 +454,12 @@ class SubjectResolutionServiceTest {
         );
     }
 
-    private SubjectCandidate person(
+    private AuthorizedSubjectCandidate person(
             String id,
             String name,
             String department,
             String maskedEmployeeNo) {
-        return new SubjectCandidate(
+        return new AuthorizedSubjectCandidate(
                 BusinessSubjectType.PERSON,
                 id,
                 name,

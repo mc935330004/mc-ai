@@ -1,8 +1,14 @@
 package org.example.ai.agent.business.subject;
 
+import com.baomidou.mybatisplus.core.conditions.Wrapper;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.ai.agent.business.dataset.DatasetExecutionProofVerifier;
 import org.example.ai.agent.business.dataset.ReportDatasetExecutionService;
 import org.example.ai.agent.business.dataset.ReportDatasetValidator;
+import org.example.ai.agent.business.dataset.entity.ReportDataset;
+import org.example.ai.agent.business.dataset.entity.ReportDatasetField;
+import org.example.ai.agent.business.dataset.mapper.ReportDatasetFieldMapper;
+import org.example.ai.agent.business.dataset.mapper.ReportDatasetMapper;
 import org.example.ai.agent.business.dataset.model.DatasetExecutionRequest;
 import org.example.ai.agent.business.dataset.model.DatasetExecutionResult;
 import org.example.ai.agent.business.dataset.model.DatasetExecutionSource;
@@ -36,6 +42,10 @@ class WorkflowBackedSubjectDirectoryServiceTest {
     private ReportDatasetExecutionService executionService;
     @Mock
     private DatasetExecutionProofVerifier proofVerifier;
+    @Mock
+    private ReportDatasetMapper datasetMapper;
+    @Mock
+    private ReportDatasetFieldMapper datasetFieldMapper;
 
     private WorkflowBackedSubjectDirectoryService service;
 
@@ -44,26 +54,29 @@ class WorkflowBackedSubjectDirectoryServiceTest {
         service = new WorkflowBackedSubjectDirectoryService(
                 executionService,
                 proofVerifier,
+                datasetMapper,
+                datasetFieldMapper,
+                new ObjectMapper(),
                 "PROJECT_DIRECTORY",
                 "PERSON_DIRECTORY",
                 "DEPARTMENT_DIRECTORY"
         );
+        arrangeDirectoryContract();
     }
 
     @Test
     void executesConfiguredDirectoryDatasetWithCurrentAuthorizationAndPaging() {
         DatasetExecutionResult result = result(
                 DatasetExecutionStatus.SUCCESS,
-                Map.of("display", Map.of(
+                envelope(Map.of(
                         "subjectCandidates", List.of(Map.of(
-                                "subjectId", "project-id-1",
+                                "subjectRef", "project-id-1",
                                 "displayName", "一号项目",
                                 "projectCode", "P100",
-                                "projectType", "工程项目",
-                                "ignoredRaw", "must-not-escape"
+                                "projectType", "工程项目"
                         )),
-                        "totalCount", 236,
-                        "hasNext", true
+                        "totalCount", 1,
+                        "hasNext", false
                 ))
         );
         when(executionService.execute(any())).thenReturn(result);
@@ -74,7 +87,7 @@ class WorkflowBackedSubjectDirectoryServiceTest {
         ArgumentCaptor<DatasetExecutionRequest> request = ArgumentCaptor.forClass(DatasetExecutionRequest.class);
         verify(executionService).execute(request.capture());
         assertThat(request.getValue().datasetCode()).isEqualTo("PROJECT_DIRECTORY");
-        assertThat(request.getValue().subjectType()).isEqualTo(BusinessSubjectType.PROJECT);
+        assertThat(request.getValue().subjectType()).isEqualTo(BusinessSubjectType.PERSON);
         assertThat(request.getValue().subjectId()).isEqualTo("login-user-1");
         assertThat(request.getValue().authorization()).isEqualTo("Bearer secret");
         assertThat(request.getValue().secureContext()).containsEntry("tenant", "secret");
@@ -82,10 +95,10 @@ class WorkflowBackedSubjectDirectoryServiceTest {
         assertThat(request.getValue().canonicalInput()).containsEntry("projectYear", 2026);
         assertThat(request.getValue().canonicalInput()).containsEntry("pageNumber", 1);
         assertThat(request.getValue().canonicalInput()).containsEntry("pageSize", 50);
-        assertThat(page.totalCount()).isEqualTo(236);
-        assertThat(page.hasNext()).isTrue();
+        assertThat(page.totalCount()).isEqualTo(1);
+        assertThat(page.hasNext()).isFalse();
         assertThat(page.candidates()).singleElement().satisfies(candidate -> {
-            assertThat(candidate.subjectId()).isEqualTo("project-id-1");
+            assertThat(candidate.rawSubjectId()).isEqualTo("project-id-1");
             assertThat(candidate.projectCode()).isEqualTo("P100");
             assertThat(candidate.toString()).doesNotContain("project-id-1");
         });
@@ -96,9 +109,9 @@ class WorkflowBackedSubjectDirectoryServiceTest {
         DatasetExecutionResult result = result(
                 BusinessSubjectType.PERSON,
                 DatasetExecutionStatus.SUCCESS,
-                Map.of("display", Map.of(
+                envelope(Map.of(
                         "subjectCandidates", List.of(Map.of(
-                                "subjectId", "opaque-person-id",
+                                "subjectRef", "opaque-person-id",
                                 "displayName", "张三",
                                 "maskedEmployeeNo", "E***01",
                                 "departmentPath", "集团/工程部"
@@ -126,6 +139,9 @@ class WorkflowBackedSubjectDirectoryServiceTest {
         service = new WorkflowBackedSubjectDirectoryService(
                 executionService,
                 proofVerifier,
+                datasetMapper,
+                datasetFieldMapper,
+                new ObjectMapper(),
                 " ",
                 "PERSON_DIRECTORY",
                 "DEPARTMENT_DIRECTORY"
@@ -146,7 +162,11 @@ class WorkflowBackedSubjectDirectoryServiceTest {
 
         DatasetExecutionResult unsigned = result(
                 DatasetExecutionStatus.SUCCESS,
-                Map.of("display", Map.of("subjectCandidates", List.of()))
+                envelope(Map.of(
+                        "subjectCandidates", List.of(),
+                        "totalCount", 0,
+                        "hasNext", false
+                ))
         );
         when(executionService.execute(any())).thenReturn(unsigned);
         when(proofVerifier.verify(unsigned)).thenReturn(false);
@@ -155,9 +175,9 @@ class WorkflowBackedSubjectDirectoryServiceTest {
         DatasetExecutionResult rawEmployeeNumber = result(
                 BusinessSubjectType.PERSON,
                 DatasetExecutionStatus.SUCCESS,
-                Map.of("display", Map.of(
+                envelope(Map.of(
                         "subjectCandidates", List.of(Map.of(
-                                "subjectId", "E1001",
+                                "subjectRef", "E1001",
                                 "displayName", "张三",
                                 "maskedEmployeeNo", "E1001"
                         )),
@@ -175,7 +195,7 @@ class WorkflowBackedSubjectDirectoryServiceTest {
         DatasetExecutionResult result = result(
                 BusinessSubjectType.PERSON,
                 DatasetExecutionStatus.EMPTY,
-                Map.of()
+                envelope(Map.of())
         );
         when(executionService.execute(any())).thenReturn(result);
         when(proofVerifier.verify(result)).thenReturn(true);
@@ -195,7 +215,7 @@ class WorkflowBackedSubjectDirectoryServiceTest {
                 new DatasetExecutionSource(
                         "login-user-1",
                         "session-1",
-                        BusinessSubjectType.PROJECT,
+                        BusinessSubjectType.PERSON,
                         "login-user-1",
                         "PROJECT_DIRECTORY",
                         "d".repeat(64),
@@ -206,9 +226,9 @@ class WorkflowBackedSubjectDirectoryServiceTest {
                 ),
                 DatasetExecutionStatus.SUCCESS,
                 true,
-                Map.of("display", Map.of(
+                envelope(Map.of(
                         "subjectCandidates", List.of(Map.of(
-                                "subjectId", "project-id-1",
+                                "subjectRef", "project-id-1",
                                 "displayName", "一号项目",
                                 "projectCode", "P100"
                         )),
@@ -231,9 +251,9 @@ class WorkflowBackedSubjectDirectoryServiceTest {
     void rejectsSignedCandidatesWhosePagingMetadataIsInconsistent() {
         DatasetExecutionResult inconsistent = result(
                 DatasetExecutionStatus.SUCCESS,
-                Map.of("display", Map.of(
+                envelope(Map.of(
                         "subjectCandidates", List.of(Map.of(
-                                "subjectId", "project-id-1",
+                                "subjectRef", "project-id-1",
                                 "displayName", "一号项目",
                                 "projectCode", "P100"
                         )),
@@ -329,7 +349,7 @@ class WorkflowBackedSubjectDirectoryServiceTest {
                 new DatasetExecutionSource(
                         "login-user-1",
                         "session-1",
-                        subjectType,
+                        BusinessSubjectType.PERSON,
                         "login-user-1",
                         datasetCode,
                         canonicalHash(subjectType),
@@ -370,5 +390,62 @@ class WorkflowBackedSubjectDirectoryServiceTest {
         return ContentHashUtils.sha256(
                 ReportDatasetValidator.canonicalSafeValue(canonicalInput)
         );
+    }
+
+    private Map<String, Object> envelope(Map<String, Object> display) {
+        return Map.of(
+                "calculation", Map.of(),
+                "display", display,
+                "export", Map.of(),
+                "model", Map.of()
+        );
+    }
+
+    @SuppressWarnings("unchecked")
+    private void arrangeDirectoryContract() {
+        ReportDataset dataset = new ReportDataset();
+        dataset.setId(1L);
+        dataset.setDatasetCode("PROJECT_DIRECTORY");
+        dataset.setSubjectTypesJson("[\"PERSON\"]");
+        dataset.setInputMappingJson("""
+                {
+                  "access":{"searchMode":"mode"},
+                  "query":{
+                    "searchMode":"mode",
+                    "selectedSubjectId":"selected_id",
+                    "projectCode":"project_code",
+                    "searchName":"search_name",
+                    "projectManager":"manager",
+                    "projectYear":"project_year",
+                    "employeeNo":"employee_no",
+                    "pageNumber":"page_number",
+                    "pageSize":"page_size"
+                  }
+                }
+                """);
+        dataset.setConfigChecksum("a".repeat(64));
+        dataset.setFieldPolicyChecksum("b".repeat(64));
+        dataset.setEnabled(true);
+        org.mockito.Mockito.lenient()
+                .when(datasetMapper.selectOne(any(Wrapper.class)))
+                .thenAnswer(invocation -> dataset);
+        org.mockito.Mockito.lenient()
+                .when(datasetFieldMapper.selectList(any(Wrapper.class)))
+                .thenReturn(List.of(
+                directoryField("subjectCandidates"),
+                directoryField("totalCount"),
+                directoryField("hasNext")
+                ));
+    }
+
+    private ReportDatasetField directoryField(String factCode) {
+        ReportDatasetField field = new ReportDatasetField();
+        field.setDatasetId(1L);
+        field.setFactCode(factCode);
+        field.setDisplayable(true);
+        field.setCalculable(false);
+        field.setExportable(false);
+        field.setModelVisible(false);
+        return field;
     }
 }

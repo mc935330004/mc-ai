@@ -31,6 +31,7 @@ public record SubjectDirectoryQuery(
         secureContext = (Map<String, Object>) ReportDatasetValidator.freezeSafeValue(
                 secureContext == null ? Map.of() : secureContext
         );
+        SubjectRequestLimits.validateContext(secureContext);
     }
 
     /**
@@ -39,10 +40,7 @@ public record SubjectDirectoryQuery(
     @Override
     public String toString() {
         return "SubjectDirectoryQuery["
-                + "agentRunId=" + agentRunId
-                + ", userId=" + userId
-                + ", sessionId=" + sessionId
-                + ", authorizationPresent=" + (authorization != null && !authorization.isBlank())
+                + "authorizationPresent=" + (authorization != null && !authorization.isBlank())
                 + ", secureContextPresent=" + !secureContext.isEmpty()
                 + ", subjectType=" + subjectType
                 + ", searchMode=" + searchMode

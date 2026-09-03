@@ -1,6 +1,7 @@
 package org.example.ai.agent.business.subject;
 
 import org.example.ai.agent.business.model.BusinessSubjectType;
+import org.example.ai.agent.business.subject.model.AuthorizedSubjectCandidate;
 import org.example.ai.agent.business.subject.model.SubjectCandidate;
 import org.example.ai.agent.business.subject.model.SubjectDirectoryPage;
 import org.example.ai.agent.business.subject.model.SubjectResolutionRequest;
@@ -15,6 +16,7 @@ import java.time.Clock;
 import java.time.LocalDate;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 
 /**
  * 确定性主体定位状态机。
@@ -32,17 +34,20 @@ public class SubjectResolutionService {
     private final ProjectDirectoryService projectDirectoryService;
     private final AuthorizedPersonDirectoryService personDirectoryService;
     private final DepartmentDirectoryService departmentDirectoryService;
+    private final SubjectSelectionTokenService selectionTokenService;
     private final Clock clock;
 
     @Autowired
     public SubjectResolutionService(
             ProjectDirectoryService projectDirectoryService,
             AuthorizedPersonDirectoryService personDirectoryService,
-            DepartmentDirectoryService departmentDirectoryService) {
+            DepartmentDirectoryService departmentDirectoryService,
+            SubjectSelectionTokenService selectionTokenService) {
         this(
                 projectDirectoryService,
                 personDirectoryService,
                 departmentDirectoryService,
+                selectionTokenService,
                 Clock.systemDefaultZone()
         );
     }
@@ -51,6 +56,7 @@ public class SubjectResolutionService {
             ProjectDirectoryService projectDirectoryService,
             AuthorizedPersonDirectoryService personDirectoryService,
             DepartmentDirectoryService departmentDirectoryService,
+            SubjectSelectionTokenService selectionTokenService,
             Clock clock) {
         this.projectDirectoryService = Objects.requireNonNull(
                 projectDirectoryService,
@@ -64,6 +70,10 @@ public class SubjectResolutionService {
                 departmentDirectoryService,
                 "departmentDirectoryService不能为空"
         );
+        this.selectionTokenService = Objects.requireNonNull(
+                selectionTokenService,
+                "selectionTokenService不能为空"
+        );
         this.clock = Objects.requireNonNull(clock, "clock不能为空");
     }
 
@@ -72,7 +82,19 @@ public class SubjectResolutionService {
      */
     public SubjectResolutionResult resolve(SubjectResolutionRequest request) {
         validateRequest(request);
-        SubjectDirectoryQuery query = buildQuery(request);
+        Optional<String> selectedSubjectId = selectedSubjectId(request);
+        if (StringUtils.hasText(request.selectionToken())
+                && selectedSubjectId.isEmpty()) {
+            return terminal(
+                    SubjectResolutionState.DENIED,
+                    request.pageNumber(),
+                    request.pageSize()
+            );
+        }
+        SubjectDirectoryQuery query = buildQuery(
+                request,
+                selectedSubjectId.orElse(null)
+        );
         SubjectDirectoryPage page = switch (request.subjectType()) {
             case PROJECT -> projectDirectoryService.search(query);
             case PERSON -> personDirectoryService.search(query);
@@ -81,7 +103,21 @@ public class SubjectResolutionService {
         return decide(query, page);
     }
 
-    private SubjectDirectoryQuery buildQuery(SubjectResolutionRequest request) {
+    private Optional<String> selectedSubjectId(SubjectResolutionRequest request) {
+        if (!StringUtils.hasText(request.selectionToken())) {
+            return Optional.empty();
+        }
+        return selectionTokenService.resolve(
+                request.selectionToken(),
+                request.userId(),
+                request.sessionId(),
+                request.subjectType()
+        );
+    }
+
+    private SubjectDirectoryQuery buildQuery(
+            SubjectResolutionRequest request,
+            String selectedSubjectId) {
         SubjectSearchMode mode = resolveMode(request);
         Integer projectYear = request.projectYear();
         if (mode == SubjectSearchMode.MY_PROJECTS && projectYear == null) {
@@ -95,7 +131,7 @@ public class SubjectResolutionService {
                 request.secureContext(),
                 request.subjectType(),
                 mode,
-                trim(request.selectedSubjectId()),
+                selectedSubjectId,
                 trim(request.projectCode()),
                 trim(request.searchName()),
                 trim(request.projectManager()),
@@ -107,7 +143,7 @@ public class SubjectResolutionService {
     }
 
     private SubjectSearchMode resolveMode(SubjectResolutionRequest request) {
-        if (StringUtils.hasText(request.selectedSubjectId())) {
+        if (StringUtils.hasText(request.selectionToken())) {
             return SubjectSearchMode.SELECTED_SUBJECT;
         }
         return switch (request.subjectType()) {
@@ -176,17 +212,17 @@ public class SubjectResolutionService {
                 || page.candidates().size() > 1
                 || page.totalCount() != 1
                 || page.hasNext()) {
-            return candidates(page);
+            return candidates(page, query);
         }
-        return resolved(page.candidates().get(0), page);
+        return resolved(page.candidates().get(0), page, query);
     }
 
     private boolean exactCandidateMatches(
             SubjectDirectoryQuery query,
-            List<SubjectCandidate> candidates) {
+            List<AuthorizedSubjectCandidate> candidates) {
         if (query.searchMode() == SubjectSearchMode.SELECTED_SUBJECT) {
             return candidates.stream().allMatch(candidate ->
-                    candidate.subjectId().equals(query.selectedSubjectId())
+                    candidate.rawSubjectId().equals(query.selectedSubjectId())
             );
         }
         if (query.searchMode() == SubjectSearchMode.PROJECT_CODE) {
@@ -199,17 +235,16 @@ public class SubjectResolutionService {
     }
 
     private boolean mustReturnCandidates(SubjectSearchMode mode) {
-        return mode == SubjectSearchMode.MY_PROJECTS
-                || mode == SubjectSearchMode.PROJECT_NAME
-                || mode == SubjectSearchMode.PROJECT_MANAGER;
+        return mode == SubjectSearchMode.MY_PROJECTS;
     }
 
     private SubjectResolutionResult resolved(
-            SubjectCandidate subject,
-            SubjectDirectoryPage page) {
+            AuthorizedSubjectCandidate subject,
+            SubjectDirectoryPage page,
+            SubjectDirectoryQuery query) {
         return new SubjectResolutionResult(
                 SubjectResolutionState.RESOLVED,
-                subject,
+                externalCandidate(subject, query),
                 List.of(),
                 page.pageNumber(),
                 page.pageSize(),
@@ -219,11 +254,16 @@ public class SubjectResolutionService {
         );
     }
 
-    private SubjectResolutionResult candidates(SubjectDirectoryPage page) {
+    private SubjectResolutionResult candidates(
+            SubjectDirectoryPage page,
+            SubjectDirectoryQuery query) {
+        List<SubjectCandidate> external = page.candidates().stream()
+                .map(candidate -> externalCandidate(candidate, query))
+                .toList();
         return new SubjectResolutionResult(
                 SubjectResolutionState.CANDIDATES,
                 null,
-                page.candidates(),
+                external,
                 page.pageNumber(),
                 page.pageSize(),
                 page.totalCount(),
@@ -235,15 +275,42 @@ public class SubjectResolutionService {
     private SubjectResolutionResult terminal(
             SubjectResolutionState state,
             SubjectDirectoryQuery query) {
+        return terminal(state, query.pageNumber(), query.pageSize());
+    }
+
+    private SubjectResolutionResult terminal(
+            SubjectResolutionState state,
+            int pageNumber,
+            int pageSize) {
         return new SubjectResolutionResult(
                 state,
                 null,
                 List.of(),
-                query.pageNumber(),
-                query.pageSize(),
+                pageNumber,
+                pageSize,
                 0,
                 false,
                 SAFE_NOT_FOUND
+        );
+    }
+
+    private SubjectCandidate externalCandidate(
+            AuthorizedSubjectCandidate candidate,
+            SubjectDirectoryQuery query) {
+        String token = selectionTokenService.issue(
+                candidate.rawSubjectId(),
+                query.userId(),
+                query.sessionId(),
+                candidate.type()
+        );
+        return new SubjectCandidate(
+                candidate.type(),
+                token,
+                candidate.displayName(),
+                candidate.maskedEmployeeNo(),
+                candidate.departmentPath(),
+                candidate.projectCode(),
+                candidate.projectType()
         );
     }
 
@@ -256,20 +323,30 @@ public class SubjectResolutionService {
                 || request.subjectType() == null) {
             throw new IllegalArgumentException("主体定位请求不完整");
         }
+        SubjectRequestLimits.requireText(request.agentRunId(), "agentRunId", 128);
+        SubjectRequestLimits.requireText(request.userId(), "userId", 256);
+        SubjectRequestLimits.requireText(request.sessionId(), "sessionId", 256);
+        SubjectRequestLimits.requireText(request.authorization(), "authorization", 32768);
+        SubjectRequestLimits.optionalText(request.selectionToken(), "selectionToken", 4096);
+        SubjectRequestLimits.optionalText(request.projectCode(), "projectCode", 128);
+        SubjectRequestLimits.optionalText(request.searchName(), "searchName", 256);
+        SubjectRequestLimits.optionalText(request.projectManager(), "projectManager", 256);
+        SubjectRequestLimits.optionalText(request.employeeNo(), "employeeNo", 128);
         if (request.pageNumber() < 1
                 || request.pageSize() < 1
                 || request.pageSize() > MAX_PAGE_SIZE) {
             throw new IllegalArgumentException("主体目录分页参数不合法");
         }
         if (request.projectYear() != null
-                && (request.projectYear() < 2000 || request.projectYear() > 9999)) {
+                && (request.projectYear() < 1900
+                || request.projectYear() > LocalDate.now(clock).getYear() + 1)) {
             throw new IllegalArgumentException("项目年度不合法");
         }
         validateSubjectHints(request);
     }
 
     private void validateSubjectHints(SubjectResolutionRequest request) {
-        if (StringUtils.hasText(request.selectedSubjectId())
+        if (StringUtils.hasText(request.selectionToken())
                 && (StringUtils.hasText(request.projectCode())
                 || StringUtils.hasText(request.searchName())
                 || StringUtils.hasText(request.projectManager())

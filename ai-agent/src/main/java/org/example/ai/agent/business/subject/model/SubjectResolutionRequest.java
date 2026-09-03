@@ -2,6 +2,7 @@ package org.example.ai.agent.business.subject.model;
 
 import org.example.ai.agent.business.dataset.ReportDatasetValidator;
 import org.example.ai.agent.business.model.BusinessSubjectType;
+import org.example.ai.agent.business.subject.SubjectRequestLimits;
 
 import java.util.Map;
 
@@ -15,7 +16,7 @@ public record SubjectResolutionRequest(
         String authorization,
         Map<String, Object> secureContext,
         BusinessSubjectType subjectType,
-        String selectedSubjectId,
+        String selectionToken,
         String projectCode,
         String searchName,
         String projectManager,
@@ -30,6 +31,7 @@ public record SubjectResolutionRequest(
         secureContext = (Map<String, Object>) ReportDatasetValidator.freezeSafeValue(
                 secureContext == null ? Map.of() : secureContext
         );
+        SubjectRequestLimits.validateContext(secureContext);
     }
 
     /**
@@ -38,13 +40,10 @@ public record SubjectResolutionRequest(
     @Override
     public String toString() {
         return "SubjectResolutionRequest["
-                + "agentRunId=" + agentRunId
-                + ", userId=" + userId
-                + ", sessionId=" + sessionId
-                + ", authorizationPresent=" + (authorization != null && !authorization.isBlank())
+                + "authorizationPresent=" + (authorization != null && !authorization.isBlank())
                 + ", secureContextPresent=" + !secureContext.isEmpty()
                 + ", subjectType=" + subjectType
-                + ", selectedSubjectIdPresent=" + (selectedSubjectId != null)
+                + ", selectionTokenPresent=" + (selectionToken != null)
                 + ", projectCodePresent=" + (projectCode != null)
                 + ", searchNamePresent=" + (searchName != null)
                 + ", projectManagerPresent=" + (projectManager != null)
