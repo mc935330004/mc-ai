@@ -2,6 +2,7 @@ package org.example.ai.agent.business.dataset.mapper;
 
 import com.baomidou.mybatisplus.core.mapper.BaseMapper;
 import org.apache.ibatis.annotations.Mapper;
+import org.apache.ibatis.annotations.Param;
 import org.example.ai.agent.business.dataset.entity.ReportDataset;
 
 /**
@@ -9,4 +10,6 @@ import org.example.ai.agent.business.dataset.entity.ReportDataset;
  */
 @Mapper
 public interface ReportDatasetMapper extends BaseMapper<ReportDataset> {
+
+    ReportDataset selectEnabledByCode(@Param("datasetCode") String datasetCode);
 }

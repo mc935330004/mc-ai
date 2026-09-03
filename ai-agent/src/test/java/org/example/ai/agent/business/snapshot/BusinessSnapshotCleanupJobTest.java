@@ -1,83 +1,66 @@
 package org.example.ai.agent.business.snapshot;
 
+import org.example.ai.agent.business.snapshot.mapper.BusinessSnapshotItemMapper;
+import org.example.ai.agent.business.snapshot.mapper.BusinessSnapshotMapper;
 import org.junit.jupiter.api.Test;
 import org.mockito.InOrder;
-import org.springframework.jdbc.core.JdbcTemplate;
+
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
-import static org.mockito.ArgumentMatchers.eq;
 
 class BusinessSnapshotCleanupJobTest {
 
     @Test
     void shouldDeleteOnlyUnreferencedItemsBeforeSnapshots() {
-        JdbcTemplate jdbcTemplate = mock(JdbcTemplate.class);
-        when(jdbcTemplate.queryForList(anyString(), eq(String.class), eq(100)))
-                .thenReturn(java.util.List.of("snapshot-1"));
-        when(jdbcTemplate.update(anyString(), eq("snapshot-1"))).thenReturn(2);
-        when(jdbcTemplate.update(
-                anyString(), eq("snapshot-1"), eq("snapshot-1"),
-                eq("snapshot-1"), eq("snapshot-1"), eq("snapshot-1")
-        )).thenReturn(1);
-        BusinessSnapshotCleanupJob job = new BusinessSnapshotCleanupJob(jdbcTemplate, 100);
+        BusinessSnapshotMapper snapshotMapper = mock(BusinessSnapshotMapper.class);
+        BusinessSnapshotItemMapper itemMapper = mock(BusinessSnapshotItemMapper.class);
+        when(snapshotMapper.selectExpiredUnreferencedIdsForUpdate(100))
+                .thenReturn(List.of("snapshot-1"));
+        when(itemMapper.deleteBySnapshotId("snapshot-1")).thenReturn(2);
+        when(snapshotMapper.deleteExpiredUnreferencedById("snapshot-1")).thenReturn(1);
+        BusinessSnapshotCleanupJob job = new BusinessSnapshotCleanupJob(
+                snapshotMapper,
+                itemMapper,
+                100
+        );
 
         BusinessSnapshotCleanupJob.CleanupResult result = job.cleanupBatch();
 
         assertThat(result.deletedItems()).isEqualTo(2);
         assertThat(result.deletedSnapshots()).isEqualTo(1);
-        InOrder order = inOrder(jdbcTemplate);
-        order.verify(jdbcTemplate).queryForList(anyString(), eq(String.class), eq(100));
-        order.verify(jdbcTemplate).update(org.mockito.ArgumentMatchers.contains(
-                "DELETE FROM ai_business_snapshot_item"), eq("snapshot-1"));
-        order.verify(jdbcTemplate).update(org.mockito.ArgumentMatchers.contains(
-                "DELETE FROM ai_business_snapshot"),
-                eq("snapshot-1"), eq("snapshot-1"), eq("snapshot-1"),
-                eq("snapshot-1"), eq("snapshot-1"));
+        InOrder order = inOrder(snapshotMapper, itemMapper);
+        order.verify(snapshotMapper).selectExpiredUnreferencedIdsForUpdate(100);
+        order.verify(itemMapper).deleteBySnapshotId("snapshot-1");
+        order.verify(snapshotMapper).deleteExpiredUnreferencedById("snapshot-1");
     }
 
     @Test
-    void cleanupSqlMustProtectChildrenReportsAndArtifacts() {
-        JdbcTemplate jdbcTemplate = mock(JdbcTemplate.class);
-        BusinessSnapshotCleanupJob job = new BusinessSnapshotCleanupJob(jdbcTemplate, 10);
+    void cleanupSqlLivesInMapperXmlAndProtectsEveryActiveReference() throws Exception {
+        String xml = resource("mapper/BusinessSnapshotMapper.xml");
 
-        when(jdbcTemplate.queryForList(anyString(), eq(String.class), eq(10)))
-                .thenReturn(java.util.List.of());
-        job.cleanupBatch();
-
-        InOrder order = inOrder(jdbcTemplate);
-        order.verify(jdbcTemplate).queryForList(org.mockito.ArgumentMatchers.argThat(sql ->
-                sql.contains("ai_business_snapshot child")
-                        && sql.contains("ai_composite_report_section section")
-                        && sql.contains("ai_result_artifact artifact")
-                        && sql.contains("artifact.expires_at > CURRENT_TIMESTAMP")
-                        && sql.contains("LIMIT ?")
-                        && sql.contains("FOR UPDATE")
-                        && !sql.contains("DELETE snapshot FROM")
-        ), eq(String.class), eq(10));
+        assertThat(xml)
+                .contains("ai_business_snapshot child")
+                .contains("ai_composite_report_section section")
+                .contains("ai_project_panorama_snapshot_module panorama_module")
+                .contains("ai_project_panorama_snapshot panorama")
+                .contains("panorama.expires_at &gt; CURRENT_TIMESTAMP")
+                .contains("ai_result_artifact artifact")
+                .contains("artifact.expires_at &gt; CURRENT_TIMESTAMP")
+                .contains("LIMIT #{batchSize}")
+                .contains("FOR UPDATE")
+                .contains("deleteExpiredUnreferencedById");
     }
 
-    @Test
-    void finalDeleteMustRecheckEveryReferenceAfterItemsAreRemoved() {
-        JdbcTemplate jdbcTemplate = mock(JdbcTemplate.class);
-        BusinessSnapshotCleanupJob job = new BusinessSnapshotCleanupJob(jdbcTemplate, 10);
-        when(jdbcTemplate.queryForList(anyString(), eq(String.class), eq(10)))
-                .thenReturn(java.util.List.of("snapshot-1"));
-
-        job.cleanupBatch();
-
-        org.mockito.Mockito.verify(jdbcTemplate).update(
-                org.mockito.ArgumentMatchers.<String>argThat(sql ->
-                        sql.contains("ai_business_snapshot child")
-                                && sql.contains("ai_composite_report_section section")
-                                && sql.contains("ai_result_artifact artifact")
-                                && sql.contains("artifact.expires_at > CURRENT_TIMESTAMP")
-                ),
-                eq("snapshot-1"), eq("snapshot-1"), eq("snapshot-1"),
-                eq("snapshot-1"), eq("snapshot-1")
-        );
+    private String resource(String path) throws Exception {
+        try (InputStream input = getClass().getClassLoader().getResourceAsStream(path)) {
+            assertThat(input).as(path).isNotNull();
+            return new String(input.readAllBytes(), StandardCharsets.UTF_8);
+        }
     }
 }
