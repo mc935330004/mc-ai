@@ -74,6 +74,17 @@ document:
     # 等待 Docling 解析结果的超时时间，单位毫秒
     read-timeout-ms: 120000
 app:
+  business-assistant:
+    # 多人业务查询独立限额；不要复用 SSE 或通用工作流线程池配置。
+    max-people: 100
+    concurrency: 5
+    requests-per-second: 10
+    person-timeout: 20s
+    # 整体120秒仅为防止任务无限占用的保护值，正式阈值需按来源容量和压测结果调整。
+    overall-timeout: 120s
+    max-retries: 1
+    # 业务快照全局最长保留24小时，各数据集仍可配置更短时间。
+    snapshot-max-ttl: 24h
   storage:
     ftp:
       # FTP 连接和数据传输超时时间，单位毫秒
