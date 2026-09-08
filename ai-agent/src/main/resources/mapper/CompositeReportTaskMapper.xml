@@ -206,4 +206,53 @@
           AND lease_until &gt; CURRENT_TIMESTAMP(3)
           AND expires_at &gt; CURRENT_TIMESTAMP(3)
     </update>
+
+    <!-- 取消必须同时匹配所有者和可取消状态，避免读取后竞态覆盖终态。 -->
+    <update id="cancelIfCancellable">
+        UPDATE ai_composite_report_task
+        SET status = 'CANCELLED',
+            worker_id = NULL,
+            lease_until = NULL,
+            next_retry_at = NULL,
+            completed_at = CURRENT_TIMESTAMP(3),
+            updated_at = CURRENT_TIMESTAMP(3)
+        WHERE task_id = #{taskId}
+          AND user_id = #{userId}
+          AND status IN ('PENDING', 'RETRY', 'RUNNING', 'COLLECTING', 'RENDERING')
+    </update>
+
+    <select id="selectExpiredArtifactCandidates" resultMap="taskResult">
+        SELECT *
+        FROM ai_composite_report_task
+        WHERE expires_at &lt;= CURRENT_TIMESTAMP(3)
+          AND (
+              storage_path IS NOT NULL
+              OR EXISTS (
+                  SELECT 1
+                  FROM ai_composite_report_section section_row
+                  WHERE section_row.task_id = ai_composite_report_task.task_id
+                    AND section_row.snapshot_id IS NOT NULL
+              )
+          )
+        ORDER BY expires_at, task_id
+        LIMIT #{limit}
+    </select>
+
+    <!-- 仅在仍过期且制品元数据未被其他流程清除时更新，物理删除必须先在服务层完成。 -->
+    <update id="markExpiredAndClearArtifact">
+        UPDATE ai_composite_report_task
+        SET status = 'EXPIRED',
+            storage_path = NULL,
+            file_name = NULL,
+            mime_type = NULL,
+            file_size = NULL,
+            checksum = NULL,
+            worker_id = NULL,
+            lease_until = NULL,
+            next_retry_at = NULL,
+            updated_at = CURRENT_TIMESTAMP(3)
+        WHERE task_id = #{taskId}
+          AND expires_at &lt;= CURRENT_TIMESTAMP(3)
+          AND storage_path &lt;=&gt; #{storagePath}
+    </update>
 </mapper>

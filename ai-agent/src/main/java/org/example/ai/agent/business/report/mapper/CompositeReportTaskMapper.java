@@ -52,4 +52,12 @@ public interface CompositeReportTaskMapper {
             @Param("workerId") String workerId,
             @Param("safeErrorCode") String safeErrorCode,
             @Param("safeErrorMessage") String safeErrorMessage);
+
+    int cancelIfCancellable(@Param("taskId") String taskId, @Param("userId") String userId);
+
+    List<CompositeReportTask> selectExpiredArtifactCandidates(@Param("limit") int limit);
+
+    int markExpiredAndClearArtifact(
+            @Param("taskId") String taskId,
+            @Param("storagePath") String storagePath);
 }

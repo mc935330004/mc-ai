@@ -32,4 +32,17 @@
         WHERE task_id = #{taskId}
         ORDER BY display_order, id
     </select>
+
+    <!-- 仅主任务已到期且进入EXPIRED后清除快照引用，保留最小章节审计字段。 -->
+    <update id="clearSnapshotReferences">
+        UPDATE ai_composite_report_section section_row
+        JOIN ai_composite_report_task task_row
+          ON task_row.task_id = section_row.task_id
+        SET section_row.snapshot_id = NULL,
+            section_row.updated_at = CURRENT_TIMESTAMP(3)
+        WHERE section_row.task_id = #{taskId}
+          AND task_row.expires_at &lt;= CURRENT_TIMESTAMP(3)
+          AND task_row.status = 'EXPIRED'
+          AND section_row.snapshot_id IS NOT NULL
+    </update>
 </mapper>

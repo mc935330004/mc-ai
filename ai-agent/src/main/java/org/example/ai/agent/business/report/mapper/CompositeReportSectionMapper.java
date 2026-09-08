@@ -13,4 +13,6 @@ public interface CompositeReportSectionMapper {
     int insertSection(@Param("section") CompositeReportSection section);
 
     List<CompositeReportSection> selectByTaskId(@Param("taskId") String taskId);
+
+    int clearSnapshotReferences(@Param("taskId") String taskId);
 }
