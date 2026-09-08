@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="org.example.ai.agent.business.report.mapper.CompositeReportSectionMapper">
+
+    <resultMap id="sectionResult" type="org.example.ai.agent.business.report.entity.CompositeReportSection">
+        <id property="id" column="id"/>
+        <result property="taskId" column="task_id"/>
+        <result property="datasetCode" column="dataset_code"/>
+        <result property="snapshotId" column="snapshot_id"/>
+        <result property="fieldPolicyChecksum" column="field_policy_checksum"/>
+        <result property="status" column="status"/>
+        <result property="displayOrder" column="display_order"/>
+        <result property="safeMessage" column="safe_message"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+    </resultMap>
+
+    <insert id="insertSection" useGeneratedKeys="true" keyProperty="section.id">
+        INSERT INTO ai_composite_report_section (
+            task_id, dataset_code, snapshot_id, field_policy_checksum,
+            status, display_order, safe_message, created_at, updated_at
+        ) VALUES (
+            #{section.taskId}, #{section.datasetCode}, #{section.snapshotId},
+            #{section.fieldPolicyChecksum}, #{section.status}, #{section.displayOrder},
+            #{section.safeMessage}, #{section.createdAt}, #{section.updatedAt}
+        )
+    </insert>
+
+    <select id="selectByTaskId" resultMap="sectionResult">
+        SELECT *
+        FROM ai_composite_report_section
+        WHERE task_id = #{taskId}
+        ORDER BY display_order, id
+    </select>
+</mapper>
