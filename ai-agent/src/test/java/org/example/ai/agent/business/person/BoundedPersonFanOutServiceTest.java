@@ -473,14 +473,7 @@ class BoundedPersonFanOutServiceTest {
                 new TravelSummary(Metric.incomplete(), complete.travelSummary().totalAmount()),
                 complete.reimbursementSummary(),
                 complete.attendance(),
-                List.of(new ModuleResult(
-                        PersonBusinessQueryService.DatasetType.TRAVEL,
-                        "PERSON_TRAVEL",
-                        ModuleStatus.SUCCESS,
-                        true,
-                        "snapshot-travel",
-                        "a".repeat(64)
-                ))
+                complete.modules()
         ));
         service = new BoundedPersonFanOutService(singlePersonService, properties(10, 1, 100, 1_000, 0));
 
