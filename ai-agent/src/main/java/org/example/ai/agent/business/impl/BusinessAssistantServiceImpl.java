@@ -27,6 +27,8 @@ import org.example.ai.agent.business.panorama.model.ProjectPanoramaResult;
 import org.example.ai.agent.business.person.PersonBusinessQueryService;
 import org.example.ai.agent.business.person.PersonBusinessQueryService.DatasetPlan;
 import org.example.ai.agent.business.person.PersonBusinessQueryService.DatasetType;
+import org.example.ai.agent.business.person.PersonDatasetSelectionService;
+import org.example.ai.agent.business.person.PersonDatasetSelectionService.Selection;
 import org.example.ai.agent.business.person.model.AttendanceDayResult;
 import org.example.ai.agent.business.person.model.MultiPersonSummary.PersonQueryStatus;
 import org.example.ai.agent.business.report.BusinessAssistantReportService;
@@ -85,6 +87,7 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
     private final ProjectPanoramaExecutionService panoramaExecutionService;
     private final ProjectPanoramaSnapshotReuseService panoramaSnapshotReuseService;
     private final PersonBusinessQueryService personBusinessQueryService;
+    private final PersonDatasetSelectionService personDatasetSelectionService;
     private final DepartmentBusinessQueryService departmentBusinessQueryService;
     private final ReportDatasetService reportDatasetService;
     private final DeterministicBusinessAnswerComposer answerComposer;
@@ -99,6 +102,7 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
             ProjectPanoramaExecutionService panoramaExecutionService,
             ProjectPanoramaSnapshotReuseService panoramaSnapshotReuseService,
             PersonBusinessQueryService personBusinessQueryService,
+            PersonDatasetSelectionService personDatasetSelectionService,
             DepartmentBusinessQueryService departmentBusinessQueryService,
             ReportDatasetService reportDatasetService,
             DeterministicBusinessAnswerComposer answerComposer,
@@ -118,6 +122,9 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
         );
         this.personBusinessQueryService = Objects.requireNonNull(
                 personBusinessQueryService, "personBusinessQueryService不能为空"
+        );
+        this.personDatasetSelectionService = Objects.requireNonNull(
+                personDatasetSelectionService, "personDatasetSelectionService不能为空"
         );
         this.departmentBusinessQueryService = Objects.requireNonNull(
                 departmentBusinessQueryService, "departmentBusinessQueryService不能为空"
@@ -154,6 +161,7 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
             if (intent.subjectType() != subjectType) {
                 intent = withSubjectType(intent, subjectType);
             }
+            intent = inheritPersonDatasetContext(intent, request, subjectType);
             SubjectResolutionResult subject = subjectResolutionService.resolve(
                     subjectRequest(request, intent, agentRunId)
             );
@@ -263,7 +271,7 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
                 request, stream, runId, context, panorama.allModulesComplete(), datasets,
                 metricDefinitions(datasets), tableDefinitions(datasets), panorama.issues(), artifact, true
         );
-        saveState(request, runId, subject, intent, panorama.aggregateSnapshotId());
+        saveState(request, runId, subject, intent, panorama.aggregateSnapshotId(), List.of());
         finish(request, stream, composed, true, startedBlocks);
     }
 
@@ -276,7 +284,8 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
             ResponseContext context) throws Exception {
         Set<String> startedBlocks = new HashSet<>();
         StatusProgress progress = new StatusProgress(stream, datasetNames());
-        List<DatasetPlan> plans = personPlans(intent);
+        Selection selection = personDatasetSelectionService.select(intent.datasetCodes());
+        List<DatasetPlan> plans = personPlans(intent, selection);
         PersonBusinessQueryService.Result result = personBusinessQueryService.query(
                 new PersonBusinessQueryService.Command(
                         runId, request.getUserId(), request.getConversationId(),
@@ -307,7 +316,7 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
                 request, stream, runId, context, complete, datasets,
                 personMetrics(plans), personTables(plans), List.of(), artifact, false
         );
-        saveState(request, runId, subject, intent, null);
+        saveState(request, runId, subject, intent, null, selection.semanticCodes());
         finish(request, stream, composed, false, startedBlocks);
     }
 
@@ -319,11 +328,12 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
             BusinessQueryIntent intent,
             SubjectCandidate subject,
             ResponseContext context) throws Exception {
+        Selection selection = personDatasetSelectionService.select(intent.datasetCodes());
         DepartmentBusinessQueryService.Result result = departmentBusinessQueryService.query(
                 new DepartmentBusinessQueryService.Command(
                         runId, request.getUserId(), request.getConversationId(), request.getAuthorization(),
                         Map.of(), subject.selectionToken(), intent.refresh(), intent.anomalyPeopleRequested(),
-                        personPlans(intent)
+                        personPlans(intent, selection)
                 ), stream::shouldStopBusinessQuery
         );
         String code = "DEPARTMENT_SUMMARY";
@@ -347,16 +357,19 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
                 metric(code, "cancelledPeople", "取消人数", ValueType.NUMBER, "人")
         ));
         // 不完整聚合不发布次数和金额，避免部分结果被误读为正式总数。
-        if (result.aggregate().complete()) {
+        if (result.aggregate().complete() && selection.requested(DatasetType.TRAVEL)) {
             facts.put("tripCount", result.aggregate().tripCount());
             facts.put("travelAmount", result.aggregate().travelAmount());
-            facts.put("reimbursementAmount", result.aggregate().reimbursementAmount());
             metrics.add(metric(code, "tripCount", "出差次数", ValueType.NUMBER, "次"));
             metrics.add(metric(code, "travelAmount", "出差总金额", ValueType.AMOUNT, "元"));
+        }
+        if (result.aggregate().complete() && selection.requested(DatasetType.REIMBURSEMENT)) {
+            facts.put("reimbursementAmount", result.aggregate().reimbursementAmount());
             metrics.add(metric(code, "reimbursementAmount", "报销总金额", ValueType.AMOUNT, "元"));
         }
         List<TableDefinition> tables = List.of();
-        if (intent.anomalyPeopleRequested() && !result.anomalyPeople().isEmpty()) {
+        if (selection.requested(DatasetType.PUNCH)
+                && intent.anomalyPeopleRequested() && !result.anomalyPeople().isEmpty()) {
             facts.put("anomalyRows", result.anomalyPeople().stream()
                     .map(person -> Map.of(
                             "displayLabel", person.displayLabel(),
@@ -385,7 +398,7 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
         }
         AiResponse composed = response(request, stream, runId, context, complete, datasets,
                 metrics, tables, List.of(), null, false);
-        saveState(request, runId, subject, intent, null);
+        saveState(request, runId, subject, intent, null, selection.semanticCodes());
         finish(request, stream, composed, false);
     }
 
@@ -418,7 +431,7 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
         );
     }
 
-    private List<DatasetPlan> personPlans(BusinessQueryIntent intent) {
+    private List<DatasetPlan> personPlans(BusinessQueryIntent intent, Selection selection) {
         EnumMap<DatasetType, ReportDataset> configured = new EnumMap<>(DatasetType.class);
         for (ReportDataset dataset : safeList(reportDatasetService.list())) {
             DatasetType type = personType(dataset);
@@ -433,25 +446,20 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
             throw new IllegalStateException("人员业务查询缺少完整且唯一的已启用数据集配置");
         }
         Map<String, Object> query = canonicalQuery(intent);
-        return List.of(
-                personPlan(DatasetType.TRAVEL, configured, query),
-                personPlan(DatasetType.PUNCH, configured, query),
-                personPlan(DatasetType.LEAVE, configured, query),
-                personPlan(DatasetType.SCHEDULE, configured, query),
-                personPlan(DatasetType.CALENDAR, configured, query),
-                personPlan(DatasetType.REIMBURSEMENT, configured, query)
-        );
+        return selection.executionTypes().stream()
+                .map(type -> personPlan(type, configured, query, selection.requested(type)))
+                .toList();
     }
 
     private DatasetPlan personPlan(
             DatasetType type,
             EnumMap<DatasetType, ReportDataset> configured,
-            Map<String, Object> query) {
+            Map<String, Object> query,
+            boolean userRequested) {
         return new DatasetPlan(
                 type, configured.get(type).getDatasetCode(), query,
                 query.containsKey("startDate") ? "DAY" : null, Set.of(personFactCode(type)),
-                type == DatasetType.TRAVEL || type == DatasetType.PUNCH
-                        || type == DatasetType.REIMBURSEMENT
+                userRequested
         );
     }
 
@@ -504,21 +512,41 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
             PersonBusinessQueryService.Result result) {
         Map<DatasetType, DatasetPlan> byType = new EnumMap<>(DatasetType.class);
         plans.forEach(plan -> byType.put(plan.type(), plan));
+        boolean attendanceComplete = attendanceComplete(result.modules());
         List<DatasetAnswerInput> datasets = new ArrayList<>();
         for (PersonBusinessQueryService.ModuleResult module : result.modules()) {
+            DatasetPlan plan = byType.get(module.type());
+            if (plan == null || !plan.userRequested()) {
+                continue;
+            }
             Map<String, Object> display = switch (module.type()) {
                 case TRAVEL -> travelFacts(result.travelSummary());
                 case REIMBURSEMENT -> reimbursementFacts(result.reimbursementSummary());
                 case PUNCH -> Map.of("attendanceRows", attendanceRows(result.attendance()));
                 default -> Map.of();
             };
+            boolean complete = module.type() == DatasetType.PUNCH
+                    ? attendanceComplete : module.complete();
             datasets.add(new DatasetAnswerInput(
-                    byType.get(module.type()).datasetCode(), module.type().name(),
-                    datasetStatus(module.status()), module.complete(), display, Map.of(),
-                    module.complete() ? "已完成" : "数据不完整"
+                    plan.datasetCode(), module.type().name(),
+                    datasetStatus(module.status()), complete, display, Map.of(),
+                    complete ? "已完成" : "数据不完整"
             ));
         }
         return List.copyOf(datasets);
+    }
+
+    private boolean attendanceComplete(List<PersonBusinessQueryService.ModuleResult> modules) {
+        Set<DatasetType> completeTypes = new HashSet<>();
+        for (PersonBusinessQueryService.ModuleResult module : modules) {
+            if (module.complete()) {
+                completeTypes.add(module.type());
+            }
+        }
+        return completeTypes.containsAll(Set.of(
+                DatasetType.TRAVEL, DatasetType.PUNCH, DatasetType.LEAVE,
+                DatasetType.SCHEDULE, DatasetType.CALENDAR
+        ));
     }
 
     private Map<String, Object> travelFacts(PersonBusinessQueryService.TravelSummary summary) {
@@ -556,20 +584,32 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
 
     private List<MetricDefinition> personMetrics(List<DatasetPlan> plans) {
         Map<DatasetType, String> codes = new EnumMap<>(DatasetType.class);
-        plans.forEach(plan -> codes.put(plan.type(), plan.datasetCode()));
-        return List.of(
-                metric(codes.get(DatasetType.TRAVEL), "tripCount", "出差次数", ValueType.NUMBER, "次"),
-                metric(codes.get(DatasetType.TRAVEL), "totalAmount", "出差总金额", ValueType.AMOUNT, "元"),
-                metric(codes.get(DatasetType.REIMBURSEMENT), "requestedAmount", "报销申请金额", ValueType.AMOUNT, "元"),
-                metric(codes.get(DatasetType.REIMBURSEMENT), "approvedAmount", "报销审批金额", ValueType.AMOUNT, "元"),
-                metric(codes.get(DatasetType.REIMBURSEMENT), "paidAmount", "报销支付金额", ValueType.AMOUNT, "元")
-        );
+        plans.stream().filter(DatasetPlan::userRequested)
+                .forEach(plan -> codes.put(plan.type(), plan.datasetCode()));
+        List<MetricDefinition> metrics = new ArrayList<>();
+        if (codes.containsKey(DatasetType.TRAVEL)) {
+            metrics.add(metric(codes.get(DatasetType.TRAVEL), "tripCount", "出差次数", ValueType.NUMBER, "次"));
+            metrics.add(metric(codes.get(DatasetType.TRAVEL), "totalAmount", "出差总金额", ValueType.AMOUNT, "元"));
+        }
+        if (codes.containsKey(DatasetType.REIMBURSEMENT)) {
+            metrics.add(metric(codes.get(DatasetType.REIMBURSEMENT),
+                    "requestedAmount", "报销申请金额", ValueType.AMOUNT, "元"));
+            metrics.add(metric(codes.get(DatasetType.REIMBURSEMENT),
+                    "approvedAmount", "报销审批金额", ValueType.AMOUNT, "元"));
+            metrics.add(metric(codes.get(DatasetType.REIMBURSEMENT),
+                    "paidAmount", "报销支付金额", ValueType.AMOUNT, "元"));
+        }
+        return List.copyOf(metrics);
     }
 
     private List<TableDefinition> personTables(List<DatasetPlan> plans) {
         String punchCode = plans.stream()
-                .filter(plan -> plan.type() == DatasetType.PUNCH)
-                .findFirst().orElseThrow().datasetCode();
+                .filter(plan -> plan.type() == DatasetType.PUNCH && plan.userRequested())
+                .map(DatasetPlan::datasetCode)
+                .findFirst().orElse(null);
+        if (!StringUtils.hasText(punchCode)) {
+            return List.of();
+        }
         return List.of(new TableDefinition(
                 "attendance_table", "考勤核算", punchCode, "attendanceRows",
                 List.of(
@@ -709,7 +749,8 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
             String runId,
             SubjectCandidate subject,
             BusinessQueryIntent intent,
-            String panoramaSnapshotId) {
+            String panoramaSnapshotId,
+            List<String> semanticCodes) {
         BusinessConversationState state = new BusinessConversationState();
         state.setRouteType("BUSINESS_ASSISTANT");
         state.setBusinessTopic(request.getUserQuestion());
@@ -719,6 +760,10 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
         Map<String, Object> input = new LinkedHashMap<>(canonicalQuery(intent));
         input.put("selectionToken", subject.selectionToken());
         input.put("subjectType", subject.type().name());
+        if (subject.type() == BusinessSubjectType.PERSON
+                || subject.type() == BusinessSubjectType.DEPARTMENT) {
+            input.put("datasetCodes", List.copyOf(semanticCodes));
+        }
         if (StringUtils.hasText(panoramaSnapshotId)) {
             input.put("panoramaSnapshotId", panoramaSnapshotId);
         }
@@ -935,6 +980,39 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
                 projectYear, start, end, intent.datasetCodes(), intent.refresh(), intent.exportFormat(),
                 intent.anomalyPeopleRequested()
         );
+    }
+
+    /**
+     * 仅为人员和部门追问继承服务端保存的数据语义，项目数据集语义保持独立。
+     */
+    private BusinessQueryIntent inheritPersonDatasetContext(
+            BusinessQueryIntent intent,
+            AgentRequest request,
+            BusinessSubjectType subjectType) {
+        if (subjectType == BusinessSubjectType.PROJECT
+                || request.isContextReset()
+                || !intent.datasetCodes().isEmpty()) {
+            return intent;
+        }
+        List<String> inheritedCodes = trustedInheritedStringList(request, "datasetCodes");
+        if (inheritedCodes.isEmpty()) {
+            return intent;
+        }
+        return new BusinessQueryIntent(
+                intent.subjectType(), intent.projectCode(), intent.personName(), intent.employeeNo(),
+                intent.projectYear(), intent.periodStart(), intent.periodEnd(), inheritedCodes,
+                intent.refresh(), intent.exportFormat(), intent.anomalyPeopleRequested()
+        );
+    }
+
+    private List<String> trustedInheritedStringList(AgentRequest request, String key) {
+        Object value = request.getInheritedInput() == null
+                ? null : request.getInheritedInput().get(key);
+        if (!(value instanceof List<?> values) || values.isEmpty()
+                || values.stream().anyMatch(item -> !(item instanceof String))) {
+            return List.of();
+        }
+        return values.stream().map(String.class::cast).toList();
     }
 
     private Integer integerValue(Object value) {

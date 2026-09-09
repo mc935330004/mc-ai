@@ -20,6 +20,7 @@ import org.example.ai.agent.business.panorama.ProjectPanoramaSnapshotReuseServic
 import org.example.ai.agent.business.panorama.model.PanoramaExecutionState;
 import org.example.ai.agent.business.panorama.model.ProjectPanoramaResult;
 import org.example.ai.agent.business.person.PersonBusinessQueryService;
+import org.example.ai.agent.business.person.PersonDatasetSelectionService;
 import org.example.ai.agent.business.report.BusinessAssistantReportService;
 import org.example.ai.agent.business.report.entity.CompositeReportTask;
 import org.example.ai.agent.business.report.CompositeReportTaskService;
@@ -42,6 +43,7 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
@@ -204,12 +206,52 @@ class BusinessAssistantServiceTest {
         verify(fixture.selectionTokenService, never()).resolve(any(), any(), any(), any());
     }
 
+    @Test
+    void departmentReimbursementShouldNotPublishTravelValues() throws Exception {
+        Fixture fixture = departmentFixture(false, null, completedDepartment(), List.of("REIMBURSEMENT"));
+
+        fixture.service.handle(request("查询部门报销"), fixture.stream, "run-1");
+
+        DepartmentBusinessQueryService.Command query = capturedDepartmentCommand(fixture);
+        assertThat(query.plans()).extracting(PersonBusinessQueryService.DatasetPlan::type)
+                .containsExactly(PersonBusinessQueryService.DatasetType.REIMBURSEMENT);
+        assertThat(composedDepartment(fixture).datasets().get(0).displayFacts())
+                .containsEntry("reimbursementAmount", new java.math.BigDecimal("900"))
+                .doesNotContainKeys("tripCount", "travelAmount");
+    }
+
+    @Test
+    void departmentAttendanceShouldHideDependencyTravelAndShowRequestedAnomalies() throws Exception {
+        Fixture fixture = departmentFixture(true, null, completedDepartment(), List.of("ATTENDANCE"));
+
+        fixture.service.handle(request("查询部门考勤异常"), fixture.stream, "run-1");
+
+        DepartmentBusinessQueryService.Command query = capturedDepartmentCommand(fixture);
+        assertThat(query.plans()).hasSize(5);
+        assertThat(query.plans()).filteredOn(PersonBusinessQueryService.DatasetPlan::userRequested)
+                .extracting(PersonBusinessQueryService.DatasetPlan::type)
+                .containsExactly(PersonBusinessQueryService.DatasetType.PUNCH);
+        DeterministicBusinessAnswerComposer.ComposeCommand answer = composedDepartment(fixture);
+        assertThat(answer.datasets().get(0).displayFacts())
+                .containsKey("anomalyRows")
+                .doesNotContainKeys("tripCount", "travelAmount", "reimbursementAmount");
+        assertThat(answer.tableDefinitions()).hasSize(1);
+    }
+
     private Fixture departmentFixture(boolean anomalies, String export, DepartmentBusinessQueryService.Result result) {
+        return departmentFixture(anomalies, export, result, List.of());
+    }
+
+    private Fixture departmentFixture(
+            boolean anomalies,
+            String export,
+            DepartmentBusinessQueryService.Result result,
+            List<String> datasetCodes) {
         Fixture fixture = new Fixture();
         when(fixture.intentResolver.resolve(any(), any())).thenReturn(new BusinessQueryIntent(
                 BusinessSubjectType.DEPARTMENT, null, null, null, null,
                 java.time.LocalDate.of(2026, 8, 1), java.time.LocalDate.of(2026, 8, 31),
-                List.of(), true, export, anomalies));
+                datasetCodes, true, export, anomalies));
         when(fixture.subjectResolutionService.resolve(any())).thenReturn(new SubjectResolutionResult(
                 SubjectResolutionState.RESOLVED,
                 new SubjectCandidate(BusinessSubjectType.DEPARTMENT, "department-selection-token", "工程部",
@@ -217,6 +259,13 @@ class BusinessAssistantServiceTest {
         when(fixture.reportDatasetService.list()).thenReturn(personDatasets());
         when(fixture.departmentBusinessQueryService.query(any(), any())).thenReturn(result);
         return fixture;
+    }
+
+    private DepartmentBusinessQueryService.Command capturedDepartmentCommand(Fixture fixture) {
+        ArgumentCaptor<DepartmentBusinessQueryService.Command> command =
+                ArgumentCaptor.forClass(DepartmentBusinessQueryService.Command.class);
+        verify(fixture.departmentBusinessQueryService).query(command.capture(), any());
+        return command.getValue();
     }
 
     private DepartmentBusinessQueryService.Result completedDepartment() {
@@ -687,6 +736,249 @@ class BusinessAssistantServiceTest {
     }
 
     @Test
+    void reimbursementOnlyShouldAnswerAndReportOneSelectedDataset() throws Exception {
+        Fixture fixture = personFixture(personIntent(List.of("REIMBURSEMENT"), "PDF"),
+                personResult(List.of(PersonBusinessQueryService.DatasetType.REIMBURSEMENT), Set.of()));
+        when(fixture.selectionTokenService.resolve(
+                "selection-token", "user-1", "conversation-1", BusinessSubjectType.PERSON
+        )).thenReturn(java.util.Optional.of("employee-raw-1"));
+        when(fixture.reportTaskService.create(any())).thenReturn(reportTask("person-report-task", "PDF"));
+
+        fixture.service.handle(request("查询报销并导出 PDF"), fixture.stream, "run-1");
+
+        PersonBusinessQueryService.Command query = capturedPersonCommand(fixture);
+        assertThat(query.plans()).singleElement().satisfies(plan -> {
+            assertThat(plan.type()).isEqualTo(PersonBusinessQueryService.DatasetType.REIMBURSEMENT);
+            assertThat(plan.userRequested()).isTrue();
+        });
+        DeterministicBusinessAnswerComposer.ComposeCommand answer = composedDepartment(fixture);
+        assertThat(answer.datasets()).extracting(DeterministicBusinessAnswerComposer.DatasetAnswerInput::datasetCode)
+                .containsExactly("CFG_REIMBURSEMENT");
+        assertThat(answer.metricDefinitions()).hasSize(3);
+        assertThat(answer.tableDefinitions()).isEmpty();
+        ArgumentCaptor<BusinessAssistantReportService.PersonReportCommand> report =
+                ArgumentCaptor.forClass(BusinessAssistantReportService.PersonReportCommand.class);
+        verify(fixture.reportService).createPersonReport(report.capture());
+        assertThat(report.getValue().modules()).singleElement()
+                .extracting(PersonBusinessQueryService.ModuleResult::type)
+                .isEqualTo(PersonBusinessQueryService.DatasetType.REIMBURSEMENT);
+    }
+
+    @Test
+    void travelOnlyShouldAnswerTwoMetricsWithoutAttendanceTable() throws Exception {
+        Fixture fixture = personFixture(personIntent(List.of("TRAVEL"), "PDF"),
+                personResult(List.of(PersonBusinessQueryService.DatasetType.TRAVEL), Set.of()));
+        allowPersonReport(fixture);
+
+        fixture.service.handle(request("查询出差并导出 PDF"), fixture.stream, "run-1");
+
+        assertThat(capturedPersonCommand(fixture).plans())
+                .extracting(PersonBusinessQueryService.DatasetPlan::type)
+                .containsExactly(PersonBusinessQueryService.DatasetType.TRAVEL);
+        DeterministicBusinessAnswerComposer.ComposeCommand answer = composedDepartment(fixture);
+        assertThat(answer.datasets()).extracting(DeterministicBusinessAnswerComposer.DatasetAnswerInput::datasetCode)
+                .containsExactly("CFG_TRAVEL");
+        assertThat(answer.metricDefinitions()).hasSize(2);
+        assertThat(answer.tableDefinitions()).isEmpty();
+        ArgumentCaptor<BusinessAssistantReportService.PersonReportCommand> report =
+                ArgumentCaptor.forClass(BusinessAssistantReportService.PersonReportCommand.class);
+        verify(fixture.reportService).createPersonReport(report.capture());
+        assertThat(report.getValue().modules()).singleElement()
+                .extracting(PersonBusinessQueryService.ModuleResult::type)
+                .isEqualTo(PersonBusinessQueryService.DatasetType.TRAVEL);
+    }
+
+    @Test
+    void attendanceShouldExecuteFiveDependenciesButPublishOnlyReconciledAttendance() throws Exception {
+        List<PersonBusinessQueryService.DatasetType> attendanceTypes = List.of(
+                PersonBusinessQueryService.DatasetType.TRAVEL,
+                PersonBusinessQueryService.DatasetType.PUNCH,
+                PersonBusinessQueryService.DatasetType.LEAVE,
+                PersonBusinessQueryService.DatasetType.SCHEDULE,
+                PersonBusinessQueryService.DatasetType.CALENDAR
+        );
+        Fixture fixture = personFixture(personIntent(List.of("ATTENDANCE"), "PDF"),
+                personResult(attendanceTypes, Set.of(PersonBusinessQueryService.DatasetType.LEAVE)));
+        allowPersonReport(fixture);
+
+        fixture.service.handle(request("查询考勤并导出 PDF"), fixture.stream, "run-1");
+
+        PersonBusinessQueryService.Command query = capturedPersonCommand(fixture);
+        assertThat(query.plans()).extracting(PersonBusinessQueryService.DatasetPlan::type)
+                .containsExactlyElementsOf(attendanceTypes);
+        assertThat(query.plans()).filteredOn(PersonBusinessQueryService.DatasetPlan::userRequested)
+                .extracting(PersonBusinessQueryService.DatasetPlan::type)
+                .containsExactly(PersonBusinessQueryService.DatasetType.PUNCH);
+        DeterministicBusinessAnswerComposer.ComposeCommand answer = composedDepartment(fixture);
+        assertThat(answer.datasets()).singleElement().satisfies(dataset -> {
+            assertThat(dataset.datasetCode()).isEqualTo("CFG_PUNCH");
+            assertThat(dataset.dataComplete()).isFalse();
+        });
+        assertThat(answer.metricDefinitions()).isEmpty();
+        assertThat(answer.tableDefinitions()).singleElement()
+                .extracting(DeterministicBusinessAnswerComposer.TableDefinition::datasetCode)
+                .isEqualTo("CFG_PUNCH");
+        ArgumentCaptor<BusinessAssistantReportService.PersonReportCommand> report =
+                ArgumentCaptor.forClass(BusinessAssistantReportService.PersonReportCommand.class);
+        verify(fixture.reportService).createPersonReport(report.capture());
+        assertThat(report.getValue().modules()).extracting(PersonBusinessQueryService.ModuleResult::type)
+                .containsExactlyElementsOf(attendanceTypes);
+    }
+
+    @Test
+    void attendanceAndTravelShouldPublishTravelOnceWithoutDuplicatingExecution() throws Exception {
+        List<PersonBusinessQueryService.DatasetType> attendanceTypes = List.of(
+                PersonBusinessQueryService.DatasetType.TRAVEL,
+                PersonBusinessQueryService.DatasetType.PUNCH,
+                PersonBusinessQueryService.DatasetType.LEAVE,
+                PersonBusinessQueryService.DatasetType.SCHEDULE,
+                PersonBusinessQueryService.DatasetType.CALENDAR
+        );
+        Fixture fixture = personFixture(personIntent(List.of("ATTENDANCE", "TRAVEL"), null),
+                personResult(attendanceTypes, Set.of()));
+
+        fixture.service.handle(request("查询考勤和出差"), fixture.stream, "run-1");
+
+        PersonBusinessQueryService.Command query = capturedPersonCommand(fixture);
+        assertThat(query.plans()).filteredOn(plan -> plan.type() == PersonBusinessQueryService.DatasetType.TRAVEL)
+                .hasSize(1).allMatch(PersonBusinessQueryService.DatasetPlan::userRequested);
+        DeterministicBusinessAnswerComposer.ComposeCommand answer = composedDepartment(fixture);
+        assertThat(answer.datasets()).extracting(DeterministicBusinessAnswerComposer.DatasetAnswerInput::datasetCode)
+                .containsExactly("CFG_TRAVEL", "CFG_PUNCH");
+        assertThat(answer.metricDefinitions()).hasSize(2);
+        assertThat(answer.tableDefinitions()).hasSize(1);
+    }
+
+    @Test
+    void personSemanticCodesShouldBeSavedAndInheritedFromTrustedState() throws Exception {
+        Fixture fixture = new Fixture();
+        when(fixture.intentResolver.resolve(any(), any()))
+                .thenReturn(personIntent(List.of("PUNCH"), null))
+                .thenReturn(personIntent(List.of(), null));
+        when(fixture.subjectResolutionService.resolve(any())).thenReturn(resolvedPerson());
+        when(fixture.reportDatasetService.list()).thenReturn(personDatasets());
+        List<PersonBusinessQueryService.DatasetType> attendanceTypes = List.of(
+                PersonBusinessQueryService.DatasetType.TRAVEL,
+                PersonBusinessQueryService.DatasetType.PUNCH,
+                PersonBusinessQueryService.DatasetType.LEAVE,
+                PersonBusinessQueryService.DatasetType.SCHEDULE,
+                PersonBusinessQueryService.DatasetType.CALENDAR
+        );
+        when(fixture.personBusinessQueryService.query(any()))
+                .thenReturn(personResult(attendanceTypes, Set.of()));
+
+        fixture.service.handle(request("查询打卡"), fixture.stream, "run-1");
+        ArgumentCaptor<org.example.ai.agent.chat.memory.model.BusinessConversationState> state =
+                ArgumentCaptor.forClass(org.example.ai.agent.chat.memory.model.BusinessConversationState.class);
+        verify(fixture.conversationStateService).saveState(any(), any(), state.capture());
+        assertThat(state.getValue().getLastInput()).containsEntry("datasetCodes", List.of("ATTENDANCE"));
+        AgentRequest followUp = request("再看一下");
+        followUp.setInheritedInput(state.getValue().getLastInput());
+
+        fixture.service.handle(followUp, fixture.stream, "run-2");
+
+        ArgumentCaptor<PersonBusinessQueryService.Command> commands =
+                ArgumentCaptor.forClass(PersonBusinessQueryService.Command.class);
+        verify(fixture.personBusinessQueryService, org.mockito.Mockito.times(2)).query(commands.capture());
+        assertThat(commands.getAllValues()).allSatisfy(command -> assertThat(command.plans()).hasSize(5));
+    }
+
+    @Test
+    void explicitPersonSemanticsShouldOverrideInheritedAndResetShouldClearThem() throws Exception {
+        Fixture fixture = new Fixture();
+        when(fixture.intentResolver.resolve(any(), any()))
+                .thenReturn(personIntent(List.of("TRAVEL"), null))
+                .thenReturn(personIntent(List.of(), null));
+        when(fixture.subjectResolutionService.resolve(any())).thenReturn(resolvedPerson());
+        when(fixture.reportDatasetService.list()).thenReturn(personDatasets());
+        when(fixture.personBusinessQueryService.query(any()))
+                .thenReturn(personResult(List.of(PersonBusinessQueryService.DatasetType.TRAVEL), Set.of()))
+                .thenReturn(personResult(List.of(PersonBusinessQueryService.DatasetType.values()), Set.of()));
+        Map<String, Object> inherited = Map.of(
+                "selectionToken", "selection-token",
+                "subjectType", "PERSON",
+                "datasetCodes", List.of("REIMBURSEMENT")
+        );
+        AgentRequest override = request("改查出差");
+        override.setInheritedInput(inherited);
+
+        fixture.service.handle(override, fixture.stream, "run-1");
+
+        AgentRequest reset = request("重新查询");
+        reset.setInheritedInput(inherited);
+        reset.setContextReset(true);
+        fixture.service.handle(reset, fixture.stream, "run-2");
+
+        ArgumentCaptor<PersonBusinessQueryService.Command> commands =
+                ArgumentCaptor.forClass(PersonBusinessQueryService.Command.class);
+        verify(fixture.personBusinessQueryService, org.mockito.Mockito.times(2)).query(commands.capture());
+        assertThat(commands.getAllValues().get(0).plans())
+                .extracting(PersonBusinessQueryService.DatasetPlan::type)
+                .containsExactly(PersonBusinessQueryService.DatasetType.TRAVEL);
+        assertThat(commands.getAllValues().get(1).plans()).hasSize(6);
+    }
+
+    @Test
+    void projectDatasetCodesShouldNotUsePersonSelectionOrItsLimit() throws Exception {
+        Fixture fixture = new Fixture();
+        when(fixture.intentResolver.resolve(any(), any())).thenReturn(new BusinessQueryIntent(
+                BusinessSubjectType.PROJECT, "P-1001", null, null, 2026, null, null,
+                List.of("CONTRACT", "BUDGET", "CASH_FLOW", "OUTPUT", "RISK", "SCHEDULE"),
+                false, null, false
+        ));
+        when(fixture.subjectResolutionService.resolve(any())).thenReturn(resolvedProject());
+        when(fixture.panoramaExecutionService.execute(any(), any())).thenReturn(projectPanorama());
+
+        fixture.service.handle(request("查询项目多个模块"), fixture.stream, "run-1");
+
+        verify(fixture.personDatasetSelectionService, never()).select(any());
+        verify(fixture.panoramaExecutionService).execute(any(), any());
+    }
+
+    @Test
+    void unsupportedPersonSemanticsShouldFailBeforeBusinessExecution() {
+        Fixture fixture = new Fixture();
+        when(fixture.intentResolver.resolve(any(), any())).thenReturn(personIntent(List.of("LEAVE"), null));
+        when(fixture.subjectResolutionService.resolve(any())).thenReturn(resolvedPerson());
+
+        assertThatThrownBy(() -> fixture.service.handle(request("查询请假"), fixture.stream, "run-1"))
+                .hasMessage("暂不支持该人员业务数据类型，请查询出差、考勤或报销");
+        verify(fixture.personBusinessQueryService, never()).query(any());
+    }
+
+    @Test
+    void inheritedPersonSemanticsMustStillPassServerSelectionValidation() {
+        Fixture fixture = new Fixture();
+        when(fixture.intentResolver.resolve(any(), any())).thenReturn(personIntent(List.of(), null));
+        when(fixture.subjectResolutionService.resolve(any())).thenReturn(resolvedPerson());
+        AgentRequest request = request("继续查询");
+        request.setInheritedInput(Map.of(
+                "selectionToken", "selection-token",
+                "subjectType", "PERSON",
+                "datasetCodes", List.of("LEAVE")
+        ));
+
+        assertThatThrownBy(() -> fixture.service.handle(request, fixture.stream, "run-1"))
+                .hasMessage("暂不支持该人员业务数据类型，请查询出差、考勤或报销");
+        verify(fixture.personBusinessQueryService, never()).query(any());
+    }
+
+    @Test
+    void clientExtraAndPageContextMustNotChoosePersonDatasets() throws Exception {
+        Fixture fixture = personFixture(personIntent(List.of("TRAVEL"), null),
+                personResult(List.of(PersonBusinessQueryService.DatasetType.TRAVEL), Set.of()));
+        AgentRequest request = request("查询出差");
+        request.setExtra(Map.of("datasetCodes", List.of("REIMBURSEMENT")));
+        request.setPageContext(Map.of("datasetCodes", List.of("ATTENDANCE")));
+
+        fixture.service.handle(request, fixture.stream, "run-1");
+
+        assertThat(capturedPersonCommand(fixture).plans())
+                .extracting(PersonBusinessQueryService.DatasetPlan::type)
+                .containsExactly(PersonBusinessQueryService.DatasetType.TRAVEL);
+    }
+
+    @Test
     void clientExtraSubjectTypeMustNotBecomeTrustedSubject() throws Exception {
         Fixture fixture = new Fixture();
         when(fixture.intentResolver.resolve(any(), any())).thenReturn(new BusinessQueryIntent(
@@ -810,6 +1102,70 @@ class BusinessAssistantServiceTest {
         );
     }
 
+    private BusinessQueryIntent personIntent(List<String> datasetCodes, String exportFormat) {
+        return new BusinessQueryIntent(
+                BusinessSubjectType.PERSON, null, null, null,
+                null, java.time.LocalDate.of(2026, 8, 1), java.time.LocalDate.of(2026, 8, 31),
+                datasetCodes, false, exportFormat, false
+        );
+    }
+
+    private Fixture personFixture(
+            BusinessQueryIntent intent,
+            PersonBusinessQueryService.Result result) {
+        Fixture fixture = new Fixture();
+        when(fixture.intentResolver.resolve(any(), any())).thenReturn(intent);
+        when(fixture.subjectResolutionService.resolve(any())).thenReturn(resolvedPerson());
+        when(fixture.reportDatasetService.list()).thenReturn(personDatasets());
+        when(fixture.personBusinessQueryService.query(any())).thenReturn(result);
+        return fixture;
+    }
+
+    private PersonBusinessQueryService.Command capturedPersonCommand(Fixture fixture) {
+        ArgumentCaptor<PersonBusinessQueryService.Command> command =
+                ArgumentCaptor.forClass(PersonBusinessQueryService.Command.class);
+        verify(fixture.personBusinessQueryService).query(command.capture());
+        return command.getValue();
+    }
+
+    private PersonBusinessQueryService.Result personResult(
+            List<PersonBusinessQueryService.DatasetType> types,
+            Set<PersonBusinessQueryService.DatasetType> incompleteTypes) {
+        List<PersonBusinessQueryService.ModuleResult> modules = types.stream()
+                .map(type -> incompleteTypes.contains(type)
+                        ? failedPersonModule(type, PersonBusinessQueryService.ModuleStatus.FAILED)
+                        : personModule(type, PersonBusinessQueryService.ModuleStatus.REUSED))
+                .toList();
+        return new PersonBusinessQueryService.Result(
+                new PersonBusinessQueryService.TravelSummary(
+                        PersonBusinessQueryService.Metric.complete(6),
+                        PersonBusinessQueryService.Metric.complete(new java.math.BigDecimal("1200"))
+                ),
+                new PersonBusinessQueryService.ReimbursementSummary(
+                        PersonBusinessQueryService.Metric.complete(new java.math.BigDecimal("900")),
+                        PersonBusinessQueryService.Metric.complete(new java.math.BigDecimal("800")),
+                        PersonBusinessQueryService.Metric.complete(new java.math.BigDecimal("700"))
+                ),
+                List.of(), modules
+        );
+    }
+
+    private CompositeReportTask reportTask(String taskId, String format) {
+        CompositeReportTask task = new CompositeReportTask();
+        task.setTaskId(taskId);
+        task.setFormat(format);
+        task.setStatus("PENDING");
+        task.setExpiresAt(java.time.LocalDateTime.now().plusHours(1));
+        return task;
+    }
+
+    private void allowPersonReport(Fixture fixture) {
+        when(fixture.selectionTokenService.resolve(
+                "selection-token", "user-1", "conversation-1", BusinessSubjectType.PERSON
+        )).thenReturn(java.util.Optional.of("employee-raw-1"));
+        when(fixture.reportTaskService.create(any())).thenReturn(reportTask("person-report-task", "PDF"));
+    }
+
     private List<ReportDataset> personDatasets() {
         return java.util.Arrays.stream(PersonBusinessQueryService.DatasetType.values())
                 .map(type -> {
@@ -853,6 +1209,8 @@ class BusinessAssistantServiceTest {
         private final ProjectPanoramaSnapshotReuseService panoramaSnapshotReuseService =
                 mock(ProjectPanoramaSnapshotReuseService.class);
         private final PersonBusinessQueryService personBusinessQueryService = mock(PersonBusinessQueryService.class);
+        private final PersonDatasetSelectionService personDatasetSelectionService =
+                spy(new PersonDatasetSelectionService());
         private final DepartmentBusinessQueryService departmentBusinessQueryService = mock(DepartmentBusinessQueryService.class);
         private final ReportDatasetService reportDatasetService = mock(ReportDatasetService.class);
         private final BusinessAnswerModelService modelService = mock(BusinessAnswerModelService.class);
@@ -895,7 +1253,8 @@ class BusinessAssistantServiceTest {
             service = new org.example.ai.agent.business.impl.BusinessAssistantServiceImpl(
                     intentResolver, subjectResolutionService, panoramaExecutionService,
                     panoramaSnapshotReuseService,
-                    personBusinessQueryService, departmentBusinessQueryService, reportDatasetService, composer,
+                    personBusinessQueryService, personDatasetSelectionService,
+                    departmentBusinessQueryService, reportDatasetService, composer,
                     reportService, conversationStateService, chatSessionService, objectMapper
             );
         }
