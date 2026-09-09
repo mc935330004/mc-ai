@@ -21,6 +21,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.function.Consumer;
 import java.util.regex.Pattern;
 
 /**
@@ -54,15 +55,63 @@ final class DirectoryResultParser {
             DirectoryDatasetContractValidator.DirectoryDatasetContract contract,
             Map<String, Object> canonicalInput,
             DatasetExecutionResult result) {
+        return parse(
+                query.userId(),
+                query.sessionId(),
+                query.subjectType(),
+                query.pageNumber(),
+                query.pageSize(),
+                candidate -> validateExactLocator(query, candidate),
+                contract,
+                canonicalInput,
+                result
+        );
+    }
+
+    SubjectDirectoryPage parse(
+            DepartmentMemberDirectoryQuery query,
+            DirectoryDatasetContractValidator.DirectoryDatasetContract contract,
+            Map<String, Object> canonicalInput,
+            DatasetExecutionResult result) {
+        return parse(
+                query.userId(),
+                query.sessionId(),
+                BusinessSubjectType.PERSON,
+                query.pageNumber(),
+                query.pageSize(),
+                candidate -> {
+                },
+                contract,
+                canonicalInput,
+                result
+        );
+    }
+
+    private SubjectDirectoryPage parse(
+            String userId,
+            String sessionId,
+            BusinessSubjectType candidateType,
+            int pageNumber,
+            int pageSize,
+            Consumer<AuthorizedSubjectCandidate> exactLocatorValidator,
+            DirectoryDatasetContractValidator.DirectoryDatasetContract contract,
+            Map<String, Object> canonicalInput,
+            DatasetExecutionResult result) {
         if (result == null
                 || !proofVerifier.verify(result)
-                || !sourceMatches(query, contract, canonicalInput, result.source())) {
+                || !sourceMatches(
+                        userId,
+                        sessionId,
+                        contract,
+                        canonicalInput,
+                        result.source()
+                )) {
             return SubjectDirectoryPage.denied();
         }
         validateSafeFactChannels(result.safeFacts());
         if (result.status() == DatasetExecutionStatus.EMPTY) {
             requireAllChannelsEmpty(result.safeFacts());
-            return SubjectDirectoryPage.empty(query.pageNumber(), query.pageSize());
+            return SubjectDirectoryPage.empty(pageNumber, pageSize);
         }
         if (result.status() != DatasetExecutionStatus.SUCCESS || !result.dataComplete()) {
             return SubjectDirectoryPage.denied();
@@ -70,25 +119,36 @@ final class DirectoryResultParser {
         Map<?, ?> display = requireMap(result.safeFacts().get(DISPLAY_CHANNEL));
         requireExactKeys(display, DIRECTORY_FACTS, "display");
         List<?> rawCandidates = requireList(display.get(CANDIDATES_FACT));
-        if (rawCandidates.size() > query.pageSize()) {
+        if (rawCandidates.size() > pageSize) {
             throw new IllegalArgumentException("主体候选数量超过当前页上限");
         }
-        List<AuthorizedSubjectCandidate> candidates = parseCandidates(query, rawCandidates);
+        List<AuthorizedSubjectCandidate> candidates = parseCandidates(
+                candidateType,
+                exactLocatorValidator,
+                rawCandidates
+        );
         long totalCount = requireNonNegativeLong(display.get(TOTAL_COUNT_FACT));
         boolean hasNext = requireBoolean(display.get(HAS_NEXT_FACT));
-        validatePageMetadata(query, candidates.size(), totalCount, hasNext);
+        validatePageMetadata(
+                pageNumber,
+                pageSize,
+                candidates.size(),
+                totalCount,
+                hasNext
+        );
         return new SubjectDirectoryPage(
                 true,
                 candidates,
-                query.pageNumber(),
-                query.pageSize(),
+                pageNumber,
+                pageSize,
                 totalCount,
                 hasNext
         );
     }
 
     private boolean sourceMatches(
-            SubjectDirectoryQuery query,
+            String userId,
+            String sessionId,
             DirectoryDatasetContractValidator.DirectoryDatasetContract contract,
             Map<String, Object> canonicalInput,
             DatasetExecutionSource source) {
@@ -96,10 +156,10 @@ final class DirectoryResultParser {
                 ReportDatasetValidator.canonicalSafeValue(canonicalInput)
         );
         return source != null
-                && query.userId().equals(source.userId())
-                && query.sessionId().equals(source.sessionId())
+                && userId.equals(source.userId())
+                && sessionId.equals(source.sessionId())
                 && BusinessSubjectType.PERSON == source.subjectType()
-                && query.userId().equals(source.subjectId())
+                && userId.equals(source.subjectId())
                 && contract.datasetCode().equals(source.datasetCode())
                 && contract.configChecksum().equals(source.datasetConfigChecksum())
                 && contract.fieldPolicyChecksum().equals(source.fieldPolicyChecksum())
@@ -107,14 +167,15 @@ final class DirectoryResultParser {
     }
 
     private List<AuthorizedSubjectCandidate> parseCandidates(
-            SubjectDirectoryQuery query,
+            BusinessSubjectType candidateType,
+            Consumer<AuthorizedSubjectCandidate> exactLocatorValidator,
             List<?> rawCandidates) {
         List<AuthorizedSubjectCandidate> candidates = new ArrayList<>(rawCandidates.size());
         Set<String> subjectRefs = new HashSet<>();
         Set<String> projectCodes = new HashSet<>();
         for (Object rawCandidate : rawCandidates) {
             AuthorizedSubjectCandidate candidate = parseCandidate(
-                    query.subjectType(),
+                    candidateType,
                     requireMap(rawCandidate)
             );
             if (!subjectRefs.add(candidate.rawSubjectId())) {
@@ -124,7 +185,7 @@ final class DirectoryResultParser {
                     && !projectCodes.add(candidate.projectCode().toUpperCase(Locale.ROOT))) {
                 throw new IllegalArgumentException("主体目录项目编码重复");
             }
-            validateExactLocator(query, candidate);
+            exactLocatorValidator.accept(candidate);
             candidates.add(candidate);
         }
         return List.copyOf(candidates);
@@ -228,13 +289,14 @@ final class DirectoryResultParser {
     }
 
     private void validatePageMetadata(
-            SubjectDirectoryQuery query,
+            int pageNumber,
+            int pageSize,
             int candidateCount,
             long totalCount,
             boolean hasNext) {
-        long offset = Math.multiplyExact((long) query.pageNumber() - 1, query.pageSize());
+        long offset = Math.multiplyExact((long) pageNumber - 1, pageSize);
         long remaining = Math.max(0, totalCount - Math.min(offset, totalCount));
-        long expectedCount = Math.min(query.pageSize(), remaining);
+        long expectedCount = Math.min(pageSize, remaining);
         if (candidateCount != expectedCount) {
             throw new IllegalArgumentException("主体目录当前页数量与总数不一致");
         }
