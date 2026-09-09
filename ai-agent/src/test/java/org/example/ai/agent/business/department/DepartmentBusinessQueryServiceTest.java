@@ -317,6 +317,20 @@ class DepartmentBusinessQueryServiceTest {
     }
 
     @Test
+    void resultStringContainsOnlySafeSummaryWithoutAnomalyPeopleOrAmounts() {
+        Result result = new Result(DepartmentQueryStatus.COMPLETED, true, 1, 1, 1,
+                new Aggregate(true, 1, 7, new BigDecimal("12345.67"), new BigDecimal("98765.43")),
+                Map.of(PersonQueryStatus.SUCCESS, 1),
+                List.of(new MultiPersonSummary.AnomalyPerson("张三（E***01）", List.of("MISSING_PUNCH"))),
+                "private-safe-message");
+
+        assertThat(result.toString())
+                .doesNotContain("张三", "E***01", "MISSING_PUNCH", "12345.67", "98765.43", "private-safe-message")
+                .isEqualTo("Result[status=COMPLETED, dataComplete=true, authorizedPeople=1, loadedPeople=1, "
+                        + "processedPeople=1, statusCount=5, anomalyCount=1]");
+    }
+
+    @Test
     void freezesCommandInputsAndRedactsItsStringRepresentation() {
         Map<String, Object> nested = new LinkedHashMap<>(Map.of("role", "private-role"));
         Map<String, Object> context = new LinkedHashMap<>(Map.of("nested", nested));

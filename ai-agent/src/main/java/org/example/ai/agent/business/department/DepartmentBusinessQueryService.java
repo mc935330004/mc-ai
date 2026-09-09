@@ -251,6 +251,18 @@ public class DepartmentBusinessQueryService {
             anomalyPeople = List.copyOf(anomalyPeople);
         }
 
+        /** 日志仅输出状态和数量，不输出人员标签、异常明细、金额或提示正文。 */
+        @Override
+        public String toString() {
+            return "Result[status=" + status
+                    + ", dataComplete=" + dataComplete
+                    + ", authorizedPeople=" + authorizedPeople
+                    + ", loadedPeople=" + loadedPeople
+                    + ", processedPeople=" + processedPeople
+                    + ", statusCount=" + statusCounts.size()
+                    + ", anomalyCount=" + anomalyPeople.size() + ']';
+        }
+
         private static Result denied() {
             return new Result(DepartmentQueryStatus.DENIED, false, 0, 0, 0,
                     new Aggregate(false, 0, null, null, null), Map.of(), List.of(), DENIED_MESSAGE);
