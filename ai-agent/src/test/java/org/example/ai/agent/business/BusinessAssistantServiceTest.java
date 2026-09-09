@@ -286,7 +286,7 @@ class BusinessAssistantServiceTest {
         Fixture fixture = new Fixture();
         when(fixture.intentResolver.resolve(any(), any())).thenReturn(new BusinessQueryIntent(
                 BusinessSubjectType.PROJECT, null, null, null,
-                2026, null, null, List.of(), false, null
+                2026, null, null, List.of(), false, null, false
         ));
         when(fixture.subjectResolutionService.resolve(any())).thenReturn(new SubjectResolutionResult(
                 SubjectResolutionState.CANDIDATES,
@@ -316,7 +316,7 @@ class BusinessAssistantServiceTest {
         Fixture fixture = new Fixture();
         when(fixture.intentResolver.resolve(any(), any())).thenReturn(new BusinessQueryIntent(
                 BusinessSubjectType.PROJECT, "P-1001", null, null,
-                2026, null, null, List.of(), false, "PDF"
+                2026, null, null, List.of(), false, "PDF", false
         ));
         when(fixture.subjectResolutionService.resolve(any())).thenReturn(resolvedProject());
         ProjectPanoramaResult panorama = new ProjectPanoramaResult(
@@ -463,7 +463,7 @@ class BusinessAssistantServiceTest {
         when(fixture.intentResolver.resolve(any(), any())).thenReturn(new BusinessQueryIntent(
                 BusinessSubjectType.PERSON, null, "张三", null,
                 null, java.time.LocalDate.of(2026, 8, 1), java.time.LocalDate.of(2026, 8, 31),
-                List.of(), false, "PDF"
+                List.of(), false, "PDF", false
         ));
         when(fixture.subjectResolutionService.resolve(any())).thenReturn(resolvedPerson());
         when(fixture.reportDatasetService.list()).thenReturn(personDatasets());
@@ -504,7 +504,7 @@ class BusinessAssistantServiceTest {
     void clientExtraSubjectTypeMustNotBecomeTrustedSubject() throws Exception {
         Fixture fixture = new Fixture();
         when(fixture.intentResolver.resolve(any(), any())).thenReturn(new BusinessQueryIntent(
-                null, null, null, null, null, null, null, List.of(), false, null
+                null, null, null, null, null, null, null, List.of(), false, null, false
         ));
         AgentRequest request = request("查一下相关情况");
         request.setExtra(Map.of("subjectType", "PERSON"));
@@ -541,7 +541,7 @@ class BusinessAssistantServiceTest {
     private BusinessQueryIntent projectIntent(boolean refresh, String projectCode) {
         return new BusinessQueryIntent(
                 BusinessSubjectType.PROJECT, projectCode, null, null,
-                2026, null, null, List.of(), refresh, null
+                2026, null, null, List.of(), refresh, null, false
         );
     }
 
@@ -620,7 +620,7 @@ class BusinessAssistantServiceTest {
         return new BusinessQueryIntent(
                 BusinessSubjectType.PERSON, null, null, null,
                 null, java.time.LocalDate.of(2026, 8, 1), java.time.LocalDate.of(2026, 8, 31),
-                List.of(), refresh, null
+                List.of(), refresh, null, false
         );
     }
 

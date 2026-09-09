@@ -31,6 +31,7 @@ public class BusinessQueryIntentResolver {
             4. 请求的数据集语义：datasetCodes。
             5. 是否要求刷新：refresh。
             6. 导出格式：exportFormat。
+            7. 是否需要展示异常人员明细：anomalyPeopleRequested。
 
             输出要求：
             1. 只输出一个完整 JSON 对象，不要输出解释文字。
@@ -41,6 +42,7 @@ public class BusinessQueryIntentResolver {
             6. datasetCodes 使用大写字母、数字和下划线表达数据集语义；无法判断时为空数组。
             7. refresh 仅在用户明确要求刷新或最新数据时为 true，否则为 false。
             8. exportFormat 仅允许 XLSX、DOCX、PDF；未要求导出时为 null。
+            9. anomalyPeopleRequested 仅当用户明确询问谁、哪些人、人员名单或人员明细时为 true；该字段只控制展示，不改变可查询数据范围，也不能替代后端校验。
 
             返回字段必须完整：
             {
@@ -53,7 +55,8 @@ public class BusinessQueryIntentResolver {
               "periodEnd": null,
               "datasetCodes": [],
               "refresh": false,
-              "exportFormat": null
+              "exportFormat": null,
+              "anomalyPeopleRequested": false
             }
             """;
 

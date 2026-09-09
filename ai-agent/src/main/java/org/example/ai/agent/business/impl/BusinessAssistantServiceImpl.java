@@ -770,7 +770,7 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
         return new BusinessQueryIntent(
                 subjectType, intent.projectCode(), intent.personName(), intent.employeeNo(),
                 intent.projectYear(), intent.periodStart(), intent.periodEnd(), intent.datasetCodes(),
-                intent.refresh(), intent.exportFormat()
+                intent.refresh(), intent.exportFormat(), intent.anomalyPeopleRequested()
         );
     }
 
@@ -848,7 +848,8 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
                 ? intent.periodEnd() : dateValue(inherited.get("endDate"));
         return new BusinessQueryIntent(
                 intent.subjectType(), intent.projectCode(), intent.personName(), intent.employeeNo(),
-                projectYear, start, end, intent.datasetCodes(), intent.refresh(), intent.exportFormat()
+                projectYear, start, end, intent.datasetCodes(), intent.refresh(), intent.exportFormat(),
+                intent.anomalyPeopleRequested()
         );
     }
 

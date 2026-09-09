@@ -233,6 +233,61 @@ class BusinessIntentValidatorTest {
                 .hasMessageNotContaining("SENSITIVE-RAW-CONTENT");
     }
 
+    @Test
+    void resolverParsesExplicitAnomalyPeopleRequest() {
+        TrackedChatClientService chatClientService = mock(TrackedChatClientService.class);
+        ChatResponse response = mock(ChatResponse.class, RETURNS_DEEP_STUBS);
+        when(response.getResult().getOutput().getText()).thenReturn("""
+                {
+                  "subjectType": "PROJECT",
+                  "datasetCodes": ["PERSON_OVERVIEW"],
+                  "anomalyPeopleRequested": true
+                }
+                """);
+        when(chatClientService.call(any(), anyString(), anyString(), any(ChatOptions.Builder.class)))
+                .thenReturn(response);
+
+        BusinessQueryIntentResolver resolver = new BusinessQueryIntentResolver(
+                chatClientService,
+                new ObjectMapper().findAndRegisterModules(),
+                validator
+        );
+
+        BusinessQueryIntent resolved = resolver.resolve(
+                "查询项目中哪些人存在异常",
+                ModelCallContext.builder().build()
+        );
+
+        assertThat(resolved.anomalyPeopleRequested()).isTrue();
+    }
+
+    @Test
+    void resolverDefaultsMissingAnomalyPeopleRequestToFalse() {
+        TrackedChatClientService chatClientService = mock(TrackedChatClientService.class);
+        ChatResponse response = mock(ChatResponse.class, RETURNS_DEEP_STUBS);
+        when(response.getResult().getOutput().getText()).thenReturn("""
+                {
+                  "subjectType": "PROJECT",
+                  "datasetCodes": ["PROJECT_OVERVIEW"]
+                }
+                """);
+        when(chatClientService.call(any(), anyString(), anyString(), any(ChatOptions.Builder.class)))
+                .thenReturn(response);
+
+        BusinessQueryIntentResolver resolver = new BusinessQueryIntentResolver(
+                chatClientService,
+                new ObjectMapper().findAndRegisterModules(),
+                validator
+        );
+
+        BusinessQueryIntent resolved = resolver.resolve(
+                "查询项目概览",
+                ModelCallContext.builder().build()
+        );
+
+        assertThat(resolved.anomalyPeopleRequested()).isFalse();
+    }
+
     private BusinessQueryIntent intent(
             Integer projectYear,
             LocalDate periodStart,
@@ -250,7 +305,8 @@ class BusinessIntentValidatorTest {
                 periodEnd,
                 datasetCodes,
                 false,
-                exportFormat
+                exportFormat,
+                false
         );
     }
 }
