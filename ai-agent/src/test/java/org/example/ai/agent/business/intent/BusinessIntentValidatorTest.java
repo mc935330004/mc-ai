@@ -66,6 +66,36 @@ class BusinessIntentValidatorTest {
     }
 
     @Test
+    void rejectsMoreThanFourDatasetCodes() {
+        BusinessQueryIntent intent = intent(
+                null,
+                null,
+                null,
+                List.of("DATASET_A", "DATASET_B", "DATASET_C", "DATASET_D", "DATASET_E"),
+                null
+        );
+
+        assertThatThrownBy(() -> validator.validate(intent))
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("最多选择 4 个数据集");
+    }
+
+    @Test
+    void rejectsDuplicateDatasetCodes() {
+        BusinessQueryIntent intent = intent(
+                null,
+                null,
+                null,
+                List.of("PROJECT_OVERVIEW", "PROJECT_OVERVIEW"),
+                null
+        );
+
+        assertThatThrownBy(() -> validator.validate(intent))
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("不能重复");
+    }
+
+    @Test
     void rejectsPeriodWhoseEndPrecedesStart() {
         BusinessQueryIntent intent = intent(
                 null,
@@ -198,6 +228,11 @@ class BusinessIntentValidatorTest {
                 .doesNotContain("原始结构")
                 .doesNotContain("calculation")
                 .doesNotContain("计算");
+        assertThat(systemPrompt.getValue())
+                .contains("PERSON、DEPARTMENT")
+                .contains("TRAVEL、ATTENDANCE、REIMBURSEMENT")
+                .contains("打卡、缺卡或考勤")
+                .contains("PROJECT");
     }
 
     @Test

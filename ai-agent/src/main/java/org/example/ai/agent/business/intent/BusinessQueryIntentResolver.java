@@ -39,10 +39,12 @@ public class BusinessQueryIntentResolver {
             3. 日期使用 yyyy-MM-dd；无法判断时为 null。
             4. projectYear 只表达项目年度，不得据此生成 periodStart 或 periodEnd。
             5. periodStart 和 periodEnd 只来自用户明确的数据时间范围，不得据此生成 projectYear。
-            6. datasetCodes 使用大写字母、数字和下划线表达数据集语义；无法判断时为空数组。
-            7. refresh 仅在用户明确要求刷新或最新数据时为 true，否则为 false。
-            8. exportFormat 仅允许 XLSX、DOCX、PDF；未要求导出时为 null。
-            9. anomalyPeopleRequested 仅当用户明确询问谁、哪些人、人员名单或人员明细时为 true；该字段只控制展示，不改变可查询数据范围，也不能替代后端校验。
+            6. PERSON、DEPARTMENT 的 datasetCodes 只允许 TRAVEL、ATTENDANCE、REIMBURSEMENT；用户提到打卡、缺卡或考勤时输出 ATTENDANCE，PUNCH 仅作为确定性输入别名，不主动输出。
+            7. PERSON、DEPARTMENT 未明确点名业务类型时，datasetCodes 输出空数组，由后端选择默认全览。
+            8. PROJECT 的 datasetCodes 使用大写字母、数字和下划线表达数据集语义，具体范围由项目全景配置决定；无法判断时为空数组。
+            9. refresh 仅在用户明确要求刷新或最新数据时为 true，否则为 false。
+            10. exportFormat 仅允许 XLSX、DOCX、PDF；未要求导出时为 null。
+            11. anomalyPeopleRequested 仅当用户明确询问谁、哪些人、人员名单或人员明细时为 true；该字段只控制展示，不改变可查询数据范围，也不能替代后端校验。
 
             返回字段必须完整：
             {
