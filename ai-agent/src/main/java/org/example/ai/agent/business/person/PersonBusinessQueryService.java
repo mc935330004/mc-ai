@@ -11,6 +11,7 @@ import org.example.ai.agent.business.person.model.AttendanceDayResult;
 import org.example.ai.agent.business.snapshot.BusinessSnapshotMatcher;
 import org.example.ai.agent.business.snapshot.BusinessSnapshotService;
 import org.example.ai.agent.business.snapshot.SnapshotFactChannel;
+import org.example.ai.agent.business.snapshot.entity.BusinessSnapshot;
 import org.example.ai.agent.business.subject.AuthorizedPersonDirectoryService;
 import org.example.ai.agent.business.subject.SubjectDirectoryQuery;
 import org.example.ai.agent.business.subject.SubjectSelectionTokenService;
@@ -34,6 +35,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 /**
  * 单人业务安全查询编排。
@@ -44,6 +46,8 @@ import java.util.Set;
 public class PersonBusinessQueryService {
 
     private static final Logger LOGGER = LoggerFactory.getLogger(PersonBusinessQueryService.class);
+    private static final Pattern DATASET_CODE = Pattern.compile("^[A-Z][A-Z0-9_]{1,127}$");
+    private static final Pattern SHA256 = Pattern.compile("[0-9a-fA-F]{64}");
     public static final String TRAVEL_RECORDS = "person_travel_records";
     public static final String PUNCH_RECORDS = "person_punch_records";
     public static final String LEAVE_RECORDS = "person_leave_records";
@@ -106,7 +110,10 @@ public class PersonBusinessQueryService {
             safeFacts.put(type, new PersonBusinessFactAggregator.SafeFacts(
                     module.complete(), module.calculation()
             ));
-            modules.add(new ModuleResult(type, module.status(), module.complete()));
+            modules.add(new ModuleResult(
+                    type, plan.datasetCode(), module.status(), module.complete(),
+                    module.snapshotId(), module.fieldPolicyChecksum()
+            ));
         }
 
         return new Result(
@@ -249,7 +256,8 @@ public class PersonBusinessQueryService {
         )).orElse(null);
         if (reused != null) {
             return new ModuleData(
-                    ModuleStatus.REUSED, reused.dataComplete(), reused.calculation()
+                    ModuleStatus.REUSED, reused.dataComplete(), reused.calculation(),
+                    reused.snapshotId(), reused.fieldPolicyChecksum()
             );
         }
         /* DERIVE 本阶段按 REQUERY 收口，避免在人员敏感事实上引入未经证明的裁剪逻辑。 */
@@ -270,7 +278,7 @@ public class PersonBusinessQueryService {
             ));
         } catch (RuntimeException exception) {
             warnModuleFailure("EXECUTION", plan.datasetCode(), exception);
-            return new ModuleData(ModuleStatus.FAILED, false, Map.of());
+            return ModuleData.failed(ModuleStatus.FAILED);
         }
         if (result == null) {
             LOGGER.warn(
@@ -279,15 +287,16 @@ public class PersonBusinessQueryService {
                     plan.datasetCode(),
                     "NullResult"
             );
-            return new ModuleData(ModuleStatus.FAILED, false, Map.of());
+            return ModuleData.failed(ModuleStatus.FAILED);
         }
         ModuleStatus status = moduleStatus(result.status());
         if (result.status() != DatasetExecutionStatus.SUCCESS
                 && result.status() != DatasetExecutionStatus.EMPTY) {
-            return new ModuleData(status, false, Map.of());
+            return ModuleData.failed(status);
         }
+        BusinessSnapshot snapshot;
         try {
-            snapshotService.create(new BusinessSnapshotService.CreateCommand(
+            snapshot = snapshotService.create(new BusinessSnapshotService.CreateCommand(
                     command.userId(), command.sessionId(), BusinessSubjectType.PERSON,
                     subjectId, plan.datasetCode(), canonicalInput, null,
                     List.of(new BusinessSnapshotService.ItemCommand(
@@ -299,15 +308,29 @@ public class PersonBusinessQueryService {
             ));
         } catch (RuntimeException exception) {
             warnModuleFailure("SNAPSHOT_CREATE", plan.datasetCode(), exception);
-            return new ModuleData(ModuleStatus.FAILED, false, Map.of());
+            return ModuleData.failed(ModuleStatus.FAILED);
+        }
+        if (snapshot == null
+                || !StringUtils.hasText(snapshot.getSnapshotId())
+                || !StringUtils.hasText(snapshot.getFieldPolicyChecksum())) {
+            LOGGER.warn(
+                    "人员数据集模块失败 category={} datasetCode={} exceptionType={}",
+                    "SNAPSHOT_CREATE",
+                    plan.datasetCode(),
+                    "InvalidSnapshotReference"
+            );
+            return ModuleData.failed(ModuleStatus.FAILED);
         }
         Map<String, Object> calculation = factAggregator.calculation(
                 result.safeFacts(), plan.requiredFactCodes()
         );
         if (calculation == null) {
-            return new ModuleData(ModuleStatus.FAILED, false, Map.of());
+            return ModuleData.failed(ModuleStatus.FAILED);
         }
-        return new ModuleData(status, result.dataComplete(), calculation);
+        return new ModuleData(
+                status, result.dataComplete(), calculation,
+                snapshot.getSnapshotId(), snapshot.getFieldPolicyChecksum()
+        );
     }
 
     @SuppressWarnings("unchecked")
@@ -463,7 +486,7 @@ public class PersonBusinessQueryService {
             Metric<BigDecimal> paidAmount) {
     }
 
-    /** 返回对象不携带快照ID、内部工号、认证上下文或字段策略前的事实。 */
+    /** 返回对象不携带内部工号、认证上下文或字段策略前的事实。 */
     public record Result(
             TravelSummary travelSummary,
             ReimbursementSummary reimbursementSummary,
@@ -476,7 +499,45 @@ public class PersonBusinessQueryService {
         }
     }
 
-    public record ModuleResult(DatasetType type, ModuleStatus status, boolean complete) {
+    /**
+     * 模块结果只携带报告组装所需的不透明快照引用，不携带人员标识或事实值。
+     */
+    public record ModuleResult(
+            DatasetType type,
+            String datasetCode,
+            ModuleStatus status,
+            boolean complete,
+            String snapshotId,
+            String fieldPolicyChecksum) {
+
+        public ModuleResult {
+            if (type == null || status == null
+                    || !StringUtils.hasText(datasetCode)
+                    || !DATASET_CODE.matcher(datasetCode).matches()) {
+                throw new IllegalArgumentException("人员模块标识不完整");
+            }
+            boolean successful = status == ModuleStatus.SUCCESS
+                    || status == ModuleStatus.EMPTY
+                    || status == ModuleStatus.REUSED;
+            if (successful && (!StringUtils.hasText(snapshotId)
+                    || !StringUtils.hasText(fieldPolicyChecksum)
+                    || !SHA256.matcher(fieldPolicyChecksum).matches())) {
+                throw new IllegalArgumentException("成功人员模块必须携带有效快照引用");
+            }
+            if (!successful && (snapshotId != null || fieldPolicyChecksum != null)) {
+                throw new IllegalArgumentException("失败人员模块不得携带快照引用");
+            }
+        }
+
+        @Override
+        public String toString() {
+            return "ModuleResult[type=" + type
+                    + ", datasetCode=" + datasetCode
+                    + ", status=" + status
+                    + ", complete=" + complete
+                    + ", snapshotPresent=" + StringUtils.hasText(snapshotId)
+                    + ", fieldPolicyPresent=" + StringUtils.hasText(fieldPolicyChecksum) + ']';
+        }
     }
 
     private record ValidatedCommand(
@@ -504,7 +565,13 @@ public class PersonBusinessQueryService {
     private record ModuleData(
             ModuleStatus status,
             boolean complete,
-            Map<String, Object> calculation) {
+            Map<String, Object> calculation,
+            String snapshotId,
+            String fieldPolicyChecksum) {
+
+        private static ModuleData failed(ModuleStatus status) {
+            return new ModuleData(status, false, Map.of(), null, null);
+        }
 
         @Override
         public String toString() {

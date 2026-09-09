@@ -216,9 +216,11 @@ class PersonBusinessQueryServiceTest {
 
         Result result = service.query(command(selectionToken, false));
 
-        assertThat(result.modules()).allMatch(module ->
-                module.status() == PersonBusinessQueryService.ModuleStatus.REUSED
-        );
+        assertThat(result.modules()).allSatisfy(module -> {
+            assertThat(module.status()).isEqualTo(PersonBusinessQueryService.ModuleStatus.REUSED);
+            assertThat(module.snapshotId()).isEqualTo("snapshot-" + module.datasetCode());
+            assertThat(module.fieldPolicyChecksum()).isEqualTo("a".repeat(64));
+        });
         verify(executionService, never()).execute(any());
         verify(snapshotService, never()).create(any());
     }
@@ -253,9 +255,11 @@ class PersonBusinessQueryServiceTest {
 
         Result result = service.query(command(selectionToken, false));
 
-        assertThat(result.modules()).allMatch(module ->
-                module.status() == PersonBusinessQueryService.ModuleStatus.SUCCESS
-        );
+        assertThat(result.modules()).allSatisfy(module -> {
+            assertThat(module.status()).isEqualTo(PersonBusinessQueryService.ModuleStatus.SUCCESS);
+            assertThat(module.snapshotId()).isEqualTo("fresh-" + module.datasetCode());
+            assertThat(module.fieldPolicyChecksum()).isEqualTo("a".repeat(64));
+        });
         verify(executionService, org.mockito.Mockito.times(6)).execute(any());
         ArgumentCaptor<BusinessSnapshotService.CreateCommand> createCaptor =
                 ArgumentCaptor.forClass(BusinessSnapshotService.CreateCommand.class);
@@ -304,9 +308,11 @@ class PersonBusinessQueryServiceTest {
 
         Result result = service.query(command(selectionToken, false));
 
-        assertThat(result.modules()).allMatch(module ->
-                module.status() == PersonBusinessQueryService.ModuleStatus.SUCCESS
-        );
+        assertThat(result.modules()).allSatisfy(module -> {
+            assertThat(module.status()).isEqualTo(PersonBusinessQueryService.ModuleStatus.SUCCESS);
+            assertThat(module.snapshotId()).isEqualTo("fresh-" + module.datasetCode());
+            assertThat(module.fieldPolicyChecksum()).isEqualTo("a".repeat(64));
+        });
         verify(executionService, org.mockito.Mockito.times(6)).execute(any());
         verify(snapshotService, org.mockito.Mockito.times(6)).create(any());
     }
@@ -482,8 +488,164 @@ class PersonBusinessQueryServiceTest {
         assertThat(result.modules()).anyMatch(module ->
                 module.type() == DatasetType.REIMBURSEMENT
                         && module.status() == PersonBusinessQueryService.ModuleStatus.DENIED
+                        && module.snapshotId() == null
+                        && module.fieldPolicyChecksum() == null
         );
         verify(snapshotService, org.mockito.Mockito.times(5)).create(any());
+    }
+
+    @Test
+    void failedAndTimeoutModulesDoNotExposeSnapshotReferences() {
+        authorizeSelectedPerson();
+        when(snapshotMatcher.match(any())).thenReturn(new SnapshotMatchResult(
+                SnapshotMatchDecision.REQUERY, null,
+                BusinessSnapshotMatcher.GENERIC_REQUERY_REASON
+        ));
+        when(executionService.execute(any())).thenAnswer(invocation -> {
+            DatasetExecutionRequest request = invocation.getArgument(0);
+            DatasetType type = typeFor(request.datasetCode());
+            if (type == DatasetType.TRAVEL) {
+                return outcome(request, DatasetExecutionStatus.FAILED, false, Map.of());
+            }
+            if (type == DatasetType.PUNCH) {
+                return outcome(request, DatasetExecutionStatus.TIMEOUT, false, Map.of());
+            }
+            return success(request, emptyFactsFor(request.datasetCode()));
+        });
+        when(snapshotService.create(any())).thenAnswer(invocation ->
+                freshSnapshot(invocation.getArgument(0))
+        );
+
+        Result result = service.query(command(selectionToken, false));
+
+        assertThat(result.modules())
+                .filteredOn(module -> module.status() == PersonBusinessQueryService.ModuleStatus.FAILED
+                        || module.status() == PersonBusinessQueryService.ModuleStatus.TIMEOUT)
+                .hasSize(2)
+                .allSatisfy(module -> {
+                    assertThat(module.snapshotId()).isNull();
+                    assertThat(module.fieldPolicyChecksum()).isNull();
+                });
+    }
+
+    @Test
+    void emptyModuleKeepsCreatedSnapshotReference() {
+        authorizeSelectedPerson();
+        when(snapshotMatcher.match(any())).thenReturn(new SnapshotMatchResult(
+                SnapshotMatchDecision.REQUERY, null,
+                BusinessSnapshotMatcher.GENERIC_REQUERY_REASON
+        ));
+        when(executionService.execute(any())).thenAnswer(invocation -> {
+            DatasetExecutionRequest request = invocation.getArgument(0);
+            if (typeFor(request.datasetCode()) == DatasetType.TRAVEL) {
+                return outcome(
+                        request, DatasetExecutionStatus.EMPTY, true,
+                        emptyFactsFor(request.datasetCode())
+                );
+            }
+            return success(request, emptyFactsFor(request.datasetCode()));
+        });
+        when(snapshotService.create(any())).thenAnswer(invocation ->
+                freshSnapshot(invocation.getArgument(0))
+        );
+
+        Result result = service.query(command(selectionToken, false));
+
+        assertThat(result.modules())
+                .filteredOn(module -> module.type() == DatasetType.TRAVEL)
+                .singleElement()
+                .satisfies(module -> {
+                    assertThat(module.status()).isEqualTo(
+                            PersonBusinessQueryService.ModuleStatus.EMPTY
+                    );
+                    assertThat(module.snapshotId()).isEqualTo("fresh-PERSON_TRAVEL");
+                    assertThat(module.fieldPolicyChecksum()).isEqualTo("a".repeat(64));
+                });
+    }
+
+    @Test
+    void moduleResultToStringDoesNotExposeSnapshotIdOrPolicyChecksum() {
+        PersonBusinessQueryService.ModuleResult module =
+                new PersonBusinessQueryService.ModuleResult(
+                        DatasetType.TRAVEL,
+                        datasetCode(DatasetType.TRAVEL),
+                        PersonBusinessQueryService.ModuleStatus.SUCCESS,
+                        true,
+                        "snapshot-sensitive",
+                        "a".repeat(64)
+                );
+
+        assertThat(module.toString())
+                .contains("snapshotPresent=true", "fieldPolicyPresent=true")
+                .doesNotContain("snapshot-sensitive", "a".repeat(64), EMPLOYEE_NO);
+    }
+
+    @Test
+    void moduleResultRejectsMissingIdentityAndInvalidDatasetCode() {
+        assertThatThrownBy(() -> new PersonBusinessQueryService.ModuleResult(
+                null, "PERSON_TRAVEL", PersonBusinessQueryService.ModuleStatus.SUCCESS,
+                true, "snapshot-1", "a".repeat(64)
+        )).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new PersonBusinessQueryService.ModuleResult(
+                DatasetType.TRAVEL, "PERSON_TRAVEL", null,
+                true, "snapshot-1", "a".repeat(64)
+        )).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> new PersonBusinessQueryService.ModuleResult(
+                DatasetType.TRAVEL, "person-travel", PersonBusinessQueryService.ModuleStatus.SUCCESS,
+                true, "snapshot-1", "a".repeat(64)
+        )).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void moduleResultAccepts128CharacterDatasetCodeAndRejects129Characters() {
+        String maximumDatasetCode = "A" + "_".repeat(127);
+        String oversizedDatasetCode = "A" + "_".repeat(128);
+
+        PersonBusinessQueryService.ModuleResult accepted =
+                new PersonBusinessQueryService.ModuleResult(
+                        DatasetType.TRAVEL,
+                        maximumDatasetCode,
+                        PersonBusinessQueryService.ModuleStatus.SUCCESS,
+                        true,
+                        "snapshot-1",
+                        "a".repeat(64)
+                );
+
+        assertThat(accepted.datasetCode()).hasSize(128);
+        assertThatThrownBy(() -> new PersonBusinessQueryService.ModuleResult(
+                DatasetType.TRAVEL,
+                oversizedDatasetCode,
+                PersonBusinessQueryService.ModuleStatus.SUCCESS,
+                true,
+                "snapshot-1",
+                "a".repeat(64)
+        )).isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void moduleResultEnforcesStatusAndSnapshotReferenceInvariant() {
+        for (PersonBusinessQueryService.ModuleStatus status : List.of(
+                PersonBusinessQueryService.ModuleStatus.SUCCESS,
+                PersonBusinessQueryService.ModuleStatus.EMPTY,
+                PersonBusinessQueryService.ModuleStatus.REUSED)) {
+            assertThatThrownBy(() -> new PersonBusinessQueryService.ModuleResult(
+                    DatasetType.TRAVEL, "PERSON_TRAVEL", status,
+                    true, null, "a".repeat(64)
+            )).isInstanceOf(IllegalArgumentException.class);
+            assertThatThrownBy(() -> new PersonBusinessQueryService.ModuleResult(
+                    DatasetType.TRAVEL, "PERSON_TRAVEL", status,
+                    true, "snapshot-1", "invalid-checksum"
+            )).isInstanceOf(IllegalArgumentException.class);
+        }
+        for (PersonBusinessQueryService.ModuleStatus status : List.of(
+                PersonBusinessQueryService.ModuleStatus.DENIED,
+                PersonBusinessQueryService.ModuleStatus.FAILED,
+                PersonBusinessQueryService.ModuleStatus.TIMEOUT)) {
+            assertThatThrownBy(() -> new PersonBusinessQueryService.ModuleResult(
+                    DatasetType.TRAVEL, "PERSON_TRAVEL", status,
+                    false, "snapshot-1", "a".repeat(64)
+            )).isInstanceOf(IllegalArgumentException.class);
+        }
     }
 
     @Test
@@ -656,11 +818,11 @@ class PersonBusinessQueryServiceTest {
 
         assertThat(modelJson)
                 .contains("travelSummary", "reimbursementSummary", "attendance", "modules")
+                .contains("snapshotId", "fieldPolicyChecksum")
                 .doesNotContain(
                         EMPLOYEE_NO,
                         "Bearer secret",
                         "tenant-secret",
-                        "snapshot",
                         "calculation",
                         PersonBusinessQueryService.TRAVEL_RECORDS
                 );
@@ -844,6 +1006,8 @@ class PersonBusinessQueryServiceTest {
                 ))
         ));
         snapshot.setStatus("COMPLETE");
+        snapshot.setDataComplete(true);
+        snapshot.setFieldPolicyChecksum("a".repeat(64));
         snapshot.setExpiresAt(LocalDateTime.now().plusHours(1));
         snapshot.setFactsJson(new ObjectMapper().writeValueAsString(
                 Map.of("person", facts)

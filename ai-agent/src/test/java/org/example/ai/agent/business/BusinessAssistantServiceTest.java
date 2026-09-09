@@ -177,7 +177,9 @@ class BusinessAssistantServiceTest {
                 List.of(),
                 java.util.Arrays.stream(PersonBusinessQueryService.DatasetType.values())
                         .map(type -> new PersonBusinessQueryService.ModuleResult(
-                                type, PersonBusinessQueryService.ModuleStatus.REUSED, true
+                                type, "PERSON_" + type.name(),
+                                PersonBusinessQueryService.ModuleStatus.REUSED, true,
+                                "snapshot-" + type.name(), "d".repeat(64)
                         )).toList()
         );
         when(fixture.personBusinessQueryService.query(any())).thenReturn(result);

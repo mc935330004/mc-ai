@@ -92,10 +92,31 @@ class PersonSnapshotReuseServiceTest {
         Optional<PersonSnapshotReuseService.ReuseResult> result = service.reuse(command());
 
         assertThat(result).isPresent();
-        assertThat(result.orElseThrow().dataComplete()).isTrue();
-        assertThat(result.orElseThrow().calculation())
+        PersonSnapshotReuseService.ReuseResult reused = result.orElseThrow();
+        assertThat(reused.snapshotId()).isEqualTo("snapshot-1");
+        assertThat(reused.fieldPolicyChecksum()).isEqualTo("a".repeat(64));
+        assertThat(reused.dataComplete()).isTrue();
+        assertThat(reused.calculation())
                 .containsOnlyKeys(FACT_CODE)
                 .containsEntry(FACT_CODE, java.util.List.of());
+    }
+
+    @Test
+    void reuseResultToStringDoesNotExposeReferenceOrFactValues() throws Exception {
+        arrangeReuse();
+        BusinessSnapshot snapshot = validSnapshot();
+        snapshot.setFactsJson(objectMapper.writeValueAsString(Map.of(
+                "person", Map.of(
+                        "calculation", Map.of(FACT_CODE, java.util.List.of("sensitive-fact"))
+                )
+        )));
+        when(snapshotMapper.selectById("snapshot-1")).thenReturn(snapshot);
+
+        String resultText = service.reuse(command()).orElseThrow().toString();
+
+        assertThat(resultText)
+                .contains("snapshotPresent=true", "calculationFactCount=1")
+                .doesNotContain("snapshot-1", "a".repeat(64), "sensitive-fact", "E1001");
     }
 
     @Test
@@ -127,6 +148,7 @@ class PersonSnapshotReuseServiceTest {
         ));
         snapshot.setStatus("COMPLETE");
         snapshot.setDataComplete(true);
+        snapshot.setFieldPolicyChecksum("a".repeat(64));
         snapshot.setExpiresAt(NOW.plusHours(1));
         snapshot.setFactsJson(objectMapper.writeValueAsString(Map.of(
                 "person", Map.of(

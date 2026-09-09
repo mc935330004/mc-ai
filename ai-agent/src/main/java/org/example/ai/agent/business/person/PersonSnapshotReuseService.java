@@ -90,6 +90,7 @@ public class PersonSnapshotReuseService {
             return Optional.empty();
         }
         return Optional.of(new ReuseResult(
+                snapshot.getSnapshotId(), snapshot.getFieldPolicyChecksum(),
                 Boolean.TRUE.equals(snapshot.getDataComplete()), calculation
         ));
     }
@@ -106,6 +107,7 @@ public class PersonSnapshotReuseService {
                 && Objects.equals(snapshot.getSubjectId(), command.subjectId())
                 && Objects.equals(snapshot.getDatasetCode(), command.datasetCode())
                 && REUSABLE_STATUS.contains(snapshot.getStatus())
+                && StringUtils.hasText(snapshot.getFieldPolicyChecksum())
                 && snapshot.getExpiresAt() != null
                 && snapshot.getExpiresAt().isAfter(LocalDateTime.now(clock));
     }
@@ -137,7 +139,14 @@ public class PersonSnapshotReuseService {
         }
     }
 
-    public record ReuseResult(boolean dataComplete, Map<String, Object> calculation) {
+    /**
+     * 复用结果只暴露已完成权限和策略校验的不透明引用，以及 calculation 安全事实。
+     */
+    public record ReuseResult(
+            String snapshotId,
+            String fieldPolicyChecksum,
+            boolean dataComplete,
+            Map<String, Object> calculation) {
 
         public ReuseResult {
             @SuppressWarnings("unchecked")
@@ -150,7 +159,9 @@ public class PersonSnapshotReuseService {
 
         @Override
         public String toString() {
-            return "ReuseResult[dataComplete=" + dataComplete
+            return "ReuseResult[snapshotPresent=" + StringUtils.hasText(snapshotId)
+                    + ", fieldPolicyPresent=" + StringUtils.hasText(fieldPolicyChecksum)
+                    + ", dataComplete=" + dataComplete
                     + ", calculationFactCount=" + calculation.size() + ']';
         }
     }

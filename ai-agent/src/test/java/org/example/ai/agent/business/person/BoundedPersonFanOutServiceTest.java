@@ -272,8 +272,11 @@ class BoundedPersonFanOutServiceTest {
                 result.attendance(),
                 List.of(new ModuleResult(
                         PersonBusinessQueryService.DatasetType.TRAVEL,
+                        "PERSON_TRAVEL",
                         ModuleStatus.SUCCESS,
-                        false
+                        false,
+                        "snapshot-travel",
+                        "a".repeat(64)
                 ))
         ));
         service = new BoundedPersonFanOutService(singlePersonService, properties(10, 1, 100, 1_000, 0));
@@ -298,8 +301,11 @@ class BoundedPersonFanOutServiceTest {
                 complete.attendance(),
                 List.of(new ModuleResult(
                         PersonBusinessQueryService.DatasetType.TRAVEL,
+                        "PERSON_TRAVEL",
                         ModuleStatus.SUCCESS,
-                        true
+                        true,
+                        "snapshot-travel",
+                        "a".repeat(64)
                 ))
         ));
         service = new BoundedPersonFanOutService(singlePersonService, properties(10, 1, 100, 1_000, 0));
