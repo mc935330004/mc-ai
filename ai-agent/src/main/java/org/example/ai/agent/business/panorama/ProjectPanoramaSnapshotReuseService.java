@@ -23,7 +23,6 @@ import org.example.ai.agent.business.snapshot.mapper.BusinessSnapshotMapper;
 import org.example.ai.agent.chat.support.ContentHashUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
 import java.nio.charset.StandardCharsets;
@@ -118,7 +117,6 @@ public class ProjectPanoramaSnapshotReuseService {
     /**
      * 任一身份、配置、引用或安全事实不一致都统一返回空，避免泄露失败原因。
      */
-    @Transactional(readOnly = true)
     public Optional<ProjectPanoramaResult> reuse(ReuseCommand command) {
         if (!valid(command)) {
             return Optional.empty();

@@ -18,6 +18,7 @@ import org.example.ai.agent.business.intent.BusinessQueryIntentResolver;
 import org.example.ai.agent.business.model.BusinessSubjectType;
 import org.example.ai.agent.business.model.DatasetExecutionStatus;
 import org.example.ai.agent.business.panorama.ProjectPanoramaExecutionService;
+import org.example.ai.agent.business.panorama.ProjectPanoramaSnapshotReuseService;
 import org.example.ai.agent.business.panorama.model.ProjectPanoramaCommand;
 import org.example.ai.agent.business.panorama.model.ProjectPanoramaProgressEvent;
 import org.example.ai.agent.business.panorama.model.ProjectPanoramaResult;
@@ -25,11 +26,8 @@ import org.example.ai.agent.business.person.PersonBusinessQueryService;
 import org.example.ai.agent.business.person.PersonBusinessQueryService.DatasetPlan;
 import org.example.ai.agent.business.person.PersonBusinessQueryService.DatasetType;
 import org.example.ai.agent.business.person.model.AttendanceDayResult;
-import org.example.ai.agent.business.report.BusinessReportPlanService;
-import org.example.ai.agent.business.report.CompositeReportTaskService;
-import org.example.ai.agent.business.report.entity.CompositeReportTask;
+import org.example.ai.agent.business.report.BusinessAssistantReportService;
 import org.example.ai.agent.business.subject.SubjectResolutionService;
-import org.example.ai.agent.business.subject.SubjectSelectionTokenService;
 import org.example.ai.agent.business.subject.model.SubjectCandidate;
 import org.example.ai.agent.business.subject.model.SubjectResolutionRequest;
 import org.example.ai.agent.business.subject.model.SubjectResolutionResult;
@@ -81,12 +79,12 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
 
     private final BusinessQueryIntentResolver intentResolver;
     private final SubjectResolutionService subjectResolutionService;
-    private final SubjectSelectionTokenService selectionTokenService;
     private final ProjectPanoramaExecutionService panoramaExecutionService;
+    private final ProjectPanoramaSnapshotReuseService panoramaSnapshotReuseService;
     private final PersonBusinessQueryService personBusinessQueryService;
     private final ReportDatasetService reportDatasetService;
     private final DeterministicBusinessAnswerComposer answerComposer;
-    private final CompositeReportTaskService reportTaskService;
+    private final BusinessAssistantReportService reportService;
     private final ConversationStateService conversationStateService;
     private final AiChatSessionService chatSessionService;
     private final ObjectMapper objectMapper;
@@ -94,12 +92,12 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
     public BusinessAssistantServiceImpl(
             BusinessQueryIntentResolver intentResolver,
             SubjectResolutionService subjectResolutionService,
-            SubjectSelectionTokenService selectionTokenService,
             ProjectPanoramaExecutionService panoramaExecutionService,
+            ProjectPanoramaSnapshotReuseService panoramaSnapshotReuseService,
             PersonBusinessQueryService personBusinessQueryService,
             ReportDatasetService reportDatasetService,
             DeterministicBusinessAnswerComposer answerComposer,
-            CompositeReportTaskService reportTaskService,
+            BusinessAssistantReportService reportService,
             ConversationStateService conversationStateService,
             AiChatSessionService chatSessionService,
             ObjectMapper objectMapper) {
@@ -107,11 +105,11 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
         this.subjectResolutionService = Objects.requireNonNull(
                 subjectResolutionService, "subjectResolutionService不能为空"
         );
-        this.selectionTokenService = Objects.requireNonNull(
-                selectionTokenService, "selectionTokenService不能为空"
-        );
         this.panoramaExecutionService = Objects.requireNonNull(
                 panoramaExecutionService, "panoramaExecutionService不能为空"
+        );
+        this.panoramaSnapshotReuseService = Objects.requireNonNull(
+                panoramaSnapshotReuseService, "panoramaSnapshotReuseService不能为空"
         );
         this.personBusinessQueryService = Objects.requireNonNull(
                 personBusinessQueryService, "personBusinessQueryService不能为空"
@@ -120,7 +118,7 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
                 reportDatasetService, "reportDatasetService不能为空"
         );
         this.answerComposer = Objects.requireNonNull(answerComposer, "answerComposer不能为空");
-        this.reportTaskService = Objects.requireNonNull(reportTaskService, "reportTaskService不能为空");
+        this.reportService = Objects.requireNonNull(reportService, "reportService不能为空");
         this.conversationStateService = Objects.requireNonNull(
                 conversationStateService, "conversationStateService不能为空"
         );
@@ -231,17 +229,25 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
             ResponseContext context) throws Exception {
         Set<String> startedBlocks = new HashSet<>();
         StatusProgress progress = new StatusProgress(stream, datasetNames());
-        ProjectPanoramaResult panorama = panoramaExecutionService.execute(
-                new ProjectPanoramaCommand(
-                        runId, request.getUserId(), request.getConversationId(),
-                        request.getAuthorization(), Map.of(), subject.selectionToken(), canonicalQuery(intent)
-                ), progress::accept
-        );
+        ProjectPanoramaResult panorama = reuseProjectPanorama(request, runId, intent, subject);
+        if (panorama == null) {
+            panorama = panoramaExecutionService.execute(
+                    new ProjectPanoramaCommand(
+                            runId, request.getUserId(), request.getConversationId(),
+                            request.getAuthorization(), Map.of(), subject.selectionToken(), canonicalQuery(intent)
+                    ), progress::accept
+            );
+        }
         List<DatasetAnswerInput> datasets = new ArrayList<>(projectDatasets(panorama, progress.names()));
         ArtifactBlock artifact = null;
         if (StringUtils.hasText(intent.exportFormat())) {
             try {
-                artifact = projectArtifact(request, runId, intent, subject, panorama);
+                artifact = reportService.createProjectReport(
+                        new BusinessAssistantReportService.ProjectReportCommand(
+                                reportIdentity(request, runId, subject), subject.projectType(), subject.projectCode(),
+                                intent.exportFormat(), canonicalQuery(intent), intent.refresh(), panorama
+                        )
+                );
             } catch (RuntimeException exception) {
                 // 报告创建失败不清空已成功查询的项目业务数据。
                 log.warn("业务报告任务创建失败，runId={}，errorType={}",
@@ -274,101 +280,59 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
                 )
         );
         List<DatasetAnswerInput> datasets = personDatasets(plans, result);
-        // 人员查询服务不向外暴露快照ID，当前阶段禁止绕过服务创建不可信报告章节。
-        boolean reportUnsupported = StringUtils.hasText(intent.exportFormat());
-        if (reportUnsupported) {
-            datasets = new ArrayList<>(datasets);
-            datasets.add(failedDataset("PERSON_REPORT", "人员组合报告缺少安全快照引用，暂未创建"));
+        ArtifactBlock artifact = null;
+        if (StringUtils.hasText(intent.exportFormat())) {
+            try {
+                artifact = reportService.createPersonReport(
+                        new BusinessAssistantReportService.PersonReportCommand(
+                                reportIdentity(request, runId, subject), intent.exportFormat(),
+                                canonicalQuery(intent), intent.refresh(), result.modules()
+                        )
+                );
+            } catch (RuntimeException exception) {
+                // 报告创建失败不清空已成功查询的人员确定性事实。
+                log.warn("人员报告任务创建失败，runId={}，errorType={}",
+                        runId, exception.getClass().getSimpleName());
+                datasets = new ArrayList<>(datasets);
+                datasets.add(failedDataset("PERSON_REPORT", "报告任务创建失败，业务数据仍可查看"));
+            }
         }
         boolean complete = result.modules().stream().allMatch(PersonBusinessQueryService.ModuleResult::complete)
-                && !reportUnsupported;
+                && (artifact != null || !StringUtils.hasText(intent.exportFormat()));
         AiResponse composed = response(
                 request, stream, runId, context, complete, datasets,
-                personMetrics(plans), personTables(plans), List.of(), null, false
+                personMetrics(plans), personTables(plans), List.of(), artifact, false
         );
         saveState(request, runId, subject, intent, null);
         finish(request, stream, composed, false, startedBlocks);
     }
 
-    private ArtifactBlock projectArtifact(
+    private ProjectPanoramaResult reuseProjectPanorama(
             AgentRequest request,
             String runId,
             BusinessQueryIntent intent,
-            SubjectCandidate subject,
-            ProjectPanoramaResult panorama) {
-        if (!StringUtils.hasText(intent.exportFormat())) {
+            SubjectCandidate subject) {
+        String snapshotId = trustedInheritedText(request, "panoramaSnapshotId");
+        if (intent.refresh() || StringUtils.hasText(intent.projectCode())
+                || !StringUtils.hasText(snapshotId)) {
             return null;
         }
-        String rawProjectId = selectionTokenService.resolve(
-                subject.selectionToken(), request.getUserId(), request.getConversationId(),
-                BusinessSubjectType.PROJECT
-        ).orElseThrow(() -> new IllegalStateException("项目选择已失效，无法创建报告"));
-        Map<String, ReportDataset> configured = datasetDefinitions();
-        Map<String, ProjectPanoramaResult.ModuleResult> modules = new LinkedHashMap<>();
-        panorama.modules().forEach(module -> modules.put(module.datasetCode(), module));
-        String projectType = StringUtils.hasText(subject.projectType())
-                ? subject.projectType().trim().toUpperCase(Locale.ROOT) : "DEFAULT";
-        BusinessReportPlanService planService = new BusinessReportPlanService(
-                (type, ignoredProjectType) -> new BusinessReportPlanService.TemplateDefinition(
-                        "PROJECT_" + projectType,
-                        // 全景配置校验和代表本次按既定顺序选中的模块模板。
-                        panorama.profileChecksum(),
-                        java.util.stream.IntStream.range(0, panorama.modules().size())
-                                .mapToObj(index -> new BusinessReportPlanService.TemplateSection(
-                                        panorama.modules().get(index).datasetCode(), index + 1
-                                )).toList()
-                ),
-                section -> reportSection(modules.get(section.datasetCode()), configured)
-        );
-        BusinessReportPlanService.PlannedReport planned = planService.plan(
-                new BusinessReportPlanService.PlanCommand(
-                        runId,
-                        request.getUserId(), request.getConversationId(), request.getAuthorization(), Map.of(),
-                        BusinessSubjectType.PROJECT, rawProjectId, projectType, intent.exportFormat(),
-                        canonicalQuery(intent), List.of(), List.of(), intent.refresh()
+        return panoramaSnapshotReuseService.reuse(
+                new ProjectPanoramaSnapshotReuseService.ReuseCommand(
+                        runId, request.getUserId(), request.getConversationId(),
+                        request.getAuthorization(), Map.of(), subject.selectionToken(),
+                        snapshotId, canonicalQuery(intent)
                 )
-        );
-        CompositeReportTask task = reportTaskService.create(new CompositeReportTaskService.CreateCommand(
-                request.getUserId(), request.getConversationId(), request.getAuthorization(),
-                planned,
-                canonicalQuery(intent), LocalDateTime.now().plusHours(24), 3
-        ));
-        return new ArtifactBlock(
-                "report_artifact", "报告文件", 100, BlockStatus.PENDING, BlockSource.SYSTEM,
-                task.getTaskId(), task.getFormat(), "", task.getStatus(), task.getExpiresAt(),
-                false, "报告已进入生成队列"
-        );
+        ).orElse(null);
     }
 
-    private BusinessReportPlanService.ResolvedSection reportSection(
-            ProjectPanoramaResult.ModuleResult module,
-            Map<String, ReportDataset> configured) {
-        if (module == null) {
-            throw new IllegalStateException("报告章节不在已执行全景模块中");
-        }
-        DatasetExecutionResult execution = module.executionResult();
-        ReportDataset dataset = configured.get(module.datasetCode());
-        String checksum = execution == null
-                ? dataset == null ? null : dataset.getFieldPolicyChecksum()
-                : execution.source().fieldPolicyChecksum();
-        if (!StringUtils.hasText(checksum) || !checksum.matches("[0-9a-fA-F]{64}")) {
-            throw new IllegalStateException("报告章节缺少已注册字段策略校验和");
-        }
-        BusinessReportPlanService.SectionResolutionStatus status;
-        if (module.status() == DatasetExecutionStatus.DENIED) {
-            status = BusinessReportPlanService.SectionResolutionStatus.DENIED;
-        } else if ((module.status() == DatasetExecutionStatus.SUCCESS
-                || module.status() == DatasetExecutionStatus.EMPTY)
-                && StringUtils.hasText(module.snapshotId())) {
-            status = module.status() == DatasetExecutionStatus.EMPTY
-                    ? BusinessReportPlanService.SectionResolutionStatus.EMPTY
-                    : BusinessReportPlanService.SectionResolutionStatus.QUERIED;
-        } else {
-            status = BusinessReportPlanService.SectionResolutionStatus.FAILED;
-        }
-        return new BusinessReportPlanService.ResolvedSection(
-                module.datasetCode(), StringUtils.hasText(module.snapshotId()) ? module.snapshotId() : null,
-                checksum, status, module.dataComplete(), null
+    private BusinessAssistantReportService.ReportIdentity reportIdentity(
+            AgentRequest request,
+            String runId,
+            SubjectCandidate subject) {
+        return new BusinessAssistantReportService.ReportIdentity(
+                runId, request.getUserId(), request.getConversationId(),
+                request.getAuthorization(), Map.of(), subject.selectionToken()
         );
     }
 
@@ -445,8 +409,8 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
             DatasetExecutionResult result = module.executionResult();
             return new DatasetAnswerInput(
                     module.datasetCode(), names.getOrDefault(module.datasetCode(), module.datasetCode()),
-                    module.status(), module.dataComplete(), channel(result, "display"),
-                    channel(result, "model"), safeMessage(module.status(), result)
+                    module.status(), module.dataComplete(), module.displayFacts(),
+                    module.modelFacts(), safeMessage(module.status(), result)
             );
         }).toList();
     }
@@ -721,7 +685,7 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
             AgentRequest request,
             BusinessQueryIntent intent,
             String runId) {
-        String selectionToken = selectionToken(request);
+        String selectionToken = selectionToken(request, intent);
         BusinessSubjectType subjectType = intent.subjectType();
         boolean selected = StringUtils.hasText(selectionToken);
         boolean myProjects = !selected && subjectType == BusinessSubjectType.PROJECT
@@ -764,13 +728,17 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
         return candidate < minimum || candidate > maximum ? defaultValue : (int) candidate;
     }
 
-    private String selectionToken(AgentRequest request) {
-        String inherited = trustedInheritedText(request, "selectionToken");
-        if (StringUtils.hasText(inherited)) {
-            return inherited;
-        }
+    private String selectionToken(AgentRequest request, BusinessQueryIntent intent) {
         Object selected = request.getExtra() == null ? null : request.getExtra().get("selectionToken");
-        return selected instanceof String text && StringUtils.hasText(text) ? text.trim() : null;
+        if (selected instanceof String text && StringUtils.hasText(text)) {
+            return text.trim();
+        }
+        // 显式项目编码代表新查询，禁止旧会话选择令牌把主体重新指回上一个项目。
+        if (intent.subjectType() == BusinessSubjectType.PROJECT
+                && StringUtils.hasText(intent.projectCode())) {
+            return null;
+        }
+        return trustedInheritedText(request, "selectionToken");
     }
 
     private String trustedInheritedText(AgentRequest request, String key) {
@@ -917,17 +885,6 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
         return Map.copyOf(names);
     }
 
-    private Map<String, ReportDataset> datasetDefinitions() {
-        Map<String, ReportDataset> definitions = new LinkedHashMap<>();
-        for (ReportDataset dataset : safeList(reportDatasetService.list())) {
-            if (dataset != null && Boolean.TRUE.equals(dataset.getEnabled())
-                    && StringUtils.hasText(dataset.getDatasetCode())) {
-                definitions.putIfAbsent(dataset.getDatasetCode(), dataset);
-            }
-        }
-        return Map.copyOf(definitions);
-    }
-
     private List<Map<String, Object>> candidateRows(List<SubjectCandidate> candidates) {
         return candidates.stream().map(candidate -> {
             Map<String, Object> row = new LinkedHashMap<>();
@@ -938,14 +895,6 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
             row.put("selectionToken", candidate.selectionToken());
             return Map.copyOf(row);
         }).toList();
-    }
-
-    @SuppressWarnings("unchecked")
-    private Map<String, Object> channel(DatasetExecutionResult result, String name) {
-        if (result == null || !(result.safeFacts().get(name) instanceof Map<?, ?> facts)) {
-            return Map.of();
-        }
-        return (Map<String, Object>) facts;
     }
 
     private String safeMessage(DatasetExecutionStatus status, DatasetExecutionResult result) {

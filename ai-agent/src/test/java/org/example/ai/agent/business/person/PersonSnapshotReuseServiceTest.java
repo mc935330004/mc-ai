@@ -120,13 +120,12 @@ class PersonSnapshotReuseServiceTest {
     }
 
     @Test
-    void reuseRunsInsidePublicReadOnlyTransactionBoundary() throws Exception {
+    void reuseMustNotWrapAuthorizationWorkflowInReadOnlyTransaction() throws Exception {
         Transactional transactional = PersonSnapshotReuseService.class
                 .getMethod("reuse", BusinessSnapshotMatcher.MatchCommand.class)
                 .getAnnotation(Transactional.class);
 
-        assertThat(transactional).isNotNull();
-        assertThat(transactional.readOnly()).isTrue();
+        assertThat(transactional).isNull();
     }
 
     private void arrangeReuse() {

@@ -15,7 +15,6 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
 
 import java.nio.charset.StandardCharsets;
@@ -27,7 +26,7 @@ import java.util.Optional;
 import java.util.Set;
 
 /**
- * 在同一只读事务中完成权限复核、快照二次读取与安全 calculation 解析。
+ * 完成权限复核、快照二次读取与安全 calculation 解析。
  */
 @Service
 public class PersonSnapshotReuseService {
@@ -63,7 +62,6 @@ public class PersonSnapshotReuseService {
         this.clock = Objects.requireNonNull(clock, "clock不能为空");
     }
 
-    @Transactional(readOnly = true)
     public Optional<ReuseResult> reuse(BusinessSnapshotMatcher.MatchCommand command) {
         SnapshotMatchResult match = snapshotMatcher.match(command);
         if (match == null

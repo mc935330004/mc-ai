@@ -281,7 +281,7 @@ class ProjectPanoramaSnapshotReuseServiceTest {
     }
 
     @Test
-    void reuseRunsInsidePublicReadOnlyTransactionBoundary() throws Exception {
+    void reuseMustNotWrapAuthorizationWorkflowInReadOnlyTransaction() throws Exception {
         Transactional transactional = ProjectPanoramaSnapshotReuseService.class
                 .getMethod(
                         "reuse",
@@ -289,8 +289,7 @@ class ProjectPanoramaSnapshotReuseServiceTest {
                 )
                 .getAnnotation(Transactional.class);
 
-        assertThat(transactional).isNotNull();
-        assertThat(transactional.readOnly()).isTrue();
+        assertThat(transactional).isNull();
     }
 
     private void arrangeValidReuse() throws Exception {
