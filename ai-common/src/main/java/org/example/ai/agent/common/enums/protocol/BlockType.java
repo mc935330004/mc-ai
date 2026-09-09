@@ -51,7 +51,17 @@ public enum BlockType {
     STATUS,
 
     /**
+     * 多个数据集或子任务的安全状态列表。
+     */
+    STATUS_LIST,
+
+    /**
      * 风险规则产生的风险提示。
      */
-    WARNINGS
+    WARNINGS,
+
+    /**
+     * 异步导出等产物的安全元数据。
+     */
+    ARTIFACT
 }

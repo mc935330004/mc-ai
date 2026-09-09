@@ -664,7 +664,7 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
             }
         }
         ResponseStatus status = cancelled ? ResponseStatus.CANCELLED : (visible ? ResponseStatus.PARTIAL : ResponseStatus.FAILED);
-        return new AiResponse(response.schemaVersion(), response.responseId(), response.runId(), response.conversationId(), response.mode(), status, response.dataComplete(), blocks, response.references(), response.meta());
+        return new AiResponse(response.schemaVersion(), response.responseId(), response.runId(), response.conversationId(), response.mode(), status, response.dataComplete(), response.context(), blocks, response.references(), response.meta());
     }
 
     /**

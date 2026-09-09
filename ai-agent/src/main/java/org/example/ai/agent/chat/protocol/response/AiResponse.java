@@ -20,13 +20,23 @@ public record AiResponse(
         PresentationMode mode,
         ResponseStatus status,
         boolean dataComplete,
+        ResponseContext context,
         List<ResponseBlock> blocks,
         List<ResponseReference> references,
         ResponseMeta meta)
         implements ResponseDocument {
 
+    /**
+     * CHAT回答当前协议版本。
+     *
+     * REPORT协议继续使用ResponseDocument中的版本1。
+     */
+    public static final int CURRENT_SCHEMA_VERSION = 2;
+
     public AiResponse {
-        schemaVersion = ResponseSupport.normalizeSchemaVersion(schemaVersion);
+        schemaVersion = schemaVersion <= 0
+                ? CURRENT_SCHEMA_VERSION
+                : schemaVersion;
 
         responseId = ResponseSupport.requireText(
                 responseId,
@@ -61,5 +71,34 @@ public record AiResponse(
         meta = meta == null
                 ? ResponseMeta.empty()
                 : meta;
+    }
+
+    /**
+     * 兼容尚未携带context的旧调用方和历史数据。
+     */
+    public AiResponse(
+            int schemaVersion,
+            String responseId,
+            String runId,
+            String conversationId,
+            PresentationMode mode,
+            ResponseStatus status,
+            boolean dataComplete,
+            List<ResponseBlock> blocks,
+            List<ResponseReference> references,
+            ResponseMeta meta) {
+        this(
+                schemaVersion,
+                responseId,
+                runId,
+                conversationId,
+                mode,
+                status,
+                dataComplete,
+                null,
+                blocks,
+                references,
+                meta
+        );
     }
 }
