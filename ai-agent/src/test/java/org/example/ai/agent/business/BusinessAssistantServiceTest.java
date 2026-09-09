@@ -7,6 +7,11 @@ import org.example.ai.agent.business.dataset.ReportDatasetService;
 import org.example.ai.agent.business.dataset.entity.ReportDataset;
 import org.example.ai.agent.business.dataset.model.DatasetExecutionResult;
 import org.example.ai.agent.business.dataset.model.DatasetExecutionSource;
+import org.example.ai.agent.business.department.DepartmentBusinessQueryService;
+import org.example.ai.agent.business.department.DepartmentBusinessQueryService.DepartmentQueryStatus;
+import org.example.ai.agent.business.person.model.MultiPersonSummary.Aggregate;
+import org.example.ai.agent.business.person.model.MultiPersonSummary.AnomalyPerson;
+import org.example.ai.agent.business.person.model.MultiPersonSummary.PersonQueryStatus;
 import org.example.ai.agent.business.intent.BusinessQueryIntent;
 import org.example.ai.agent.business.intent.BusinessQueryIntentResolver;
 import org.example.ai.agent.business.model.BusinessSubjectType;
@@ -52,6 +57,187 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class BusinessAssistantServiceTest {
+
+    @Test
+    void departmentSummaryShowsCountsAndCompleteTotalsWithoutPeopleNames() throws Exception {
+        Fixture fixture = departmentFixture(false, null, completedDepartment());
+
+        fixture.service.handle(request("查询部门汇总"), fixture.stream, "run-1");
+
+        String json = savedDepartmentJson(fixture);
+        assertThat(json).contains("DEPARTMENT_SUMMARY", "authorizedPeople", "loadedPeople", "processedPeople",
+                "successPeople", "partialPeople", "failedPeople", "timeoutPeople", "cancelledPeople",
+                "tripCount", "travelAmount", "reimbursementAmount", "1200", "900")
+                .doesNotContain("张三", "10***01", "department_anomalies");
+        var command = composedDepartment(fixture);
+        assertThat(command.dataComplete()).isTrue();
+        assertThat(command.narrativeRequired()).isFalse();
+        assertThat(command.datasets().get(0).displayFacts()).containsExactlyInAnyOrderEntriesOf(Map.ofEntries(
+                Map.entry("authorizedPeople", 3L), Map.entry("loadedPeople", 3), Map.entry("processedPeople", 3),
+                Map.entry("successPeople", 3), Map.entry("partialPeople", 0), Map.entry("failedPeople", 0),
+                Map.entry("timeoutPeople", 0), Map.entry("cancelledPeople", 0), Map.entry("tripCount", 6),
+                Map.entry("travelAmount", new java.math.BigDecimal("1200")),
+                Map.entry("reimbursementAmount", new java.math.BigDecimal("900"))));
+        assertThat(command.datasets().get(0).modelFacts()).isEmpty();
+        assertThat(command.datasets().get(0).status()).isEqualTo(
+                org.example.ai.agent.business.model.DatasetExecutionStatus.SUCCESS);
+        verify(fixture.modelService, never()).generate(any());
+        ArgumentCaptor<org.example.ai.agent.chat.memory.model.BusinessConversationState> state =
+                ArgumentCaptor.forClass(org.example.ai.agent.chat.memory.model.BusinessConversationState.class);
+        verify(fixture.conversationStateService).saveState(any(), any(), state.capture());
+        assertThat(state.getValue().getLastInput()).containsEntry("selectionToken", "department-selection-token")
+                .containsEntry("startDate", "2026-08-01").containsEntry("endDate", "2026-08-31");
+        InOrder order = org.mockito.Mockito.inOrder(fixture.stream);
+        order.verify(fixture.stream).startChatResponse();
+        order.verify(fixture.stream).sendResponseSnapshot();
+        order.verify(fixture.stream, org.mockito.Mockito.atLeastOnce()).publishResponseBlock(any());
+        order.verify(fixture.stream).beginFinalization();
+        order.verify(fixture.stream).sendResponseSnapshot();
+        order.verify(fixture.stream).finishChatResponse();
+    }
+
+    @Test
+    void departmentAnomalyQuestionShowsOnlyAllowedMaskedAnomalyPeople() throws Exception {
+        Fixture fixture = departmentFixture(true, null, completedDepartment());
+
+        fixture.service.handle(request("部门哪些人异常"), fixture.stream, "run-1");
+
+        assertThat(savedDepartmentJson(fixture)).contains("department_anomalies", "张三（10***01）",
+                "异常类型", "缺卡", "迟到").doesNotContain("李四", "20***02");
+        var dataset = composedDepartment(fixture).datasets().get(0);
+        assertThat(dataset.displayFacts().get("anomalyRows")).isEqualTo(List.of(
+                Map.of("displayLabel", "张三（10***01）", "anomalyTypes", "缺卡、迟到")));
+        assertThat(dataset.modelFacts()).isEmpty();
+        verify(fixture.modelService, never()).generate(any());
+    }
+
+    @Test
+    void departmentLimitExceededPromptsUserToNarrowScope() throws Exception {
+        String instruction = "当前授权成员超过单次查询上限，请按下级部门或人员范围缩小查询";
+        for (String safeMessage : java.util.Arrays.asList(instruction, null)) {
+            Fixture fixture = departmentFixture(false, null, new DepartmentBusinessQueryService.Result(
+                    DepartmentQueryStatus.LIMIT_EXCEEDED, false, 101, 0, 0,
+                    new Aggregate(false, 0, null, null, null), Map.of(), List.of(), safeMessage));
+
+            fixture.service.handle(request("查询部门汇总"), fixture.stream, "run-1");
+
+            assertThat(savedDepartmentJson(fixture)).contains(instruction).doesNotContain("tripCount", "travelAmount");
+            assertThat(composedDepartment(fixture).datasets().get(0).status()).isEqualTo(
+                    org.example.ai.agent.business.model.DatasetExecutionStatus.FAILED);
+        }
+    }
+
+    @Test
+    void departmentPartialResultDoesNotPublishFormalTotals() throws Exception {
+        Fixture fixture = departmentFixture(false, null, new DepartmentBusinessQueryService.Result(
+                DepartmentQueryStatus.PARTIAL, false, 5, 5, 5,
+                new Aggregate(false, 1, null, null, null),
+                Map.of(PersonQueryStatus.SUCCESS, 1, PersonQueryStatus.PARTIAL, 1,
+                        PersonQueryStatus.FAILED, 1, PersonQueryStatus.TIMEOUT, 1, PersonQueryStatus.CANCELLED, 1),
+                List.of(), null));
+
+        fixture.service.handle(request("查询部门汇总"), fixture.stream, "run-1");
+
+        assertThat(savedDepartmentJson(fixture)).contains("\"dataComplete\":false")
+                .doesNotContain("tripCount", "travelAmount", "reimbursementAmount");
+        var dataset = composedDepartment(fixture).datasets().get(0);
+        assertThat(dataset.dataComplete()).isFalse();
+        assertThat(dataset.status()).isEqualTo(org.example.ai.agent.business.model.DatasetExecutionStatus.FAILED);
+        assertThat(dataset.displayFacts()).containsEntry("authorizedPeople", 5L).containsEntry("processedPeople", 5)
+                .containsEntry("successPeople", 1).containsEntry("partialPeople", 1).containsEntry("failedPeople", 1)
+                .containsEntry("timeoutPeople", 1).containsEntry("cancelledPeople", 1);
+    }
+
+    @Test
+    void departmentExportReturnsUnsupportedDatasetWithoutCreatingReportTask() throws Exception {
+        Fixture fixture = departmentFixture(false, "PDF", completedDepartment());
+
+        fixture.service.handle(request("导出部门汇总"), fixture.stream, "run-1");
+
+        assertThat(savedDepartmentJson(fixture)).contains("DEPARTMENT_SUMMARY", "tripCount", "DEPARTMENT_REPORT",
+                "本阶段暂不支持部门报告导出，请缩小到单个人员后导出", "\"dataComplete\":false");
+        assertThat(composedDepartment(fixture).dataComplete()).isFalse();
+        verify(fixture.reportTaskService, never()).create(any());
+        verify(fixture.reportService, never()).createPersonReport(any());
+        verify(fixture.reportService, never()).createProjectReport(any());
+    }
+
+    @Test
+    void departmentQueryReceivesLiveStreamCancellationSignal() throws Exception {
+        Fixture fixture = departmentFixture(true, null, completedDepartment());
+
+        fixture.service.handle(request("部门异常汇总"), fixture.stream, "run-1");
+
+        ArgumentCaptor<java.util.function.BooleanSupplier> stop =
+                ArgumentCaptor.forClass(java.util.function.BooleanSupplier.class);
+        ArgumentCaptor<DepartmentBusinessQueryService.Command> command =
+                ArgumentCaptor.forClass(DepartmentBusinessQueryService.Command.class);
+        verify(fixture.departmentBusinessQueryService).query(command.capture(), stop.capture());
+        assertThat(stop.getValue().getAsBoolean()).isFalse();
+        when(fixture.stream.shouldStopBusinessQuery()).thenReturn(true);
+        assertThat(stop.getValue().getAsBoolean()).isTrue();
+        assertThat(command.getValue().agentRunId()).isEqualTo("run-1");
+        assertThat(command.getValue().userId()).isEqualTo("user-1");
+        assertThat(command.getValue().sessionId()).isEqualTo("conversation-1");
+        assertThat(command.getValue().authorization()).isEqualTo("Bearer current-user");
+        assertThat(command.getValue().departmentSelectionToken()).isEqualTo("department-selection-token");
+        assertThat(command.getValue().secureContext()).isEmpty();
+        assertThat(command.getValue().refreshRequested()).isTrue();
+        assertThat(command.getValue().anomalyPeopleRequested()).isTrue();
+        assertThat(command.getValue().plans()).extracting(PersonBusinessQueryService.DatasetPlan::datasetCode)
+                .containsExactly("CFG_TRAVEL", "CFG_PUNCH", "CFG_LEAVE", "CFG_SCHEDULE", "CFG_CALENDAR", "CFG_REIMBURSEMENT");
+    }
+
+    @Test
+    void departmentResponseAndStoredJsonDoNotContainRawIdentifiersOrTokens() throws Exception {
+        Fixture fixture = departmentFixture(true, null, completedDepartment());
+        AgentRequest request = request("查询部门异常");
+        request.setExtra(Map.of("departmentId", "raw-dept-987", "employeeNo", "raw-person-654"));
+
+        fixture.service.handle(request, fixture.stream, "run-1");
+
+        String json = savedDepartmentJson(fixture);
+        assertThat(json).contains("DEPARTMENT_SUMMARY", "张三（10***01）")
+                .doesNotContain("raw-dept-987", "raw-person-654", "department-selection-token",
+                        "selectionToken", "Bearer current-user", "Authorization", "authorization");
+        assertThat(fixture.objectMapper.writeValueAsString(fixture.accumulator.complete())).isEqualTo(json);
+        verify(fixture.selectionTokenService, never()).resolve(any(), any(), any(), any());
+    }
+
+    private Fixture departmentFixture(boolean anomalies, String export, DepartmentBusinessQueryService.Result result) {
+        Fixture fixture = new Fixture();
+        when(fixture.intentResolver.resolve(any(), any())).thenReturn(new BusinessQueryIntent(
+                BusinessSubjectType.DEPARTMENT, null, null, null, null,
+                java.time.LocalDate.of(2026, 8, 1), java.time.LocalDate.of(2026, 8, 31),
+                List.of(), true, export, anomalies));
+        when(fixture.subjectResolutionService.resolve(any())).thenReturn(new SubjectResolutionResult(
+                SubjectResolutionState.RESOLVED,
+                new SubjectCandidate(BusinessSubjectType.DEPARTMENT, "department-selection-token", "工程部",
+                        null, "工程部", null, null), List.of(), 1, 20, 1, false, "主体已定位"));
+        when(fixture.reportDatasetService.list()).thenReturn(personDatasets());
+        when(fixture.departmentBusinessQueryService.query(any(), any())).thenReturn(result);
+        return fixture;
+    }
+
+    private DepartmentBusinessQueryService.Result completedDepartment() {
+        return new DepartmentBusinessQueryService.Result(DepartmentQueryStatus.COMPLETED, true, 3, 3, 3,
+                new Aggregate(true, 3, 6, new java.math.BigDecimal("1200"), new java.math.BigDecimal("900")),
+                Map.of(PersonQueryStatus.SUCCESS, 3),
+                List.of(new AnomalyPerson("张三（10***01）", List.of("缺卡", "迟到"))), null);
+    }
+
+    private String savedDepartmentJson(Fixture fixture) {
+        ArgumentCaptor<String> json = ArgumentCaptor.forClass(String.class);
+        verify(fixture.chatSessionService).saveAssistantMessage(any(), any(), any(), any(), any(), any(), json.capture());
+        return json.getValue();
+    }
+
+    private DeterministicBusinessAnswerComposer.ComposeCommand composedDepartment(Fixture fixture) {
+        ArgumentCaptor<DeterministicBusinessAnswerComposer.ComposeCommand> command =
+                ArgumentCaptor.forClass(DeterministicBusinessAnswerComposer.ComposeCommand.class);
+        verify(fixture.composer).compose(command.capture());
+        return command.getValue();
+    }
 
     @Test
     void reportCommandsMustNotExposeAuthorizationSelectionTokenOrQueryValues() {
@@ -667,17 +853,18 @@ class BusinessAssistantServiceTest {
         private final ProjectPanoramaSnapshotReuseService panoramaSnapshotReuseService =
                 mock(ProjectPanoramaSnapshotReuseService.class);
         private final PersonBusinessQueryService personBusinessQueryService = mock(PersonBusinessQueryService.class);
+        private final DepartmentBusinessQueryService departmentBusinessQueryService = mock(DepartmentBusinessQueryService.class);
         private final ReportDatasetService reportDatasetService = mock(ReportDatasetService.class);
         private final BusinessAnswerModelService modelService = mock(BusinessAnswerModelService.class);
         private final DeterministicBusinessAnswerComposer composer =
-                new DeterministicBusinessAnswerComposer(modelService);
+                spy(new DeterministicBusinessAnswerComposer(modelService));
         private final CompositeReportTaskService reportTaskService = mock(CompositeReportTaskService.class);
         private final BusinessSnapshotReferenceValidationService snapshotReferenceValidationService =
                 mock(BusinessSnapshotReferenceValidationService.class);
-        private final BusinessAssistantReportService reportService = new BusinessAssistantReportService(
+        private final BusinessAssistantReportService reportService = spy(new BusinessAssistantReportService(
                 selectionTokenService, reportDatasetService, snapshotReferenceValidationService,
                 reportTaskService
-        );
+        ));
         private final ConversationStateService conversationStateService = mock(ConversationStateService.class);
         private final AiChatSessionService chatSessionService = mock(AiChatSessionService.class);
         private final ObjectMapper objectMapper = new ObjectMapper().findAndRegisterModules();
@@ -708,7 +895,7 @@ class BusinessAssistantServiceTest {
             service = new org.example.ai.agent.business.impl.BusinessAssistantServiceImpl(
                     intentResolver, subjectResolutionService, panoramaExecutionService,
                     panoramaSnapshotReuseService,
-                    personBusinessQueryService, reportDatasetService, composer,
+                    personBusinessQueryService, departmentBusinessQueryService, reportDatasetService, composer,
                     reportService, conversationStateService, chatSessionService, objectMapper
             );
         }

@@ -28,6 +28,28 @@ import static org.assertj.core.api.Assertions.assertThat;
 class BusinessAssistantStreamIntegrationTest {
 
     @Test
+    void businessQueryStopSignalTracksCancellationAndConnectionClose() {
+        var cancelled = newBusinessStream();
+        assertThat(cancelled.shouldStopBusinessQuery()).isFalse();
+        assertThat(cancelled.requestCancellation()).isTrue();
+        assertThat(cancelled.shouldStopBusinessQuery()).isTrue();
+
+        var disconnected = newBusinessStream();
+        assertThat(disconnected.shouldStopBusinessQuery()).isFalse();
+        disconnected.connectionClosed();
+        assertThat(disconnected.shouldStopBusinessQuery()).isTrue();
+        assertThat(disconnected.isCancellationRequested()).isFalse();
+    }
+
+    private org.example.ai.agent.chat.support.AgentStreamSession newBusinessStream() {
+        return new org.example.ai.agent.chat.support.AgentStreamSession(
+                org.mockito.Mockito.mock(org.springframework.web.servlet.mvc.method.annotation.SseEmitter.class),
+                "run-1", "conversation-1",
+                org.mockito.Mockito.mock(org.example.ai.agent.observability.AgentMetrics.class),
+                new ResponseChecksumService(new ObjectMapper().findAndRegisterModules()));
+    }
+
+    @Test
     void businessRouteRequiresConfirmedRegisteredReadCapability() throws Exception {
         Method predicate = Class.forName(
                 "org.example.ai.agent.chat.service.impl.DefaultAgentOrchestrator"

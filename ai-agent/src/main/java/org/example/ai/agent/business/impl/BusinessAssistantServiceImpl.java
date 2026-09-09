@@ -13,6 +13,8 @@ import org.example.ai.agent.business.answer.DeterministicBusinessAnswerComposer.
 import org.example.ai.agent.business.dataset.ReportDatasetService;
 import org.example.ai.agent.business.dataset.entity.ReportDataset;
 import org.example.ai.agent.business.dataset.model.DatasetExecutionResult;
+import org.example.ai.agent.business.department.DepartmentBusinessQueryService;
+import org.example.ai.agent.business.department.DepartmentBusinessQueryService.DepartmentQueryStatus;
 import org.example.ai.agent.business.intent.BusinessQueryIntent;
 import org.example.ai.agent.business.intent.BusinessQueryIntentResolver;
 import org.example.ai.agent.business.model.BusinessSubjectType;
@@ -26,6 +28,7 @@ import org.example.ai.agent.business.person.PersonBusinessQueryService;
 import org.example.ai.agent.business.person.PersonBusinessQueryService.DatasetPlan;
 import org.example.ai.agent.business.person.PersonBusinessQueryService.DatasetType;
 import org.example.ai.agent.business.person.model.AttendanceDayResult;
+import org.example.ai.agent.business.person.model.MultiPersonSummary.PersonQueryStatus;
 import org.example.ai.agent.business.report.BusinessAssistantReportService;
 import org.example.ai.agent.business.subject.SubjectResolutionService;
 import org.example.ai.agent.business.subject.model.SubjectCandidate;
@@ -82,6 +85,7 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
     private final ProjectPanoramaExecutionService panoramaExecutionService;
     private final ProjectPanoramaSnapshotReuseService panoramaSnapshotReuseService;
     private final PersonBusinessQueryService personBusinessQueryService;
+    private final DepartmentBusinessQueryService departmentBusinessQueryService;
     private final ReportDatasetService reportDatasetService;
     private final DeterministicBusinessAnswerComposer answerComposer;
     private final BusinessAssistantReportService reportService;
@@ -95,6 +99,7 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
             ProjectPanoramaExecutionService panoramaExecutionService,
             ProjectPanoramaSnapshotReuseService panoramaSnapshotReuseService,
             PersonBusinessQueryService personBusinessQueryService,
+            DepartmentBusinessQueryService departmentBusinessQueryService,
             ReportDatasetService reportDatasetService,
             DeterministicBusinessAnswerComposer answerComposer,
             BusinessAssistantReportService reportService,
@@ -113,6 +118,9 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
         );
         this.personBusinessQueryService = Objects.requireNonNull(
                 personBusinessQueryService, "personBusinessQueryService不能为空"
+        );
+        this.departmentBusinessQueryService = Objects.requireNonNull(
+                departmentBusinessQueryService, "departmentBusinessQueryService不能为空"
         );
         this.reportDatasetService = Objects.requireNonNull(
                 reportDatasetService, "reportDatasetService不能为空"
@@ -162,11 +170,7 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
             } else if (resolved.type() == BusinessSubjectType.PERSON) {
                 handlePerson(request, stream, agentRunId, intent, resolved, context);
             } else {
-                finish(request, stream, response(
-                        request, stream, agentRunId, context, false,
-                        List.of(failedDataset("DEPARTMENT", "部门综合查询尚未配置")),
-                        List.of(), List.of(), List.of(), null, false
-                ), false);
+                handleDepartment(request, stream, agentRunId, intent, resolved, context);
             }
         } catch (RuntimeException exception) {
             throw exception;
@@ -305,6 +309,84 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
         );
         saveState(request, runId, subject, intent, null);
         finish(request, stream, composed, false, startedBlocks);
+    }
+
+    /** 部门回答仅发布安全汇总，不向模型提供人员事实。 */
+    private void handleDepartment(
+            AgentRequest request,
+            AgentStreamSession stream,
+            String runId,
+            BusinessQueryIntent intent,
+            SubjectCandidate subject,
+            ResponseContext context) throws Exception {
+        DepartmentBusinessQueryService.Result result = departmentBusinessQueryService.query(
+                new DepartmentBusinessQueryService.Command(
+                        runId, request.getUserId(), request.getConversationId(), request.getAuthorization(),
+                        Map.of(), subject.selectionToken(), intent.refresh(), intent.anomalyPeopleRequested(),
+                        personPlans(intent)
+                ), stream::shouldStopBusinessQuery
+        );
+        String code = "DEPARTMENT_SUMMARY";
+        Map<String, Object> facts = new LinkedHashMap<>();
+        facts.put("authorizedPeople", result.authorizedPeople());
+        facts.put("loadedPeople", result.loadedPeople());
+        facts.put("processedPeople", result.processedPeople());
+        facts.put("successPeople", result.statusCounts().get(PersonQueryStatus.SUCCESS));
+        facts.put("partialPeople", result.statusCounts().get(PersonQueryStatus.PARTIAL));
+        facts.put("failedPeople", result.statusCounts().get(PersonQueryStatus.FAILED));
+        facts.put("timeoutPeople", result.statusCounts().get(PersonQueryStatus.TIMEOUT));
+        facts.put("cancelledPeople", result.statusCounts().get(PersonQueryStatus.CANCELLED));
+        List<MetricDefinition> metrics = new ArrayList<>(List.of(
+                metric(code, "authorizedPeople", "授权人数", ValueType.NUMBER, "人"),
+                metric(code, "loadedPeople", "已加载人数", ValueType.NUMBER, "人"),
+                metric(code, "processedPeople", "已处理人数", ValueType.NUMBER, "人"),
+                metric(code, "successPeople", "成功人数", ValueType.NUMBER, "人"),
+                metric(code, "partialPeople", "部分完成人数", ValueType.NUMBER, "人"),
+                metric(code, "failedPeople", "失败人数", ValueType.NUMBER, "人"),
+                metric(code, "timeoutPeople", "超时人数", ValueType.NUMBER, "人"),
+                metric(code, "cancelledPeople", "取消人数", ValueType.NUMBER, "人")
+        ));
+        // 不完整聚合不发布次数和金额，避免部分结果被误读为正式总数。
+        if (result.aggregate().complete()) {
+            facts.put("tripCount", result.aggregate().tripCount());
+            facts.put("travelAmount", result.aggregate().travelAmount());
+            facts.put("reimbursementAmount", result.aggregate().reimbursementAmount());
+            metrics.add(metric(code, "tripCount", "出差次数", ValueType.NUMBER, "次"));
+            metrics.add(metric(code, "travelAmount", "出差总金额", ValueType.AMOUNT, "元"));
+            metrics.add(metric(code, "reimbursementAmount", "报销总金额", ValueType.AMOUNT, "元"));
+        }
+        List<TableDefinition> tables = List.of();
+        if (intent.anomalyPeopleRequested() && !result.anomalyPeople().isEmpty()) {
+            facts.put("anomalyRows", result.anomalyPeople().stream()
+                    .map(person -> Map.of(
+                            "displayLabel", person.displayLabel(),
+                            "anomalyTypes", String.join("、", person.anomalyTypes())
+                    )).toList());
+            tables = List.of(new TableDefinition(
+                    "department_anomalies", "部门异常人员", code, "anomalyRows",
+                    List.of(column("displayLabel", "人员"), column("anomalyTypes", "异常类型"))
+            ));
+        }
+        DatasetExecutionStatus status = switch (result.status()) {
+            case COMPLETED -> DatasetExecutionStatus.SUCCESS;
+            case DENIED -> DatasetExecutionStatus.DENIED;
+            case PARTIAL, CANCELLED, LIMIT_EXCEEDED -> DatasetExecutionStatus.FAILED;
+        };
+        String message = result.safeMessage();
+        if (result.status() == DepartmentQueryStatus.LIMIT_EXCEEDED && !StringUtils.hasText(message)) {
+            message = "当前授权成员超过单次查询上限，请按下级部门或人员范围缩小查询";
+        }
+        List<DatasetAnswerInput> datasets = new ArrayList<>();
+        datasets.add(new DatasetAnswerInput(code, "部门汇总", status, result.dataComplete(), facts, Map.of(), message));
+        boolean complete = result.dataComplete();
+        if (StringUtils.hasText(intent.exportFormat())) {
+            datasets.add(failedDataset("DEPARTMENT_REPORT", "本阶段暂不支持部门报告导出，请缩小到单个人员后导出"));
+            complete = false;
+        }
+        AiResponse composed = response(request, stream, runId, context, complete, datasets,
+                metrics, tables, List.of(), null, false);
+        saveState(request, runId, subject, intent, null);
+        finish(request, stream, composed, false);
     }
 
     private ProjectPanoramaResult reuseProjectPanorama(

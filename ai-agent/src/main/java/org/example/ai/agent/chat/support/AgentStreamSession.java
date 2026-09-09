@@ -245,6 +245,13 @@ public class AgentStreamSession {
     }
 
     /**
+     * 只读业务查询停止信号，不发送事件，也不改变其他回答的断线收尾状态。
+     */
+    public boolean shouldStopBusinessQuery() {
+        return cancellationRequested || !connectionOpen.get() || Thread.currentThread().isInterrupted();
+    }
+
+    /**
      * 正常或失败结果进入最终保存。
      * 必须在数据库保存之前调用，不能放到发送完成事件之后。
      */
