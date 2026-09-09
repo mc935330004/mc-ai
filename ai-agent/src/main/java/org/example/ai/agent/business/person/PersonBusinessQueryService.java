@@ -103,9 +103,12 @@ public class PersonBusinessQueryService {
 
         EnumMap<DatasetType, PersonBusinessFactAggregator.SafeFacts> safeFacts =
                 new EnumMap<>(DatasetType.class);
-        List<ModuleResult> modules = new ArrayList<>(DatasetType.values().length);
+        List<ModuleResult> modules = new ArrayList<>(validated.plans().size());
         for (DatasetType type : DatasetType.values()) {
             DatasetPlan plan = validated.plans().get(type);
+            if (plan == null) {
+                continue;
+            }
             ModuleData module = loadModule(validated, person.rawSubjectId(), plan);
             safeFacts.put(type, new PersonBusinessFactAggregator.SafeFacts(
                     module.complete(), module.calculation()
@@ -116,13 +119,17 @@ public class PersonBusinessQueryService {
             ));
         }
 
+        List<AttendanceDayResult> attendance = List.of();
+        if (validated.plans().containsKey(DatasetType.PUNCH)) {
+            attendance = factAggregator.attendance(
+                    safeFacts,
+                    validated.plans().get(DatasetType.CALENDAR).canonicalInput()
+            );
+        }
         return new Result(
                 factAggregator.travelSummary(safeFacts.get(DatasetType.TRAVEL)),
                 factAggregator.reimbursementSummary(safeFacts.get(DatasetType.REIMBURSEMENT)),
-                factAggregator.attendance(
-                        safeFacts,
-                        validated.plans().get(DatasetType.CALENDAR).canonicalInput()
-                ),
+                attendance,
                 modules
         );
     }
@@ -136,8 +143,9 @@ public class PersonBusinessQueryService {
                 || !StringUtils.hasText(command.selectionToken())) {
             throw new IllegalArgumentException("人员业务查询命令不完整");
         }
-        if (command.plans().size() != DatasetType.values().length) {
-            throw new IllegalArgumentException("人员业务查询必须包含六类数据集计划");
+        if (command.plans().isEmpty()
+                || command.plans().size() > DatasetType.values().length) {
+            throw new IllegalArgumentException("人员业务查询数据集计划不完整");
         }
         EnumMap<DatasetType, DatasetPlan> plans = new EnumMap<>(DatasetType.class);
         Set<String> datasetCodes = new HashSet<>();
@@ -152,15 +160,39 @@ public class PersonBusinessQueryService {
                 throw new IllegalArgumentException("数据集稳定事实绑定不完整");
             }
         }
-        if (plans.size() != DatasetType.values().length) {
-            throw new IllegalArgumentException("数据集逻辑类型不完整");
+        if (plans.values().stream().noneMatch(DatasetPlan::userRequested)) {
+            throw new IllegalArgumentException("人员业务查询缺少用户请求数据集");
         }
-        validateAttendancePlanConsistency(plans);
+        // 非用户请求的计划只允许作为考勤核算依赖，防止入口夹带无关数据查询。
+        boolean punchRequested = plans.containsKey(DatasetType.PUNCH)
+                && plans.get(DatasetType.PUNCH).userRequested();
+        for (DatasetPlan plan : plans.values()) {
+            if (plan.userRequested() && !isRequestRoot(plan.type())) {
+                throw new IllegalArgumentException("人员业务查询根数据集不合法");
+            }
+            if (!plan.userRequested()
+                    && (!punchRequested || !ATTENDANCE_DATASETS.contains(plan.type()))) {
+                throw new IllegalArgumentException("人员业务查询包含无关内部依赖");
+            }
+        }
+        if (plans.containsKey(DatasetType.PUNCH)
+                && !plans.keySet().containsAll(ATTENDANCE_DATASETS)) {
+            throw new IllegalArgumentException("考勤查询缺少依赖数据集");
+        }
+        if (plans.containsKey(DatasetType.PUNCH)) {
+            validateAttendancePlanConsistency(plans);
+        }
         return new ValidatedCommand(
                 command.agentRunId(), command.userId(), command.sessionId(),
                 command.authorization(), command.secureContext(), command.selectionToken(),
                 command.refreshRequested(), plans
         );
+    }
+
+    private boolean isRequestRoot(DatasetType type) {
+        return type == DatasetType.TRAVEL
+                || type == DatasetType.PUNCH
+                || type == DatasetType.REIMBURSEMENT;
     }
 
     private void validateAttendancePlanConsistency(
@@ -402,7 +434,8 @@ public class PersonBusinessQueryService {
             String datasetCode,
             Map<String, Object> canonicalInput,
             String requestedGrain,
-            Set<String> requiredFactCodes) {
+            Set<String> requiredFactCodes,
+            boolean userRequested) {
 
         @SuppressWarnings("unchecked")
         public DatasetPlan {
@@ -419,7 +452,8 @@ public class PersonBusinessQueryService {
             return "DatasetPlan[type=" + type
                     + ", datasetCode=" + datasetCode
                     + ", canonicalInputSize=" + canonicalInput.size()
-                    + ", requiredFactCodeCount=" + requiredFactCodes.size() + ']';
+                    + ", requiredFactCodeCount=" + requiredFactCodes.size()
+                    + ", userRequested=" + userRequested + ']';
         }
     }
 

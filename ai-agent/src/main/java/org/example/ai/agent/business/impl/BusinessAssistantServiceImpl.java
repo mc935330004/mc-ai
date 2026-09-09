@@ -449,7 +449,9 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
             Map<String, Object> query) {
         return new DatasetPlan(
                 type, configured.get(type).getDatasetCode(), query,
-                query.containsKey("startDate") ? "DAY" : null, Set.of(personFactCode(type))
+                query.containsKey("startDate") ? "DAY" : null, Set.of(personFactCode(type)),
+                type == DatasetType.TRAVEL || type == DatasetType.PUNCH
+                        || type == DatasetType.REIMBURSEMENT
         );
     }
 

@@ -198,6 +198,156 @@ class PersonBusinessQueryServiceTest {
     }
 
     @Test
+    void reimbursementOnlyExecutesOneDatasetAndKeepsTravelSummaryIncomplete() {
+        prepareSuccessfulExecution();
+
+        Result result = service.query(commandWithPlans(
+                Set.of(DatasetType.REIMBURSEMENT), DatasetType.REIMBURSEMENT
+        ));
+
+        assertThat(result.modules()).extracting(PersonBusinessQueryService.ModuleResult::type)
+                .containsExactly(DatasetType.REIMBURSEMENT);
+        assertThat(result.travelSummary().tripCount().complete()).isFalse();
+        assertThat(result.travelSummary().totalAmount().complete()).isFalse();
+        assertThat(result.reimbursementSummary().paidAmount().complete()).isTrue();
+        assertThat(result.attendance()).isEmpty();
+        verify(executionService, org.mockito.Mockito.times(1)).execute(any());
+    }
+
+    @Test
+    void travelOnlyExecutesOneDatasetAndKeepsReimbursementSummaryIncomplete() {
+        prepareSuccessfulExecution();
+
+        Result result = service.query(commandWithPlans(
+                Set.of(DatasetType.TRAVEL), DatasetType.TRAVEL
+        ));
+
+        assertThat(result.modules()).extracting(PersonBusinessQueryService.ModuleResult::type)
+                .containsExactly(DatasetType.TRAVEL);
+        assertThat(result.travelSummary().tripCount().complete()).isTrue();
+        assertThat(result.reimbursementSummary().paidAmount().complete()).isFalse();
+        assertThat(result.attendance()).isEmpty();
+        verify(executionService, org.mockito.Mockito.times(1)).execute(any());
+    }
+
+    @Test
+    void attendanceQueryExecutesExactlyFiveDependencyDatasets() {
+        prepareSuccessfulExecution();
+
+        Result result = service.query(commandWithPlans(
+                Set.of(DatasetType.PUNCH),
+                DatasetType.TRAVEL,
+                DatasetType.PUNCH,
+                DatasetType.LEAVE,
+                DatasetType.SCHEDULE,
+                DatasetType.CALENDAR
+        ));
+
+        assertThat(result.modules()).extracting(PersonBusinessQueryService.ModuleResult::type)
+                .containsExactly(
+                        DatasetType.TRAVEL,
+                        DatasetType.PUNCH,
+                        DatasetType.LEAVE,
+                        DatasetType.SCHEDULE,
+                        DatasetType.CALENDAR
+                );
+        assertThat(result.reimbursementSummary().paidAmount().complete()).isFalse();
+        assertThat(result.attendance()).hasSize(1);
+        verify(executionService, org.mockito.Mockito.times(5)).execute(any());
+    }
+
+    @Test
+    void punchWithoutAttendanceDependenciesIsRejectedBeforeDirectoryLookup() {
+        Command invalid = commandWithPlans(Set.of(DatasetType.PUNCH), DatasetType.PUNCH);
+
+        assertThatThrownBy(() -> service.query(invalid))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("考勤查询缺少依赖数据集");
+
+        verify(personDirectoryService, never()).search(any());
+    }
+
+    @Test
+    void planWithoutUserRequestedRootIsRejectedBeforeDirectoryLookup() {
+        Command invalid = commandWithPlans(Set.of(), DatasetType.LEAVE);
+
+        assertThatThrownBy(() -> service.query(invalid))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("缺少用户请求");
+
+        verify(personDirectoryService, never()).search(any());
+    }
+
+    @Test
+    void nonRootDatasetCannotBeMarkedAsUserRequested() {
+        Command invalid = commandWithPlans(Set.of(DatasetType.LEAVE), DatasetType.LEAVE);
+
+        assertThatThrownBy(() -> service.query(invalid))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("根数据集不合法");
+
+        verify(personDirectoryService, never()).search(any());
+    }
+
+    @Test
+    void internalLeavePlanWithoutPunchRequestIsRejectedBeforeDirectoryLookup() {
+        Command invalid = commandWithPlans(
+                Set.of(DatasetType.TRAVEL), DatasetType.TRAVEL, DatasetType.LEAVE
+        );
+
+        assertThatThrownBy(() -> service.query(invalid))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("无关内部依赖");
+
+        verify(personDirectoryService, never()).search(any());
+    }
+
+    @Test
+    void failedAttendanceDependencyKeepsItsModuleIncomplete() {
+        authorizeSelectedPerson();
+        when(snapshotMatcher.match(any())).thenReturn(
+                new SnapshotMatchResult(
+                        SnapshotMatchDecision.REQUERY, null,
+                        BusinessSnapshotMatcher.GENERIC_REQUERY_REASON
+                )
+        );
+        when(executionService.execute(any())).thenAnswer(invocation -> {
+            DatasetExecutionRequest request = invocation.getArgument(0);
+            if (typeFor(request.datasetCode()) == DatasetType.LEAVE) {
+                return outcome(
+                        request, DatasetExecutionStatus.TIMEOUT, false,
+                        emptyFactsFor(request.datasetCode())
+                );
+            }
+            return success(request, emptyFactsFor(request.datasetCode()));
+        });
+        when(snapshotService.create(any())).thenAnswer(invocation ->
+                freshSnapshot(invocation.getArgument(0))
+        );
+
+        Result result = service.query(commandWithPlans(
+                Set.of(DatasetType.PUNCH),
+                DatasetType.TRAVEL,
+                DatasetType.PUNCH,
+                DatasetType.LEAVE,
+                DatasetType.SCHEDULE,
+                DatasetType.CALENDAR
+        ));
+
+        assertThat(result.modules())
+                .filteredOn(module -> module.type() == DatasetType.LEAVE)
+                .singleElement()
+                .satisfies(module -> {
+                    assertThat(module.status())
+                            .isEqualTo(PersonBusinessQueryService.ModuleStatus.TIMEOUT);
+                    assertThat(module.complete()).isFalse();
+                });
+        assertThat(result.attendance()).singleElement().satisfies(day ->
+                assertThat(day.determination()).isEqualTo("UNKNOWN")
+        );
+    }
+
+    @Test
     void validSnapshotsAreReusedWithoutDatasetExecution() throws Exception {
         authorizeSelectedPerson();
         when(snapshotMatcher.match(any())).thenAnswer(invocation -> {
@@ -873,6 +1023,42 @@ class PersonBusinessQueryServiceTest {
         );
     }
 
+    private void prepareSuccessfulExecution() {
+        authorizeSelectedPerson();
+        when(snapshotMatcher.match(any())).thenReturn(
+                new SnapshotMatchResult(
+                        SnapshotMatchDecision.REQUERY, null,
+                        BusinessSnapshotMatcher.GENERIC_REQUERY_REASON
+                )
+        );
+        when(executionService.execute(any())).thenAnswer(invocation -> {
+            DatasetExecutionRequest request = invocation.getArgument(0);
+            return success(request, emptyFactsFor(request.datasetCode()));
+        });
+        when(snapshotService.create(any())).thenAnswer(invocation ->
+                freshSnapshot(invocation.getArgument(0))
+        );
+    }
+
+    private Command commandWithPlans(
+            Set<DatasetType> requestedTypes,
+            DatasetType... executionTypes) {
+        Set<DatasetType> included = Set.of(executionTypes);
+        Command source = command(selectionToken, false);
+        return new Command(
+                source.agentRunId(), source.userId(), source.sessionId(),
+                source.authorization(), source.secureContext(), source.selectionToken(),
+                source.refreshRequested(), source.plans().stream()
+                        .filter(plan -> included.contains(plan.type()))
+                        .map(plan -> new DatasetPlan(
+                                plan.type(), plan.datasetCode(), plan.canonicalInput(),
+                                plan.requestedGrain(), plan.requiredFactCodes(),
+                                requestedTypes.contains(plan.type())
+                        ))
+                        .toList()
+        );
+    }
+
     private Command command(String token, boolean refreshRequested) {
         List<DatasetPlan> plans = new ArrayList<>();
         for (DatasetType type : DatasetType.values()) {
@@ -886,7 +1072,10 @@ class PersonBusinessQueryServiceTest {
                             "endDate", "2026-08-03"
                     ),
                     "DAY",
-                    Set.of(factCode(type))
+                    Set.of(factCode(type)),
+                    type == DatasetType.TRAVEL
+                            || type == DatasetType.PUNCH
+                            || type == DatasetType.REIMBURSEMENT
             ));
         }
         return new Command(
@@ -929,7 +1118,8 @@ class PersonBusinessQueryServiceTest {
                         plan.datasetCode(),
                         canonicalInput,
                         requestedGrain,
-                        plan.requiredFactCodes()
+                        plan.requiredFactCodes(),
+                        plan.userRequested()
                 )
                         : plan)
                 .toList();

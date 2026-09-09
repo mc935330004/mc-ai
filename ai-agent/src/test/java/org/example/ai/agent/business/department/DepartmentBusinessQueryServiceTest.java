@@ -383,7 +383,10 @@ class DepartmentBusinessQueryServiceTest {
 
     private List<DatasetPlan> plans() {
         return Arrays.stream(DatasetType.values()).map(type -> new DatasetPlan(type, "PERSON_" + type.name(),
-                Map.of("startDate", "2026-09-01", "endDate", "2026-09-10"), "DAY", Set.of("person_" + type.name().toLowerCase(java.util.Locale.ROOT) + "_records"))).toList();
+                Map.of("startDate", "2026-09-01", "endDate", "2026-09-10"), "DAY",
+                Set.of("person_" + type.name().toLowerCase(java.util.Locale.ROOT) + "_records"),
+                type == DatasetType.TRAVEL || type == DatasetType.PUNCH
+                        || type == DatasetType.REIMBURSEMENT)).toList();
     }
 
     private MultiPersonSummary summary(MultiPersonSummary.ExecutionStatus status, Aggregate aggregate, List<MultiPersonSummary.PersonStatus> people) {
