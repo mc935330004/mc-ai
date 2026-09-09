@@ -111,6 +111,16 @@ public final class ResponseStreamEventFactory {
     }
 
     /**
+     * 从通用结构化区块创建开始事件，调用方无需重复拼装区块元数据。
+     */
+    public ResponseStreamEvent<BlockStartPayload> blockStart(ResponseBlock block) {
+        Objects.requireNonNull(block, "开始的Block不能为空");
+        return blockStart(new BlockStartPayload(
+                block.id(), block.type(), block.title(), block.order(), block.source()
+        ));
+    }
+
+    /**
      * 创建TEXT Block增量事件。
      */
     public ResponseStreamEvent<BlockDeltaPayload> blockDelta(

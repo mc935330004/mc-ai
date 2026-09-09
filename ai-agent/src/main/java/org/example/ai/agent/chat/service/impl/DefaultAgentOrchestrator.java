@@ -80,6 +80,7 @@ import org.example.ai.agent.chat.protocol.block.ResponseBlock;
 import org.example.ai.agent.chat.protocol.block.StatusBlock;
 import org.example.ai.agent.chat.protocol.response.ReportSection;
 import org.example.ai.agent.common.enums.protocol.Tone;
+import org.example.ai.agent.business.BusinessAssistantService;
 
 import java.util.ArrayList;
 import java.util.Objects;
@@ -125,6 +126,7 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
     private final BusinessTextAnswerService businessTextAnswerService;
     private final CapabilityAnswerFactBuilder capabilityAnswerFactBuilder;
     private final SafeModelInputBuilder safeModelInputBuilder;
+    private final BusinessAssistantService businessAssistantService;
     /**
      * 使用显式构造器注入命名线程池。
      *
@@ -163,6 +165,7 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
             BusinessTextAnswerService businessTextAnswerService,
             CapabilityAnswerFactBuilder capabilityAnswerFactBuilder,
             SafeModelInputBuilder safeModelInputBuilder,
+            BusinessAssistantService businessAssistantService,
 
             @Qualifier("workflowAnswerAnalysisExecutor") ExecutorService workflowAnswerAnalysisExecutor) {
         this.streamSessionFactory = streamSessionFactory;
@@ -196,6 +199,7 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
         this.businessTextAnswerService = businessTextAnswerService;
         this.capabilityAnswerFactBuilder = capabilityAnswerFactBuilder;
         this.safeModelInputBuilder = safeModelInputBuilder;
+        this.businessAssistantService = businessAssistantService;
 
     }
     /**
@@ -335,6 +339,16 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                             intentResult
                     )
             );
+
+            /*
+             * 已确认的只读业务查询交给新的单一业务编排入口。
+             * RAG、混合检索、写操作和已有工作流查询继续保持原执行边界。
+             */
+            if (isConfirmedBusinessRead(intentResult)) {
+                businessAssistantService.handle(request, stream, runId);
+                runTraceService.markSuccess(runId, System.currentTimeMillis() - startTime);
+                return;
+            }
 
             /*
              *  根据路由结果生成运行计划。
@@ -518,6 +532,21 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
             stream.unbindExecutionThread();
             activeAgentRunRegistry.remove(runId);
         }
+    }
+
+    /**
+     * 只有已匹配的注册 READ 能力才能进入新业务助手，畸形写计划和工作流计划继续走旧防线。
+     */
+    static boolean isConfirmedBusinessRead(IntentResult result) {
+        if (result == null || result.isNeedClarify() || result.getWorkflowPlan() != null) {
+            return false;
+        }
+        DynamicCapabilityPlan capability = result.getDynamicCapabilityPlan();
+        return capability != null
+                && capability.isMatched()
+                && "READ".equalsIgnoreCase(capability.getSideEffect())
+                && (result.getRouteType() == RouteType.BUSINESS_QUERY
+                || result.getRouteType() == RouteType.STATISTIC_QUERY);
     }
 
 
