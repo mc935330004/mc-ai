@@ -1,5 +1,6 @@
 package org.example.ai.agent.business.intent;
 
+import org.example.ai.agent.business.model.BusinessSubjectType;
 import org.example.ai.agent.common.exception.BusinessException;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
@@ -30,7 +31,9 @@ public class BusinessIntentValidator {
             throw new IllegalArgumentException("业务查询意图不能为空");
         }
 
-        if (intent.datasetCodes().size() > MAX_DATASET_CODES) {
+        boolean personScope = intent.subjectType() == BusinessSubjectType.PERSON
+                || intent.subjectType() == BusinessSubjectType.DEPARTMENT;
+        if (personScope && intent.datasetCodes().size() > MAX_DATASET_CODES) {
             throw new BusinessException(400, "一次最多选择 4 个数据集");
         }
 

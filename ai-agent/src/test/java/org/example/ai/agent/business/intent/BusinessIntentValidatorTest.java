@@ -66,11 +66,9 @@ class BusinessIntentValidatorTest {
     }
 
     @Test
-    void rejectsMoreThanFourDatasetCodes() {
-        BusinessQueryIntent intent = intent(
-                null,
-                null,
-                null,
+    void rejectsMoreThanFourPersonDatasetCodes() {
+        BusinessQueryIntent intent = intentForSubject(
+                BusinessSubjectType.PERSON,
                 List.of("DATASET_A", "DATASET_B", "DATASET_C", "DATASET_D", "DATASET_E"),
                 null
         );
@@ -78,6 +76,30 @@ class BusinessIntentValidatorTest {
         assertThatThrownBy(() -> validator.validate(intent))
                 .isInstanceOf(BusinessException.class)
                 .hasMessageContaining("最多选择 4 个数据集");
+    }
+
+    @Test
+    void rejectsMoreThanFourDepartmentDatasetCodes() {
+        BusinessQueryIntent intent = intentForSubject(
+                BusinessSubjectType.DEPARTMENT,
+                List.of("DATASET_A", "DATASET_B", "DATASET_C", "DATASET_D", "DATASET_E"),
+                null
+        );
+
+        assertThatThrownBy(() -> validator.validate(intent))
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("最多选择 4 个数据集");
+    }
+
+    @Test
+    void allowsProjectProfileToProvideMoreThanFourDatasetCodes() {
+        BusinessQueryIntent intent = intentForSubject(
+                BusinessSubjectType.PROJECT,
+                List.of("DATASET_A", "DATASET_B", "DATASET_C", "DATASET_D", "DATASET_E"),
+                null
+        );
+
+        assertThat(validator.validate(intent)).isSameAs(intent);
     }
 
     @Test
@@ -348,6 +370,26 @@ class BusinessIntentValidatorTest {
                 projectYear,
                 periodStart,
                 periodEnd,
+                datasetCodes,
+                false,
+                exportFormat,
+                false
+        );
+    }
+
+    private BusinessQueryIntent intentForSubject(
+            BusinessSubjectType subjectType,
+            List<String> datasetCodes,
+            String exportFormat
+    ) {
+        return new BusinessQueryIntent(
+                subjectType,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
                 datasetCodes,
                 false,
                 exportFormat,

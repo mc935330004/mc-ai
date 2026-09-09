@@ -84,6 +84,8 @@ class PersonDatasetSelectionServiceTest {
                 service.select(List.of("ATTENDANCE", "TRAVEL"));
 
         assertThat(selection.semanticCodes()).containsExactly("TRAVEL", "ATTENDANCE");
+        assertThat(selection.requestedTypes())
+                .containsExactlyInAnyOrder(DatasetType.TRAVEL, DatasetType.PUNCH);
         assertThat(selection.executionTypes()).containsExactly(
                 DatasetType.TRAVEL,
                 DatasetType.PUNCH,
