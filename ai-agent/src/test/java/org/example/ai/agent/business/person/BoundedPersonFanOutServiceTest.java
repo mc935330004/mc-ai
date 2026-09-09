@@ -167,6 +167,77 @@ class BoundedPersonFanOutServiceTest {
     }
 
     @Test
+    void missingAttendanceDependencyModuleMakesPersonAndAggregatePartial() {
+        List<DatasetPlan> plans = plans(DatasetType.PUNCH);
+        Result complete = completeResult(plans, false);
+        Result missingLeaveModule = new Result(
+                complete.travelSummary(),
+                complete.reimbursementSummary(),
+                complete.attendance(),
+                complete.modules().stream()
+                        .filter(module -> module.type() != DatasetType.LEAVE)
+                        .toList()
+        );
+        PersonBusinessQueryService singlePersonService = mock(PersonBusinessQueryService.class);
+        when(singlePersonService.query(any())).thenReturn(missingLeaveModule);
+        service = new BoundedPersonFanOutService(singlePersonService, properties(10, 1, 100, 1_000, 0));
+
+        MultiPersonSummary summary = service.query(List.of(request("张*", true, plans)), () -> false);
+
+        assertThat(summary.status()).isEqualTo(MultiPersonSummary.ExecutionStatus.PARTIAL);
+        assertThat(summary.people()).extracting(MultiPersonSummary.PersonStatus::status)
+                .containsExactly(MultiPersonSummary.PersonQueryStatus.PARTIAL);
+        assertThat(summary.aggregate().complete()).isFalse();
+        assertThat(summary.anomalyPeople()).isEmpty();
+    }
+
+    @Test
+    void mismatchedResultDatasetCodeMakesPersonAndAggregatePartial() {
+        List<DatasetPlan> plans = plans(DatasetType.REIMBURSEMENT);
+        Result complete = completeResult(plans, false);
+        ModuleResult module = complete.modules().get(0);
+        Result mismatchedCode = new Result(
+                complete.travelSummary(),
+                complete.reimbursementSummary(),
+                complete.attendance(),
+                List.of(new ModuleResult(
+                        module.type(), "OTHER_REIMBURSEMENT", module.status(), module.complete(),
+                        module.snapshotId(), module.fieldPolicyChecksum()
+                ))
+        );
+        PersonBusinessQueryService singlePersonService = mock(PersonBusinessQueryService.class);
+        when(singlePersonService.query(any())).thenReturn(mismatchedCode);
+        service = new BoundedPersonFanOutService(singlePersonService, properties(10, 1, 100, 1_000, 0));
+
+        MultiPersonSummary summary = service.query(List.of(request("张*", false, plans)), () -> false);
+
+        assertThat(summary.status()).isEqualTo(MultiPersonSummary.ExecutionStatus.PARTIAL);
+        assertThat(summary.aggregate().complete()).isFalse();
+    }
+
+    @Test
+    void duplicateResultModuleTypeMakesPersonAndAggregatePartial() {
+        List<DatasetPlan> plans = plans(DatasetType.PUNCH);
+        Result complete = completeResult(plans, false);
+        List<ModuleResult> modules = new ArrayList<>(complete.modules());
+        modules.set(2, modules.get(0));
+        Result duplicateType = new Result(
+                complete.travelSummary(),
+                complete.reimbursementSummary(),
+                complete.attendance(),
+                modules
+        );
+        PersonBusinessQueryService singlePersonService = mock(PersonBusinessQueryService.class);
+        when(singlePersonService.query(any())).thenReturn(duplicateType);
+        service = new BoundedPersonFanOutService(singlePersonService, properties(10, 1, 100, 1_000, 0));
+
+        MultiPersonSummary summary = service.query(List.of(request("张*", true, plans)), () -> false);
+
+        assertThat(summary.status()).isEqualTo(MultiPersonSummary.ExecutionStatus.PARTIAL);
+        assertThat(summary.aggregate().complete()).isFalse();
+    }
+
+    @Test
     void anomalyIsNotCollectedWhenPunchWasNotRequested() {
         List<DatasetPlan> plans = plans(DatasetType.TRAVEL);
         PersonBusinessQueryService singlePersonService = mock(PersonBusinessQueryService.class);

@@ -248,7 +248,8 @@ public class BoundedPersonFanOutService {
 
     private boolean completePersonResult(PersonRequest request, Result result) {
         RequestedDatasets requested = requestedDatasets(request);
-        return result.modules().stream().allMatch(
+        return moduleContractMatches(request, result)
+                && result.modules().stream().allMatch(
                 PersonBusinessQueryService.ModuleResult::complete
         )
                 && (!requested.travel()
@@ -256,6 +257,25 @@ public class BoundedPersonFanOutService {
                 && result.travelSummary().totalAmount().complete())
                 && (!requested.reimbursement()
                 || result.reimbursementSummary().paidAmount().complete());
+    }
+
+    private boolean moduleContractMatches(PersonRequest request, Result result) {
+        if (result.modules().size() != request.command().plans().size()) {
+            return false;
+        }
+        EnumMap<DatasetType, String> expected = new EnumMap<>(DatasetType.class);
+        for (DatasetPlan plan : request.command().plans()) {
+            expected.put(plan.type(), plan.datasetCode());
+        }
+        EnumMap<DatasetType, String> actual = new EnumMap<>(DatasetType.class);
+        for (PersonBusinessQueryService.ModuleResult module : result.modules()) {
+            if (module.type() == null
+                    || !StringUtils.hasText(module.datasetCode())
+                    || actual.putIfAbsent(module.type(), module.datasetCode()) != null) {
+                return false;
+            }
+        }
+        return expected.equals(actual);
     }
 
     private MultiPersonSummary summarize(
