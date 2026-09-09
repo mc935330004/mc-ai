@@ -282,13 +282,7 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
             ReportFollowUpDecision followUpDecision =reportFollowUpService.resolve(request);
 
             if (followUpDecision.status()!= ReportFollowUpDecision.Status.NONE) {
-                handleReportFollowUp(
-                        request,
-                        stream,
-                        runId,
-                        followUpDecision
-                );
-
+                handleReportFollowUp(request, stream, runId, followUpDecision);
                 runTraceService.markSuccess(runId, System.currentTimeMillis() - startTime);
                 return;
             }
@@ -326,15 +320,8 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
             //  更新路由类型。
             runTraceService.updateRouteType(runId, intentResult.getRouteType());
             // 推送路由结果，方便前端展示和后端排查。
-            stream.send(
-                    "thinking",
-                    AgentStreamEvent.of(
-                            runId,
-                            AgentStreamEventType.THINKING.name(),
-                            "路由结果：" + intentResult.getRouteType() + "，原因：" + intentResult.getReason(),
-                            intentResult
-                    )
-            );
+            stream.send("thinking", AgentStreamEvent.of(runId, AgentStreamEventType.THINKING.name(),
+                    "路由结果：" + intentResult.getRouteType() + "，原因：" + intentResult.getReason(), intentResult));
 
             /*
              *  根据路由结果生成运行计划。
@@ -436,16 +423,9 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                      * 部分成功仍属于一次有效业务查询，
                      * 具体失败项目已经写入批量摘要。
                      */
-                    runTraceService.markSuccess(
-                            runId,
-                            duration
-                    );
+                    runTraceService.markSuccess(runId, duration);
                 } else {
-                    runTraceService.markFailed(
-                            runId,
-                            duration,
-                            outcome.errorMessage()
-                    );
+                    runTraceService.markFailed(runId, duration, outcome.errorMessage());
                 }
                 return;
             }

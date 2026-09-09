@@ -56,8 +56,7 @@ public class AgentChatController {
                 );
         request.setModelCode(modelCode);
         // 只注入受控数量的历史上下文。
-        request.setConversationMemory(
-                aiChatSessionService.buildMemory(
+        request.setConversationMemory( aiChatSessionService.buildMemory(
                         userId,
                         request.getConversationId()
                 )
