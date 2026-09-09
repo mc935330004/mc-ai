@@ -148,7 +148,8 @@ class BusinessIntentValidatorTest {
                   "periodEnd": null,
                   "datasetCodes": ["PROJECT_OVERVIEW"],
                   "refresh": false,
-                  "exportFormat": "XLSX"
+                  "exportFormat": "XLSX",
+                  "anomalyPeopleRequested": false
                 }
                 ```
                 """
@@ -172,6 +173,7 @@ class BusinessIntentValidatorTest {
         assertThat(resolved.periodStart()).isNull();
         assertThat(resolved.periodEnd()).isNull();
         assertThat(resolved.exportFormat()).isEqualTo("XLSX");
+        assertThat(resolved.anomalyPeopleRequested()).isFalse();
 
         ArgumentCaptor<String> systemPrompt = ArgumentCaptor.forClass(String.class);
         verify(chatClientService).call(
@@ -240,7 +242,15 @@ class BusinessIntentValidatorTest {
         when(response.getResult().getOutput().getText()).thenReturn("""
                 {
                   "subjectType": "PROJECT",
+                  "projectCode": "P-1001",
+                  "personName": null,
+                  "employeeNo": null,
+                  "projectYear": 2025,
+                  "periodStart": null,
+                  "periodEnd": null,
                   "datasetCodes": ["PERSON_OVERVIEW"],
+                  "refresh": false,
+                  "exportFormat": null,
                   "anomalyPeopleRequested": true
                 }
                 """);
