@@ -451,8 +451,10 @@ Expected: 全部通过，无失败和错误。
 - [ ] **Step 2: 运行模块全量测试**
 
 ```powershell
-$env:JAVA_HOME='C:\Program Files\Eclipse Adoptium\jdk-17.0.14.7-hotspot'
-$env:AI_DATA_ENCRYPTION_KEY='test-encryption-key-32-bytes-long!'
+$env:JAVA_HOME='C:\Program Files\Java\jdk-17.0.19'
+$env:MODEL_CONFIG_ENCRYPTION_KEY=[Convert]::ToBase64String(
+    [Text.Encoding]::UTF8.GetBytes('0123456789abcdef0123456789abcdef')
+)
 mvn -pl ai-agent -am clean test
 ```
 
