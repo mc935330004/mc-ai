@@ -310,7 +310,7 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
                 datasets.add(failedDataset("PERSON_REPORT", "报告任务创建失败，业务数据仍可查看"));
             }
         }
-        boolean complete = result.modules().stream().allMatch(PersonBusinessQueryService.ModuleResult::complete)
+        boolean complete = datasets.stream().allMatch(DatasetAnswerInput::dataComplete)
                 && (artifact != null || !StringUtils.hasText(intent.exportFormat()));
         AiResponse composed = response(
                 request, stream, runId, context, complete, datasets,
@@ -525,8 +525,9 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
                 case PUNCH -> Map.of("attendanceRows", attendanceRows(result.attendance()));
                 default -> Map.of();
             };
-            boolean complete = module.type() == DatasetType.PUNCH
-                    ? attendanceComplete : module.complete();
+            boolean complete = requestedDatasetComplete(
+                    module.type(), result, module.complete(), attendanceComplete
+            );
             datasets.add(new DatasetAnswerInput(
                     plan.datasetCode(), module.type().name(),
                     datasetStatus(module.status()), complete, display, Map.of(),
@@ -534,6 +535,32 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
             ));
         }
         return List.copyOf(datasets);
+    }
+
+    private boolean requestedDatasetComplete(
+            DatasetType type,
+            PersonBusinessQueryService.Result result,
+            boolean moduleComplete,
+            boolean attendanceComplete) {
+        if (!moduleComplete) {
+            return false;
+        }
+        return switch (type) {
+            case TRAVEL -> result.travelSummary() != null
+                    && result.travelSummary().tripCount() != null
+                    && result.travelSummary().tripCount().complete()
+                    && result.travelSummary().totalAmount() != null
+                    && result.travelSummary().totalAmount().complete();
+            case REIMBURSEMENT -> result.reimbursementSummary() != null
+                    && result.reimbursementSummary().requestedAmount() != null
+                    && result.reimbursementSummary().requestedAmount().complete()
+                    && result.reimbursementSummary().approvedAmount() != null
+                    && result.reimbursementSummary().approvedAmount().complete()
+                    && result.reimbursementSummary().paidAmount() != null
+                    && result.reimbursementSummary().paidAmount().complete();
+            case PUNCH -> attendanceComplete;
+            default -> false;
+        };
     }
 
     private boolean attendanceComplete(List<PersonBusinessQueryService.ModuleResult> modules) {

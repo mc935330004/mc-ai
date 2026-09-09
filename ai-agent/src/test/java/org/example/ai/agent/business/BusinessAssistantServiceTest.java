@@ -789,6 +789,77 @@ class BusinessAssistantServiceTest {
     }
 
     @Test
+    void travelDatasetShouldBeIncompleteWhenAnyPublishedMetricIsIncomplete() throws Exception {
+        List<PersonBusinessQueryService.TravelSummary> incompleteSummaries = List.of(
+                new PersonBusinessQueryService.TravelSummary(
+                        PersonBusinessQueryService.Metric.incomplete(),
+                        PersonBusinessQueryService.Metric.complete(new java.math.BigDecimal("1200"))
+                ),
+                new PersonBusinessQueryService.TravelSummary(
+                        PersonBusinessQueryService.Metric.complete(6),
+                        PersonBusinessQueryService.Metric.incomplete()
+                )
+        );
+        for (PersonBusinessQueryService.TravelSummary summary : incompleteSummaries) {
+            PersonBusinessQueryService.Result result = new PersonBusinessQueryService.Result(
+                    summary, completeReimbursementSummary(), List.of(),
+                    List.of(personModule(
+                            PersonBusinessQueryService.DatasetType.TRAVEL,
+                            PersonBusinessQueryService.ModuleStatus.SUCCESS
+                    ))
+            );
+            Fixture fixture = personFixture(personIntent(List.of("TRAVEL"), null), result);
+
+            fixture.service.handle(request("查询出差"), fixture.stream, "run-1");
+
+            DeterministicBusinessAnswerComposer.ComposeCommand answer = composedDepartment(fixture);
+            assertThat(answer.datasets()).singleElement()
+                    .extracting(DeterministicBusinessAnswerComposer.DatasetAnswerInput::dataComplete)
+                    .isEqualTo(false);
+            assertThat(answer.dataComplete()).isFalse();
+        }
+    }
+
+    @Test
+    void reimbursementDatasetShouldBeIncompleteWhenAnyPublishedMetricIsIncomplete() throws Exception {
+        List<PersonBusinessQueryService.ReimbursementSummary> incompleteSummaries = List.of(
+                new PersonBusinessQueryService.ReimbursementSummary(
+                        PersonBusinessQueryService.Metric.incomplete(),
+                        PersonBusinessQueryService.Metric.complete(new java.math.BigDecimal("800")),
+                        PersonBusinessQueryService.Metric.complete(new java.math.BigDecimal("700"))
+                ),
+                new PersonBusinessQueryService.ReimbursementSummary(
+                        PersonBusinessQueryService.Metric.complete(new java.math.BigDecimal("900")),
+                        PersonBusinessQueryService.Metric.incomplete(),
+                        PersonBusinessQueryService.Metric.complete(new java.math.BigDecimal("700"))
+                ),
+                new PersonBusinessQueryService.ReimbursementSummary(
+                        PersonBusinessQueryService.Metric.complete(new java.math.BigDecimal("900")),
+                        PersonBusinessQueryService.Metric.complete(new java.math.BigDecimal("800")),
+                        PersonBusinessQueryService.Metric.incomplete()
+                )
+        );
+        for (PersonBusinessQueryService.ReimbursementSummary summary : incompleteSummaries) {
+            PersonBusinessQueryService.Result result = new PersonBusinessQueryService.Result(
+                    completeTravelSummary(), summary, List.of(),
+                    List.of(personModule(
+                            PersonBusinessQueryService.DatasetType.REIMBURSEMENT,
+                            PersonBusinessQueryService.ModuleStatus.SUCCESS
+                    ))
+            );
+            Fixture fixture = personFixture(personIntent(List.of("REIMBURSEMENT"), null), result);
+
+            fixture.service.handle(request("查询报销"), fixture.stream, "run-1");
+
+            DeterministicBusinessAnswerComposer.ComposeCommand answer = composedDepartment(fixture);
+            assertThat(answer.datasets()).singleElement()
+                    .extracting(DeterministicBusinessAnswerComposer.DatasetAnswerInput::dataComplete)
+                    .isEqualTo(false);
+            assertThat(answer.dataComplete()).isFalse();
+        }
+    }
+
+    @Test
     void attendanceShouldExecuteFiveDependenciesButPublishOnlyReconciledAttendance() throws Exception {
         List<PersonBusinessQueryService.DatasetType> attendanceTypes = List.of(
                 PersonBusinessQueryService.DatasetType.TRAVEL,
@@ -1137,16 +1208,24 @@ class BusinessAssistantServiceTest {
                         : personModule(type, PersonBusinessQueryService.ModuleStatus.REUSED))
                 .toList();
         return new PersonBusinessQueryService.Result(
-                new PersonBusinessQueryService.TravelSummary(
-                        PersonBusinessQueryService.Metric.complete(6),
-                        PersonBusinessQueryService.Metric.complete(new java.math.BigDecimal("1200"))
-                ),
-                new PersonBusinessQueryService.ReimbursementSummary(
-                        PersonBusinessQueryService.Metric.complete(new java.math.BigDecimal("900")),
-                        PersonBusinessQueryService.Metric.complete(new java.math.BigDecimal("800")),
-                        PersonBusinessQueryService.Metric.complete(new java.math.BigDecimal("700"))
-                ),
+                completeTravelSummary(),
+                completeReimbursementSummary(),
                 List.of(), modules
+        );
+    }
+
+    private PersonBusinessQueryService.TravelSummary completeTravelSummary() {
+        return new PersonBusinessQueryService.TravelSummary(
+                PersonBusinessQueryService.Metric.complete(6),
+                PersonBusinessQueryService.Metric.complete(new java.math.BigDecimal("1200"))
+        );
+    }
+
+    private PersonBusinessQueryService.ReimbursementSummary completeReimbursementSummary() {
+        return new PersonBusinessQueryService.ReimbursementSummary(
+                PersonBusinessQueryService.Metric.complete(new java.math.BigDecimal("900")),
+                PersonBusinessQueryService.Metric.complete(new java.math.BigDecimal("800")),
+                PersonBusinessQueryService.Metric.complete(new java.math.BigDecimal("700"))
         );
     }
 
