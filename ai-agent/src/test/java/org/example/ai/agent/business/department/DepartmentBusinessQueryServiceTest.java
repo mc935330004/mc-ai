@@ -246,6 +246,80 @@ class DepartmentBusinessQueryServiceTest {
     }
 
     @Test
+    void emptyDepartmentReturnsZeroOnlyForRequestedReimbursement() {
+        authorize();
+        when(members.search(any())).thenReturn(SubjectDirectoryPage.empty(1, 50));
+
+        Result result = service.query(
+                command(departmentToken, false, plans(DatasetType.REIMBURSEMENT)),
+                () -> false
+        );
+
+        assertThat(result.status()).isEqualTo(DepartmentQueryStatus.COMPLETED);
+        assertThat(result.aggregate()).isEqualTo(
+                new Aggregate(true, 0, null, null, BigDecimal.ZERO)
+        );
+        verifyNoInteractions(fanOut);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void acceptsSingleDatasetPlanAndKeepsItForEveryMember() {
+        List<DatasetPlan> selectedPlans = plans(DatasetType.REIMBURSEMENT);
+        authorizeMembers(2);
+        when(fanOut.query(any(), any())).thenReturn(summary(
+                MultiPersonSummary.ExecutionStatus.COMPLETED,
+                new Aggregate(true, 2, null, null, new BigDecimal("40")),
+                List.of(
+                        new MultiPersonSummary.PersonStatus("姓名0（E***）", PersonQueryStatus.SUCCESS),
+                        new MultiPersonSummary.PersonStatus("姓名1（E***）", PersonQueryStatus.SUCCESS)
+                )
+        ));
+
+        Result result = service.query(
+                command(departmentToken, false, selectedPlans),
+                () -> false
+        );
+
+        ArgumentCaptor<List<PersonRequest>> requests = ArgumentCaptor.forClass(List.class);
+        verify(fanOut).query(requests.capture(), any());
+        List<DatasetPlan> sharedPlans = requests.getValue().get(0).command().plans();
+        assertThat(sharedPlans).isEqualTo(selectedPlans);
+        assertThat(requests.getValue()).hasSize(2)
+                .allSatisfy(request -> assertThat(request.command().plans()).isSameAs(sharedPlans));
+        assertThat(result.status()).isEqualTo(DepartmentQueryStatus.COMPLETED);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void acceptsFiveDatasetAttendanceClosureAndKeepsItForEveryMember() {
+        List<DatasetPlan> selectedPlans = plans(DatasetType.PUNCH);
+        authorizeMembers(2);
+        when(fanOut.query(any(), any())).thenReturn(summary(
+                MultiPersonSummary.ExecutionStatus.COMPLETED,
+                new Aggregate(true, 2, null, null, null),
+                List.of(
+                        new MultiPersonSummary.PersonStatus("姓名0（E***）", PersonQueryStatus.SUCCESS),
+                        new MultiPersonSummary.PersonStatus("姓名1（E***）", PersonQueryStatus.SUCCESS)
+                )
+        ));
+
+        Result result = service.query(
+                command(departmentToken, true, selectedPlans),
+                () -> false
+        );
+
+        ArgumentCaptor<List<PersonRequest>> requests = ArgumentCaptor.forClass(List.class);
+        verify(fanOut).query(requests.capture(), any());
+        assertThat(selectedPlans).hasSize(5);
+        List<DatasetPlan> sharedPlans = requests.getValue().get(0).command().plans();
+        assertThat(sharedPlans).isEqualTo(selectedPlans);
+        assertThat(requests.getValue()).hasSize(2)
+                .allSatisfy(request -> assertThat(request.command().plans()).isSameAs(sharedPlans));
+        assertThat(result.status()).isEqualTo(DepartmentQueryStatus.COMPLETED);
+    }
+
+    @Test
     void countsEveryPersonTerminalStatusWithoutExposingPeopleList() throws Exception {
         authorizeMembers(5);
         List<MultiPersonSummary.PersonStatus> statuses = Arrays.stream(PersonQueryStatus.values())
@@ -378,15 +452,36 @@ class DepartmentBusinessQueryServiceTest {
     }
 
     private Command command(String token, boolean anomalies) {
-        return new Command("run", "user", "session", "Bearer private-auth", Map.of("roles", List.of("HR")), token, true, anomalies, plans());
+        return command(token, anomalies, plans());
+    }
+
+    private Command command(String token, boolean anomalies, List<DatasetPlan> selectedPlans) {
+        return new Command("run", "user", "session", "Bearer private-auth",
+                Map.of("roles", List.of("HR")), token, true, anomalies, selectedPlans);
     }
 
     private List<DatasetPlan> plans() {
-        return Arrays.stream(DatasetType.values()).map(type -> new DatasetPlan(type, "PERSON_" + type.name(),
-                Map.of("startDate", "2026-09-01", "endDate", "2026-09-10"), "DAY",
-                Set.of("person_" + type.name().toLowerCase(java.util.Locale.ROOT) + "_records"),
-                type == DatasetType.TRAVEL || type == DatasetType.PUNCH
-                        || type == DatasetType.REIMBURSEMENT)).toList();
+        return plans(DatasetType.TRAVEL, DatasetType.PUNCH, DatasetType.REIMBURSEMENT);
+    }
+
+    private List<DatasetPlan> plans(DatasetType... requestedTypes) {
+        Set<DatasetType> requested = Set.of(requestedTypes);
+        Set<DatasetType> attendance = Set.of(
+                DatasetType.TRAVEL, DatasetType.PUNCH, DatasetType.LEAVE,
+                DatasetType.SCHEDULE, DatasetType.CALENDAR
+        );
+        return Arrays.stream(DatasetType.values())
+                .filter(type -> requested.contains(type)
+                        || requested.contains(DatasetType.PUNCH) && attendance.contains(type))
+                .map(type -> new DatasetPlan(
+                        type,
+                        "PERSON_" + type.name(),
+                        Map.of("startDate", "2026-09-01", "endDate", "2026-09-10"),
+                        "DAY",
+                        Set.of("person_" + type.name().toLowerCase(java.util.Locale.ROOT) + "_records"),
+                        requested.contains(type)
+                ))
+                .toList();
     }
 
     private MultiPersonSummary summary(MultiPersonSummary.ExecutionStatus status, Aggregate aggregate, List<MultiPersonSummary.PersonStatus> people) {

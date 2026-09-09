@@ -119,7 +119,7 @@ public class DepartmentBusinessQueryService {
             }
             if (members.isEmpty()) {
                 return new Result(DepartmentQueryStatus.COMPLETED, true, 0, 0, 0,
-                        new Aggregate(true, 0, 0, BigDecimal.ZERO, BigDecimal.ZERO),
+                        emptyAggregate(command.plans()),
                         Map.of(), List.of(), null);
             }
 
@@ -172,6 +172,23 @@ public class DepartmentBusinessQueryService {
                 command.authorization(), command.secureContext(), departmentId, pageNumber, pageSize);
     }
 
+    /** 空部门也只为用户实际请求的正式汇总字段返回零值。 */
+    private Aggregate emptyAggregate(List<DatasetPlan> plans) {
+        boolean travelRequested = plans.stream().anyMatch(
+                plan -> plan.userRequested() && plan.type() == DatasetType.TRAVEL
+        );
+        boolean reimbursementRequested = plans.stream().anyMatch(
+                plan -> plan.userRequested() && plan.type() == DatasetType.REIMBURSEMENT
+        );
+        return new Aggregate(
+                true,
+                0,
+                travelRequested ? 0 : null,
+                travelRequested ? BigDecimal.ZERO : null,
+                reimbursementRequested ? BigDecimal.ZERO : null
+        );
+    }
+
     private void validate(Command command, BooleanSupplier cancellationRequested) {
         if (command == null || cancellationRequested == null) {
             throw new IllegalArgumentException("部门业务查询命令不完整");
@@ -182,17 +199,23 @@ public class DepartmentBusinessQueryService {
         SubjectRequestLimits.requireText(command.authorization(), "authorization", 32768);
         SubjectRequestLimits.requireText(command.departmentSelectionToken(), "departmentSelectionToken", 4096);
         SubjectRequestLimits.validateContext(command.secureContext());
-        if (command.plans().size() != DatasetType.values().length) {
-            throw new IllegalArgumentException("部门业务查询必须包含六类数据集计划");
+        if (command.plans().isEmpty()
+                || command.plans().size() > DatasetType.values().length) {
+            throw new IllegalArgumentException("部门业务查询数据集计划不完整");
         }
         Set<DatasetType> types = EnumSet.noneOf(DatasetType.class);
         Set<String> codes = new HashSet<>();
+        boolean userRequested = false;
         for (DatasetPlan plan : command.plans()) {
-            if (plan.type() == null || !types.add(plan.type())
+            if (plan == null || plan.type() == null || !types.add(plan.type())
                     || !StringUtils.hasText(plan.datasetCode()) || !codes.add(plan.datasetCode())
                     || plan.requiredFactCodes().isEmpty()) {
                 throw new IllegalArgumentException("部门业务查询数据集计划不完整或重复");
             }
+            userRequested |= plan.userRequested();
+        }
+        if (!userRequested) {
+            throw new IllegalArgumentException("部门业务查询缺少用户请求数据集");
         }
     }
 

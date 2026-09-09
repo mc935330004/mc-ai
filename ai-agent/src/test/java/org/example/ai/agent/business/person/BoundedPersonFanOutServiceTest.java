@@ -2,6 +2,8 @@ package org.example.ai.agent.business.person;
 
 import org.example.ai.agent.business.person.BoundedPersonFanOutService.PersonRequest;
 import org.example.ai.agent.business.person.PersonBusinessQueryService.Command;
+import org.example.ai.agent.business.person.PersonBusinessQueryService.DatasetPlan;
+import org.example.ai.agent.business.person.PersonBusinessQueryService.DatasetType;
 import org.example.ai.agent.business.person.PersonBusinessQueryService.Metric;
 import org.example.ai.agent.business.person.PersonBusinessQueryService.ModuleResult;
 import org.example.ai.agent.business.person.PersonBusinessQueryService.ModuleStatus;
@@ -21,6 +23,7 @@ import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
@@ -94,6 +97,106 @@ class BoundedPersonFanOutServiceTest {
         assertThat(summary.aggregate().reimbursementAmount()).isEqualByComparingTo("60");
         assertThat(summary.anomalyPeople()).extracting(MultiPersonSummary.AnomalyPerson::displayLabel)
                 .containsExactly("张*", "王*");
+    }
+
+    @Test
+    void reimbursementOnlyReturnsCompleteTotalWithTravelFieldsAbsent() {
+        List<DatasetPlan> plans = plans(DatasetType.REIMBURSEMENT);
+        PersonBusinessQueryService singlePersonService = mock(PersonBusinessQueryService.class);
+        when(singlePersonService.query(any())).thenReturn(completeResult(plans, false));
+        service = new BoundedPersonFanOutService(singlePersonService, properties(10, 1, 100, 1_000, 0));
+
+        MultiPersonSummary summary = service.query(
+                List.of(request("张*", false, plans), request("李*", false, plans)),
+                () -> false
+        );
+
+        assertThat(summary.status()).isEqualTo(MultiPersonSummary.ExecutionStatus.COMPLETED);
+        assertThat(summary.aggregate().complete()).isTrue();
+        assertThat(summary.aggregate().tripCount()).isNull();
+        assertThat(summary.aggregate().travelAmount()).isNull();
+        assertThat(summary.aggregate().reimbursementAmount()).isEqualByComparingTo("40");
+    }
+
+    @Test
+    void travelOnlyReturnsCompleteTotalsWithReimbursementAbsent() {
+        List<DatasetPlan> plans = plans(DatasetType.TRAVEL);
+        PersonBusinessQueryService singlePersonService = mock(PersonBusinessQueryService.class);
+        when(singlePersonService.query(any())).thenReturn(completeResult(plans, false));
+        service = new BoundedPersonFanOutService(singlePersonService, properties(10, 1, 100, 1_000, 0));
+
+        MultiPersonSummary summary = service.query(List.of(request("张*", false, plans)), () -> false);
+
+        assertThat(summary.status()).isEqualTo(MultiPersonSummary.ExecutionStatus.COMPLETED);
+        assertThat(summary.aggregate().tripCount()).isOne();
+        assertThat(summary.aggregate().travelAmount()).isEqualByComparingTo("10");
+        assertThat(summary.aggregate().reimbursementAmount()).isNull();
+    }
+
+    @Test
+    void attendanceOnlyUsesDependenciesWithoutPublishingTravelTotals() {
+        List<DatasetPlan> plans = plans(DatasetType.PUNCH);
+        PersonBusinessQueryService singlePersonService = mock(PersonBusinessQueryService.class);
+        when(singlePersonService.query(any())).thenReturn(completeResult(plans, true));
+        service = new BoundedPersonFanOutService(singlePersonService, properties(10, 1, 100, 1_000, 0));
+
+        MultiPersonSummary summary = service.query(List.of(request("张*", true, plans)), () -> false);
+
+        assertThat(summary.status()).isEqualTo(MultiPersonSummary.ExecutionStatus.COMPLETED);
+        assertThat(summary.aggregate().tripCount()).isNull();
+        assertThat(summary.aggregate().travelAmount()).isNull();
+        assertThat(summary.aggregate().reimbursementAmount()).isNull();
+        assertThat(summary.anomalyPeople()).extracting(MultiPersonSummary.AnomalyPerson::displayLabel)
+                .containsExactly("张*");
+    }
+
+    @Test
+    void failedAttendanceDependencyMakesPersonAndAggregatePartial() {
+        List<DatasetPlan> plans = plans(DatasetType.PUNCH);
+        PersonBusinessQueryService singlePersonService = mock(PersonBusinessQueryService.class);
+        when(singlePersonService.query(any())).thenReturn(result(plans, false, DatasetType.LEAVE));
+        service = new BoundedPersonFanOutService(singlePersonService, properties(10, 1, 100, 1_000, 0));
+
+        MultiPersonSummary summary = service.query(List.of(request("张*", true, plans)), () -> false);
+
+        assertThat(summary.status()).isEqualTo(MultiPersonSummary.ExecutionStatus.PARTIAL);
+        assertThat(summary.people()).extracting(MultiPersonSummary.PersonStatus::status)
+                .containsExactly(MultiPersonSummary.PersonQueryStatus.PARTIAL);
+        assertThat(summary.aggregate().complete()).isFalse();
+        assertThat(summary.anomalyPeople()).isEmpty();
+    }
+
+    @Test
+    void anomalyIsNotCollectedWhenPunchWasNotRequested() {
+        List<DatasetPlan> plans = plans(DatasetType.TRAVEL);
+        PersonBusinessQueryService singlePersonService = mock(PersonBusinessQueryService.class);
+        when(singlePersonService.query(any())).thenReturn(completeResult(plans, true));
+        service = new BoundedPersonFanOutService(singlePersonService, properties(10, 1, 100, 1_000, 0));
+
+        MultiPersonSummary summary = service.query(List.of(request("张*", true, plans)), () -> false);
+
+        assertThat(summary.status()).isEqualTo(MultiPersonSummary.ExecutionStatus.COMPLETED);
+        assertThat(summary.anomalyPeople()).isEmpty();
+    }
+
+    @Test
+    void rejectsDifferentPersonPlanContractsBeforeStartingCalls() {
+        PersonBusinessQueryService singlePersonService = mock(PersonBusinessQueryService.class);
+        List<DatasetPlan> plans = plans(DatasetType.TRAVEL);
+        DatasetPlan original = plans.get(0);
+        List<DatasetPlan> changed = List.of(new DatasetPlan(
+                original.type(), original.datasetCode(),
+                Map.of("startDate", "2026-09-02", "endDate", "2026-09-10"),
+                original.requestedGrain(), original.requiredFactCodes(), original.userRequested()
+        ));
+        service = new BoundedPersonFanOutService(singlePersonService, properties(10, 1, 100, 1_000, 0));
+
+        assertThatThrownBy(() -> service.query(
+                List.of(request("张*", false, plans), request("李*", false, changed)),
+                () -> false
+        )).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("计划契约");
+        verify(singlePersonService, never()).query(any());
     }
 
     @Test
@@ -455,28 +558,93 @@ class BoundedPersonFanOutServiceTest {
     }
 
     private PersonRequest request(String label, boolean allowAnomalyDisclosure) {
+        return request(label, allowAnomalyDisclosure,
+                plans(DatasetType.TRAVEL, DatasetType.PUNCH, DatasetType.REIMBURSEMENT));
+    }
+
+    private PersonRequest request(
+            String label,
+            boolean allowAnomalyDisclosure,
+            List<DatasetPlan> plans) {
         return new PersonRequest(
                 label,
                 allowAnomalyDisclosure,
-                new Command("run", "user", "session", "Bearer token", Map.of(), label, false, List.of())
+                new Command("run", "user", "session", "Bearer token", Map.of(), label, false, plans)
         );
     }
 
     private Result completeResult(boolean missingPunch) {
+        return completeResult(
+                plans(DatasetType.TRAVEL, DatasetType.PUNCH, DatasetType.REIMBURSEMENT),
+                missingPunch
+        );
+    }
+
+    private Result completeResult(List<DatasetPlan> plans, boolean missingPunch) {
+        return result(plans, missingPunch, null);
+    }
+
+    private Result result(
+            List<DatasetPlan> plans,
+            boolean missingPunch,
+            DatasetType incompleteType) {
+        boolean travelExecuted = plans.stream().anyMatch(plan -> plan.type() == DatasetType.TRAVEL);
+        boolean reimbursementExecuted = plans.stream()
+                .anyMatch(plan -> plan.type() == DatasetType.REIMBURSEMENT);
         List<AttendanceDayResult> attendance = missingPunch
                 ? List.of(new AttendanceDayResult(
                         LocalDate.of(2026, 9, 1), "MISSING", "NONE", "MISSING_PUNCH", List.of("punch")
                 ))
                 : List.of();
         return new Result(
-                new TravelSummary(Metric.complete(1), Metric.complete(new BigDecimal("10"))),
-                new ReimbursementSummary(
+                travelExecuted
+                        ? new TravelSummary(Metric.complete(1), Metric.complete(new BigDecimal("10")))
+                        : new TravelSummary(Metric.incomplete(), Metric.incomplete()),
+                reimbursementExecuted
+                        ? new ReimbursementSummary(
                         Metric.complete(new BigDecimal("20")),
                         Metric.complete(new BigDecimal("20")),
-                        Metric.complete(new BigDecimal("20"))
-                ),
+                        Metric.complete(new BigDecimal("20")))
+                        : new ReimbursementSummary(
+                        Metric.incomplete(), Metric.incomplete(), Metric.incomplete()),
                 attendance,
-                List.of()
+                plans.stream().map(plan -> new ModuleResult(
+                        plan.type(), plan.datasetCode(), ModuleStatus.SUCCESS,
+                        plan.type() != incompleteType,
+                        "snapshot-" + plan.type().name().toLowerCase(java.util.Locale.ROOT),
+                        "a".repeat(64)
+                )).toList()
         );
+    }
+
+    private List<DatasetPlan> plans(DatasetType... requestedTypes) {
+        Set<DatasetType> requested = Set.of(requestedTypes);
+        Set<DatasetType> attendance = Set.of(
+                DatasetType.TRAVEL, DatasetType.PUNCH, DatasetType.LEAVE,
+                DatasetType.SCHEDULE, DatasetType.CALENDAR
+        );
+        return java.util.Arrays.stream(DatasetType.values())
+                .filter(type -> requested.contains(type)
+                        || requested.contains(DatasetType.PUNCH) && attendance.contains(type))
+                .map(type -> new DatasetPlan(
+                        type,
+                        "PERSON_" + type.name(),
+                        Map.of("startDate", "2026-09-01", "endDate", "2026-09-10"),
+                        "DAY",
+                        Set.of(factCode(type)),
+                        requested.contains(type)
+                ))
+                .toList();
+    }
+
+    private String factCode(DatasetType type) {
+        return switch (type) {
+            case TRAVEL -> PersonBusinessQueryService.TRAVEL_RECORDS;
+            case PUNCH -> PersonBusinessQueryService.PUNCH_RECORDS;
+            case LEAVE -> PersonBusinessQueryService.LEAVE_RECORDS;
+            case SCHEDULE -> PersonBusinessQueryService.SCHEDULE_RECORDS;
+            case CALENDAR -> PersonBusinessQueryService.CALENDAR_RECORDS;
+            case REIMBURSEMENT -> PersonBusinessQueryService.REIMBURSEMENT_RECORDS;
+        };
     }
 }

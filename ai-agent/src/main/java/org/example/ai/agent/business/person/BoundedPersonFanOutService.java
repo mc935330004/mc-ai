@@ -2,6 +2,8 @@ package org.example.ai.agent.business.person;
 
 import jakarta.annotation.PreDestroy;
 import org.example.ai.agent.business.person.PersonBusinessQueryService.Command;
+import org.example.ai.agent.business.person.PersonBusinessQueryService.DatasetPlan;
+import org.example.ai.agent.business.person.PersonBusinessQueryService.DatasetType;
 import org.example.ai.agent.business.person.PersonBusinessQueryService.Result;
 import org.example.ai.agent.business.person.model.AttendanceDayResult;
 import org.example.ai.agent.business.person.model.MultiPersonSummary;
@@ -16,10 +18,13 @@ import org.springframework.util.StringUtils;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.EnumMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutionException;
@@ -213,7 +218,7 @@ public class BoundedPersonFanOutService {
                 if (result == null) {
                     return Outcome.failed();
                 }
-                return completePersonResult(result)
+                return completePersonResult(request, result)
                         ? Outcome.success(result)
                         : Outcome.partial(result);
             } catch (CancellationException exception) {
@@ -241,13 +246,16 @@ public class BoundedPersonFanOutService {
         return code != null && code >= 500 && code < 600;
     }
 
-    private boolean completePersonResult(Result result) {
+    private boolean completePersonResult(PersonRequest request, Result result) {
+        RequestedDatasets requested = requestedDatasets(request);
         return result.modules().stream().allMatch(
                 PersonBusinessQueryService.ModuleResult::complete
         )
-                && result.travelSummary().tripCount().complete()
-                && result.travelSummary().totalAmount().complete()
-                && result.reimbursementSummary().paidAmount().complete();
+                && (!requested.travel()
+                || result.travelSummary().tripCount().complete()
+                && result.travelSummary().totalAmount().complete())
+                && (!requested.reimbursement()
+                || result.reimbursementSummary().paidAmount().complete());
     }
 
     private MultiPersonSummary summarize(
@@ -261,6 +269,7 @@ public class BoundedPersonFanOutService {
         BigDecimal travelAmount = BigDecimal.ZERO;
         BigDecimal reimbursementAmount = BigDecimal.ZERO;
         boolean complete = true;
+        RequestedDatasets requested = requestedDatasets(requests.get(0));
 
         for (int index = 0; index < requests.size(); index++) {
             PersonRequest request = requests.get(index);
@@ -272,16 +281,26 @@ public class BoundedPersonFanOutService {
             }
             successfulPeople++;
             Result result = outcome.result();
-            tripCount += result.travelSummary().tripCount().value();
-            travelAmount = travelAmount.add(result.travelSummary().totalAmount().value());
-            reimbursementAmount = reimbursementAmount.add(
-                    result.reimbursementSummary().paidAmount().value()
-            );
-            addAllowedAnomaly(request, result, anomalies);
+            if (requested.travel()) {
+                tripCount += result.travelSummary().tripCount().value();
+                travelAmount = travelAmount.add(result.travelSummary().totalAmount().value());
+            }
+            if (requested.reimbursement()) {
+                reimbursementAmount = reimbursementAmount.add(
+                        result.reimbursementSummary().paidAmount().value()
+                );
+            }
+            addAllowedAnomaly(request, result, anomalies, requested.punch());
         }
 
         Aggregate aggregate = complete
-                ? new Aggregate(true, successfulPeople, tripCount, travelAmount, reimbursementAmount)
+                ? new Aggregate(
+                        true,
+                        successfulPeople,
+                        requested.travel() ? tripCount : null,
+                        requested.travel() ? travelAmount : null,
+                        requested.reimbursement() ? reimbursementAmount : null
+                )
                 : incompleteAggregate(successfulPeople);
         MultiPersonSummary.ExecutionStatus status = cancellationRequested
                 ? MultiPersonSummary.ExecutionStatus.CANCELLED
@@ -294,8 +313,9 @@ public class BoundedPersonFanOutService {
     private void addAllowedAnomaly(
             PersonRequest request,
             Result result,
-            List<AnomalyPerson> anomalies) {
-        if (!request.allowAnomalyDisclosure()) {
+            List<AnomalyPerson> anomalies,
+            boolean punchRequested) {
+        if (!punchRequested || !request.allowAnomalyDisclosure()) {
             return;
         }
         List<String> anomalyTypes = result.attendance().stream()
@@ -318,13 +338,57 @@ public class BoundedPersonFanOutService {
         if (requests == null || requests.isEmpty() || cancellationRequested == null) {
             throw new IllegalArgumentException("多人查询请求不完整");
         }
+        Map<DatasetType, DatasetPlan> expectedContract = null;
         for (PersonRequest request : requests) {
             if (request == null
                     || !StringUtils.hasText(request.displayLabel())
                     || request.command() == null) {
                 throw new IllegalArgumentException("多人查询人员项不完整");
             }
+            Map<DatasetType, DatasetPlan> contract = planContract(request.command().plans());
+            if (expectedContract == null) {
+                expectedContract = contract;
+            } else if (!expectedContract.equals(contract)) {
+                throw new IllegalArgumentException("多人查询必须使用完全相同的数据集计划契约");
+            }
         }
+    }
+
+    private Map<DatasetType, DatasetPlan> planContract(List<DatasetPlan> plans) {
+        if (plans == null || plans.isEmpty() || plans.size() > DatasetType.values().length) {
+            throw new IllegalArgumentException("多人查询数据集计划不完整");
+        }
+        EnumMap<DatasetType, DatasetPlan> contract = new EnumMap<>(DatasetType.class);
+        Set<String> codes = new HashSet<>();
+        boolean userRequested = false;
+        for (DatasetPlan plan : plans) {
+            if (plan == null || plan.type() == null
+                    || contract.putIfAbsent(plan.type(), plan) != null
+                    || !StringUtils.hasText(plan.datasetCode()) || !codes.add(plan.datasetCode())
+                    || plan.requiredFactCodes().isEmpty()) {
+                throw new IllegalArgumentException("多人查询数据集计划不完整或重复");
+            }
+            userRequested |= plan.userRequested();
+        }
+        if (!userRequested) {
+            throw new IllegalArgumentException("多人查询缺少用户请求数据集");
+        }
+        return Map.copyOf(contract);
+    }
+
+    private RequestedDatasets requestedDatasets(PersonRequest request) {
+        boolean travel = false;
+        boolean punch = false;
+        boolean reimbursement = false;
+        for (DatasetPlan plan : request.command().plans()) {
+            if (!plan.userRequested()) {
+                continue;
+            }
+            travel |= plan.type() == DatasetType.TRAVEL;
+            punch |= plan.type() == DatasetType.PUNCH;
+            reimbursement |= plan.type() == DatasetType.REIMBURSEMENT;
+        }
+        return new RequestedDatasets(travel, punch, reimbursement);
     }
 
     private boolean hasPending(Outcome[] outcomes) {
@@ -446,6 +510,10 @@ public class BoundedPersonFanOutService {
         private static Outcome cancelled() {
             return new Outcome(PersonQueryStatus.CANCELLED, null);
         }
+    }
+
+    /** 仅记录可对外汇总的用户请求根类型，内部考勤依赖不计入正式总数。 */
+    private record RequestedDatasets(boolean travel, boolean punch, boolean reimbursement) {
     }
 
     /** 使用单调时钟均匀发放调用配额，避免额外引入限流依赖或调度线程。 */
