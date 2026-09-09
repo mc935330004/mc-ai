@@ -955,6 +955,99 @@ class BusinessAssistantServiceTest {
     }
 
     @Test
+    void candidateSelectionShouldPreserveReimbursementScopeForNextTurn() throws Exception {
+        Fixture fixture = new Fixture();
+        when(fixture.intentResolver.resolve(any(), any()))
+                .thenReturn(personIntent(List.of("REIMBURSEMENT"), null))
+                .thenReturn(personIntent(List.of(), null));
+        when(fixture.subjectResolutionService.resolve(any()))
+                .thenReturn(new SubjectResolutionResult(
+                        SubjectResolutionState.CANDIDATES, null,
+                        List.of(new SubjectCandidate(
+                                BusinessSubjectType.PERSON, "candidate-token", "李四",
+                                "20***02", "工程部", null, null
+                        )),
+                        1, 20, 1, false, "请选择人员"
+                ))
+                .thenReturn(resolvedPerson());
+        when(fixture.reportDatasetService.list()).thenReturn(List.of(
+                personDataset(PersonBusinessQueryService.DatasetType.REIMBURSEMENT, "CFG_REIMBURSEMENT")
+        ));
+        when(fixture.personBusinessQueryService.query(any())).thenReturn(personResult(
+                List.of(PersonBusinessQueryService.DatasetType.REIMBURSEMENT), Set.of()
+        ));
+
+        fixture.service.handle(request("查李四报销"), fixture.stream, "run-1");
+        ArgumentCaptor<org.example.ai.agent.chat.memory.model.BusinessConversationState> state =
+                ArgumentCaptor.forClass(org.example.ai.agent.chat.memory.model.BusinessConversationState.class);
+        verify(fixture.conversationStateService).saveState(any(), any(), state.capture());
+        assertThat(state.getValue().getLastInput())
+                .containsEntry("subjectType", "PERSON")
+                .containsEntry("datasetCodes", List.of("REIMBURSEMENT"));
+        AgentRequest selection = request("选择李四");
+        selection.setInheritedInput(state.getValue().getLastInput());
+        selection.setExtra(Map.of("selectionToken", "candidate-token"));
+
+        fixture.service.handle(selection, fixture.stream, "run-2");
+
+        assertThat(capturedPersonCommand(fixture).plans())
+                .extracting(PersonBusinessQueryService.DatasetPlan::type)
+                .containsExactly(PersonBusinessQueryService.DatasetType.REIMBURSEMENT);
+        verify(fixture.personDatasetSelectionService, org.mockito.Mockito.times(2)).select(any());
+    }
+
+    @Test
+    void reimbursementOnlyShouldRequireOnlyItsSelectedConfiguration() throws Exception {
+        Fixture fixture = personFixture(personIntent(List.of("REIMBURSEMENT"), null),
+                personResult(List.of(PersonBusinessQueryService.DatasetType.REIMBURSEMENT), Set.of()));
+        when(fixture.reportDatasetService.list()).thenReturn(List.of(
+                personDataset(PersonBusinessQueryService.DatasetType.REIMBURSEMENT, "CFG_REIMBURSEMENT"),
+                personDataset(PersonBusinessQueryService.DatasetType.TRAVEL, "UNUSED_TRAVEL_A"),
+                personDataset(PersonBusinessQueryService.DatasetType.TRAVEL, "UNUSED_TRAVEL_B")
+        ));
+
+        fixture.service.handle(request("查询报销"), fixture.stream, "run-1");
+
+        assertThat(capturedPersonCommand(fixture).plans())
+                .extracting(PersonBusinessQueryService.DatasetPlan::datasetCode)
+                .containsExactly("CFG_REIMBURSEMENT");
+    }
+
+    @Test
+    void attendanceShouldFailWhenAnyDependencyConfigurationIsMissing() {
+        Fixture fixture = new Fixture();
+        when(fixture.intentResolver.resolve(any(), any()))
+                .thenReturn(personIntent(List.of("ATTENDANCE"), null));
+        when(fixture.subjectResolutionService.resolve(any())).thenReturn(resolvedPerson());
+        when(fixture.reportDatasetService.list()).thenReturn(List.of(
+                personDataset(PersonBusinessQueryService.DatasetType.TRAVEL, "CFG_TRAVEL"),
+                personDataset(PersonBusinessQueryService.DatasetType.PUNCH, "CFG_PUNCH"),
+                personDataset(PersonBusinessQueryService.DatasetType.LEAVE, "CFG_LEAVE"),
+                personDataset(PersonBusinessQueryService.DatasetType.SCHEDULE, "CFG_SCHEDULE")
+        ));
+
+        assertThatThrownBy(() -> fixture.service.handle(request("查询考勤"), fixture.stream, "run-1"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("数据集配置");
+        verify(fixture.personBusinessQueryService, never()).query(any());
+    }
+
+    @Test
+    void defaultPersonOverviewShouldStillRequireAllConfigurations() {
+        Fixture fixture = new Fixture();
+        when(fixture.intentResolver.resolve(any(), any())).thenReturn(personIntent(List.of(), null));
+        when(fixture.subjectResolutionService.resolve(any())).thenReturn(resolvedPerson());
+        when(fixture.reportDatasetService.list()).thenReturn(personDatasets().stream()
+                .filter(dataset -> !"PERSON_CALENDAR".equals(dataset.getDomainCode()))
+                .toList());
+
+        assertThatThrownBy(() -> fixture.service.handle(request("查询人员全览"), fixture.stream, "run-1"))
+                .isInstanceOf(IllegalStateException.class)
+                .hasMessageContaining("数据集配置");
+        verify(fixture.personBusinessQueryService, never()).query(any());
+    }
+
+    @Test
     void explicitPersonSemanticsShouldOverrideInheritedAndResetShouldClearThem() throws Exception {
         Fixture fixture = new Fixture();
         when(fixture.intentResolver.resolve(any(), any()))
@@ -1247,16 +1340,21 @@ class BusinessAssistantServiceTest {
 
     private List<ReportDataset> personDatasets() {
         return java.util.Arrays.stream(PersonBusinessQueryService.DatasetType.values())
-                .map(type -> {
-                    ReportDataset dataset = new ReportDataset();
-                    dataset.setDatasetCode("CFG_" + type.name());
-                    dataset.setDatasetName(type.name());
-                    dataset.setDomainCode("PERSON_" + type.name());
-                    dataset.setSubjectTypesJson("[\"PERSON\"]");
-                    dataset.setFieldPolicyChecksum("d".repeat(64));
-                    dataset.setEnabled(true);
-                    return dataset;
-                }).toList();
+                .map(type -> personDataset(type, "CFG_" + type.name()))
+                .toList();
+    }
+
+    private ReportDataset personDataset(
+            PersonBusinessQueryService.DatasetType type,
+            String datasetCode) {
+        ReportDataset dataset = new ReportDataset();
+        dataset.setDatasetCode(datasetCode);
+        dataset.setDatasetName(type.name());
+        dataset.setDomainCode("PERSON_" + type.name());
+        dataset.setSubjectTypesJson("[\"PERSON\"]");
+        dataset.setFieldPolicyChecksum("d".repeat(64));
+        dataset.setEnabled(true);
+        return dataset;
     }
 
     private ReportDataset dataset(String code) {

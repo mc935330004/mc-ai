@@ -150,7 +150,7 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
             ), request);
             BusinessSubjectType subjectType = resolveSubjectType(intent, request);
             if (subjectType == null) {
-                handleUnresolved(request, stream, agentRunId, intent,
+                handleUnresolved(request, stream, agentRunId, intent, null,
                         new SubjectResolutionResult(
                                 SubjectResolutionState.EMPTY, null, List.of(),
                                 1, DEFAULT_PAGE_SIZE, 0, false,
@@ -162,11 +162,13 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
                 intent = withSubjectType(intent, subjectType);
             }
             intent = inheritPersonDatasetContext(intent, request, subjectType);
+            Selection personSelection = subjectType == BusinessSubjectType.PROJECT
+                    ? null : personDatasetSelectionService.select(intent.datasetCodes());
             SubjectResolutionResult subject = subjectResolutionService.resolve(
                     subjectRequest(request, intent, agentRunId)
             );
             if (subject.state() != SubjectResolutionState.RESOLVED) {
-                handleUnresolved(request, stream, agentRunId, intent, subject);
+                handleUnresolved(request, stream, agentRunId, intent, personSelection, subject);
                 return;
             }
             SubjectCandidate resolved = subject.resolvedSubject();
@@ -176,9 +178,9 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
             if (resolved.type() == BusinessSubjectType.PROJECT) {
                 handleProject(request, stream, agentRunId, intent, resolved, context);
             } else if (resolved.type() == BusinessSubjectType.PERSON) {
-                handlePerson(request, stream, agentRunId, intent, resolved, context);
+                handlePerson(request, stream, agentRunId, intent, personSelection, resolved, context);
             } else {
-                handleDepartment(request, stream, agentRunId, intent, resolved, context);
+                handleDepartment(request, stream, agentRunId, intent, personSelection, resolved, context);
             }
         } catch (RuntimeException exception) {
             throw exception;
@@ -192,6 +194,7 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
             AgentStreamSession stream,
             String runId,
             BusinessQueryIntent intent,
+            Selection personSelection,
             SubjectResolutionResult result) throws Exception {
         ResponseContext context = new ResponseContext(
                 intent.subjectType() == null ? "" : intent.subjectType().name(),
@@ -199,7 +202,7 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
         );
         startWithContext(stream, context);
         if (result.state() == SubjectResolutionState.CANDIDATES) {
-            saveCandidateState(request, runId, intent, result.candidates());
+            saveCandidateState(request, runId, intent, personSelection, result.candidates());
             DatasetAnswerInput candidates = new DatasetAnswerInput(
                     "SUBJECT_CANDIDATES", "可选主体", DatasetExecutionStatus.SUCCESS, true,
                     Map.of("rows", candidateRows(result.candidates())), Map.of(), result.safeMessage()
@@ -280,11 +283,11 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
             AgentStreamSession stream,
             String runId,
             BusinessQueryIntent intent,
+            Selection selection,
             SubjectCandidate subject,
             ResponseContext context) throws Exception {
         Set<String> startedBlocks = new HashSet<>();
         StatusProgress progress = new StatusProgress(stream, datasetNames());
-        Selection selection = personDatasetSelectionService.select(intent.datasetCodes());
         List<DatasetPlan> plans = personPlans(intent, selection);
         PersonBusinessQueryService.Result result = personBusinessQueryService.query(
                 new PersonBusinessQueryService.Command(
@@ -326,9 +329,9 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
             AgentStreamSession stream,
             String runId,
             BusinessQueryIntent intent,
+            Selection selection,
             SubjectCandidate subject,
             ResponseContext context) throws Exception {
-        Selection selection = personDatasetSelectionService.select(intent.datasetCodes());
         DepartmentBusinessQueryService.Result result = departmentBusinessQueryService.query(
                 new DepartmentBusinessQueryService.Command(
                         runId, request.getUserId(), request.getConversationId(), request.getAuthorization(),
@@ -432,17 +435,18 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
     }
 
     private List<DatasetPlan> personPlans(BusinessQueryIntent intent, Selection selection) {
+        Set<DatasetType> requiredTypes = Set.copyOf(selection.executionTypes());
         EnumMap<DatasetType, ReportDataset> configured = new EnumMap<>(DatasetType.class);
         for (ReportDataset dataset : safeList(reportDatasetService.list())) {
             DatasetType type = personType(dataset);
-            if (type == null) {
+            if (type == null || !requiredTypes.contains(type)) {
                 continue;
             }
             if (configured.putIfAbsent(type, dataset) != null) {
                 throw new IllegalStateException("人员业务数据集逻辑类型配置重复：" + type.name());
             }
         }
-        if (configured.size() != DatasetType.values().length) {
+        if (configured.size() != requiredTypes.size()) {
             throw new IllegalStateException("人员业务查询缺少完整且唯一的已启用数据集配置");
         }
         Map<String, Object> query = canonicalQuery(intent);
@@ -808,12 +812,13 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
     }
 
     /**
-     * 候选轮只保存服务端已确认的主体类型，下一轮客户端仍只能回传并复核不透明选择令牌。
+     * 候选轮保存已确认的主体类型和规范业务语义，客户端仍只能回传并复核不透明选择令牌。
      */
     private void saveCandidateState(
             AgentRequest request,
             String runId,
             BusinessQueryIntent intent,
+            Selection personSelection,
             List<SubjectCandidate> candidates) {
         if (intent.subjectType() == null) {
             return;
@@ -825,7 +830,12 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
         state.setActiveObjectIds(candidates.stream().map(this::subjectId).limit(100).toList());
         state.setAwaitingClarification(true);
         state.setLastRunId(runId);
-        state.setLastInput(Map.of("subjectType", intent.subjectType().name()));
+        Map<String, Object> input = new LinkedHashMap<>();
+        input.put("subjectType", intent.subjectType().name());
+        if (personSelection != null) {
+            input.put("datasetCodes", personSelection.semanticCodes());
+        }
+        state.setLastInput(input);
         state.setUpdatedAt(LocalDateTime.now());
         try {
             conversationStateService.saveState(
