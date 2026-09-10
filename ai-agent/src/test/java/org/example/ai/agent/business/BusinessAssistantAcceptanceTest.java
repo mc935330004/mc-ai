@@ -135,14 +135,16 @@ class BusinessAssistantAcceptanceTest {
                         new ProjectPanoramaPlan.Module("CASH_FLOW", false, 20, 30_000)
                 )
         ));
-        when(executor.execute(any(), anyInt()))
-                .thenAnswer(invocation -> new PanoramaDatasetExecutor.Result(
-                        DatasetExecutionStatus.SUCCESS,
-                        execution(invocation.<DatasetExecutionRequest>getArgument(0),
-                                DatasetExecutionStatus.SUCCESS, true,
-                                channels("contractAmount", new BigDecimal("8600.00")))
-                ))
-                .thenReturn(new PanoramaDatasetExecutor.Result(DatasetExecutionStatus.DENIED, null));
+        when(executor.execute(any(), anyInt())).thenAnswer(invocation -> {
+            DatasetExecutionRequest request = invocation.getArgument(0);
+            return "CONTRACT".equals(request.datasetCode())
+                    ? new PanoramaDatasetExecutor.Result(
+                    DatasetExecutionStatus.SUCCESS,
+                    execution(request, DatasetExecutionStatus.SUCCESS, true,
+                            channels("contractAmount", new BigDecimal("8600.00")))
+            )
+                    : new PanoramaDatasetExecutor.Result(DatasetExecutionStatus.DENIED, null);
+        });
         when(snapshots.create(any())).thenAnswer(invocation -> snapshot(
                 "snapshot-contract", invocation.<BusinessSnapshotService.CreateCommand>getArgument(0)
                         .datasetCode()
@@ -175,7 +177,10 @@ class BusinessAssistantAcceptanceTest {
                 .extracting(BusinessSnapshotService.ItemCommand::associationType)
                 .isEqualTo(AssociationType.DIRECT);
 
-        FacadeHarness facade = new FacadeHarness();
+        FacadeHarness facade = new FacadeHarness(
+                new SubjectSelectionTokenService(10), service,
+                mock(PersonBusinessQueryService.class), mock(BusinessAssistantReportService.class)
+        );
         facade.intents(new BusinessQueryIntent(
                 BusinessSubjectType.PROJECT, PROJECT_CODE, null, null,
                 null, null, null, List.of(), false, null, false
@@ -183,7 +188,6 @@ class BusinessAssistantAcceptanceTest {
         when(facade.projects.search(any())).thenReturn(new SubjectDirectoryPage(
                 true, List.of(project("project-1", PROJECT_CODE)), 1, 20, 1, false
         ));
-        when(facade.panoramaExecution.execute(any(), any())).thenReturn(result);
         when(facade.datasets.list()).thenReturn(List.of(
                 dataset("CONTRACT"), dataset("CASH_FLOW")
         ));
@@ -239,7 +243,10 @@ class BusinessAssistantAcceptanceTest {
         verify(reuse, org.mockito.Mockito.times(6)).reuse(any());
         verify(execution, org.mockito.Mockito.times(6)).execute(any());
 
-        FacadeHarness facade = new FacadeHarness();
+        FacadeHarness facade = new FacadeHarness(
+                tokens, mock(ProjectPanoramaExecutionService.class), service,
+                mock(BusinessAssistantReportService.class)
+        );
         facade.intents(
                 personIntent(false, null),
                 personIntent(true, null)
@@ -248,7 +255,6 @@ class BusinessAssistantAcceptanceTest {
                 true, List.of(person()), 1, 20, 1, false
         ));
         when(facade.datasets.list()).thenReturn(personDatasets());
-        when(facade.personQuery.query(any())).thenReturn(reused, refreshed);
 
         facade.handle("我 6 次出差的总金额、缺卡日期和报销总金额");
         facade.handle("明确刷新上述数据");
@@ -258,12 +264,8 @@ class BusinessAssistantAcceptanceTest {
                 "报销申请金额", "1000.00", "报销审批金额", "900.00",
                 "报销支付金额", "800.00", "2026-08-03", "MISSING_PUNCH"
         );
-        ArgumentCaptor<PersonBusinessQueryService.Command> facadeCommands =
-                ArgumentCaptor.forClass(PersonBusinessQueryService.Command.class);
-        verify(facade.personQuery, org.mockito.Mockito.times(2)).query(facadeCommands.capture());
-        assertThat(facadeCommands.getAllValues())
-                .extracting(PersonBusinessQueryService.Command::refreshRequested)
-                .containsExactly(false, true);
+        verify(reuse, org.mockito.Mockito.times(12)).reuse(any());
+        verify(execution, org.mockito.Mockito.times(12)).execute(any());
     }
 
     @Test
@@ -326,14 +328,16 @@ class BusinessAssistantAcceptanceTest {
         assertThat(artifact.dataComplete()).isFalse();
 
         PersonBusinessQueryService.Result incomplete = incompletePersonResult();
-        FacadeHarness facade = new FacadeHarness();
+        FacadeHarness facade = new FacadeHarness(
+                tokens, mock(ProjectPanoramaExecutionService.class),
+                mock(PersonBusinessQueryService.class), reports
+        );
         facade.intents(personIntent(false, "PDF"));
         when(facade.people.search(any())).thenReturn(new SubjectDirectoryPage(
                 true, List.of(person()), 1, 20, 1, false
         ));
         when(facade.datasets.list()).thenReturn(personDatasets());
         when(facade.personQuery.query(any())).thenReturn(incomplete);
-        when(facade.reportService.createPersonReport(any())).thenReturn(artifact);
 
         facade.handle("查询张三在项目期间的出差、打卡和报销并生成 PDF");
 
@@ -347,10 +351,7 @@ class BusinessAssistantAcceptanceTest {
         assertThat(personCommand.getValue().plans()).allSatisfy(plan ->
                 assertThat(plan.canonicalInput()).containsEntry("projectCode", PROJECT_CODE)
         );
-        ArgumentCaptor<BusinessAssistantReportService.PersonReportCommand> reportCommand =
-                ArgumentCaptor.forClass(BusinessAssistantReportService.PersonReportCommand.class);
-        verify(facade.reportService).createPersonReport(reportCommand.capture());
-        assertThat(reportCommand.getValue().canonicalQuery()).containsEntry("projectCode", PROJECT_CODE);
+        verify(tasks, org.mockito.Mockito.times(2)).create(any());
     }
 
     @Test
@@ -590,15 +591,14 @@ class BusinessAssistantAcceptanceTest {
         private final ProjectDirectoryService projects = mock(ProjectDirectoryService.class);
         private final AuthorizedPersonDirectoryService people = mock(AuthorizedPersonDirectoryService.class);
         private final DepartmentDirectoryService departments = mock(DepartmentDirectoryService.class);
-        private final SubjectSelectionTokenService tokens = new SubjectSelectionTokenService(10);
-        private final ProjectPanoramaExecutionService panoramaExecution =
-                mock(ProjectPanoramaExecutionService.class);
+        private final SubjectSelectionTokenService tokens;
+        private final ProjectPanoramaExecutionService panoramaExecution;
         private final ProjectPanoramaSnapshotReuseService panoramaReuse =
                 mock(ProjectPanoramaSnapshotReuseService.class);
-        private final PersonBusinessQueryService personQuery = mock(PersonBusinessQueryService.class);
+        private final PersonBusinessQueryService personQuery;
         private final DepartmentBusinessQueryService departmentQuery = mock(DepartmentBusinessQueryService.class);
         private final ReportDatasetService datasets = mock(ReportDatasetService.class);
-        private final BusinessAssistantReportService reportService = mock(BusinessAssistantReportService.class);
+        private final BusinessAssistantReportService reportService;
         private final ConversationStateService conversationState = mock(ConversationStateService.class);
         private final AiChatSessionService chatSession = mock(AiChatSessionService.class);
         private final AgentStreamSession stream = mock(AgentStreamSession.class);
@@ -608,6 +608,23 @@ class BusinessAssistantAcceptanceTest {
         private final BusinessAssistantService service;
 
         private FacadeHarness() {
+            this(
+                    new SubjectSelectionTokenService(10),
+                    mock(ProjectPanoramaExecutionService.class),
+                    mock(PersonBusinessQueryService.class),
+                    mock(BusinessAssistantReportService.class)
+            );
+        }
+
+        private FacadeHarness(
+                SubjectSelectionTokenService tokens,
+                ProjectPanoramaExecutionService panoramaExecution,
+                PersonBusinessQueryService personQuery,
+                BusinessAssistantReportService reportService) {
+            this.tokens = tokens;
+            this.panoramaExecution = panoramaExecution;
+            this.personQuery = personQuery;
+            this.reportService = reportService;
             BusinessQueryIntentResolver intents = new BusinessQueryIntentResolver(
                     intentModel, objectMapper, new BusinessIntentValidator()
             );
