@@ -86,7 +86,8 @@ class ReportDatasetServiceTest {
                 capabilityCatalog,
                 objectMapper,
                 assembler,
-                adminValidator
+                adminValidator,
+                new ReportDatasetValidator()
         );
 
         when(capabilityCatalog.sideEffect(anyString())).thenReturn("READ");
@@ -203,6 +204,26 @@ class ReportDatasetServiceTest {
         assertThatThrownBy(() -> service.validateCurrent(dto))
                 .isInstanceOf(BusinessException.class)
                 .hasMessageContaining("字段字典不属于当前查询工作流");
+    }
+
+    @Test
+    void validationRejectsUnsupportedMaskStrategyBeforeSaving() {
+        ReportDatasetSaveDTO dto = validSaveDto();
+        dto.getFields().get(0).setMaskStrategy("CUSTOM_MASK");
+        when(workflowResolver.resolveByCode("QUERY_EMPLOYEE"))
+                .thenReturn(publishedWorkflow(
+                        "QUERY_EMPLOYEE",
+                        "{\"type\":\"object\",\"properties\":{\"employee_no\":{\"type\":\"string\"}}}",
+                        graphWithCapability("EMPLOYEE_QUERY")
+                ));
+
+        assertThatThrownBy(() -> service.saveCurrent(dto, "admin-1"))
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("maskStrategy")
+                .hasMessageContaining("CUSTOM_MASK");
+
+        verify(datasetMapper, never()).insert(any(ReportDataset.class));
+        verify(datasetMapper, never()).updateById(any(ReportDataset.class));
     }
 
     @Test

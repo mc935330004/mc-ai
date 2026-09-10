@@ -12,11 +12,13 @@ import lombok.RequiredArgsConstructor;
 import org.example.ai.agent.business.dataset.ReportDatasetAdminAssembler;
 import org.example.ai.agent.business.dataset.ReportDatasetAdminValidator;
 import org.example.ai.agent.business.dataset.ReportDatasetService;
+import org.example.ai.agent.business.dataset.ReportDatasetValidator;
 import org.example.ai.agent.business.dataset.dto.ReportDatasetSaveDTO;
 import org.example.ai.agent.business.dataset.entity.ReportDataset;
 import org.example.ai.agent.business.dataset.entity.ReportDatasetField;
 import org.example.ai.agent.business.dataset.mapper.ReportDatasetFieldMapper;
 import org.example.ai.agent.business.dataset.mapper.ReportDatasetMapper;
+import org.example.ai.agent.business.dataset.model.FieldPolicy;
 import org.example.ai.agent.business.dataset.vo.ReportDatasetDetailVO;
 import org.example.ai.agent.business.dataset.vo.ReportDatasetListVO;
 import org.example.ai.agent.business.dataset.vo.ReportDatasetValidationVO;
@@ -67,6 +69,7 @@ public class ReportDatasetServiceImpl
     private final ObjectMapper objectMapper;
     private final ReportDatasetAdminAssembler adminAssembler;
     private final ReportDatasetAdminValidator adminValidator;
+    private final ReportDatasetValidator datasetValidator;
 
     /**
      * 管理端分页只查询当前配置，并用一次字段查询统计当前页字段数量。
@@ -414,7 +417,29 @@ public class ReportDatasetServiceImpl
             }
             result.add(field);
         }
+        validateFieldPolicies(result);
         return result;
+    }
+
+    /** 复用运行时字段策略规则，避免保存后才发现脱敏配置不可执行。 */
+    private void validateFieldPolicies(List<ReportDatasetField> fields) {
+        List<FieldPolicy> policies = fields.stream()
+                .map(field -> new FieldPolicy(
+                        field.getFactCode(),
+                        field.getFactType(),
+                        Boolean.TRUE.equals(field.getCalculable()),
+                        Boolean.TRUE.equals(field.getDisplayable()),
+                        Boolean.TRUE.equals(field.getExportable()),
+                        Boolean.TRUE.equals(field.getModelVisible()),
+                        field.getMaskStrategy(),
+                        field.getGrain()
+                ))
+                .toList();
+        try {
+            datasetValidator.validateFieldPolicies(policies);
+        } catch (IllegalArgumentException exception) {
+            throw new BusinessException(400, exception.getMessage());
+        }
     }
 
     private void requirePolicyFlag(Boolean value, String name) {
