@@ -693,6 +693,57 @@ class BusinessAssistantServiceTest {
     }
 
     @Test
+    void personProjectContextDoesNotUseProjectCodeAsPersonLocator() throws Exception {
+        Fixture fixture = new Fixture();
+        when(fixture.intentResolver.resolve(any(), any())).thenReturn(new BusinessQueryIntent(
+                BusinessSubjectType.PERSON, "P-1001", "张三", null,
+                null, java.time.LocalDate.of(2026, 8, 1), java.time.LocalDate.of(2026, 8, 31),
+                List.of("TRAVEL"), false, null, false
+        ));
+        when(fixture.subjectResolutionService.resolve(any())).thenReturn(new SubjectResolutionResult(
+                SubjectResolutionState.EMPTY, null, List.of(), 1, 20, 0, false, "未找到"
+        ));
+
+        fixture.service.handle(request("查询张三在 P-1001 项目期间的出差"), fixture.stream, "run-1");
+
+        ArgumentCaptor<SubjectResolutionRequest> request =
+                ArgumentCaptor.forClass(SubjectResolutionRequest.class);
+        verify(fixture.subjectResolutionService).resolve(request.capture());
+        assertThat(request.getValue().subjectType()).isEqualTo(BusinessSubjectType.PERSON);
+        assertThat(request.getValue().searchName()).isEqualTo("张三");
+        assertThat(request.getValue().projectCode()).isNull();
+    }
+
+    @Test
+    void personProjectContextKeepsProjectCodeForDatasetsAndPdfReport() throws Exception {
+        Fixture fixture = new Fixture();
+        when(fixture.intentResolver.resolve(any(), any())).thenReturn(new BusinessQueryIntent(
+                BusinessSubjectType.PERSON, "P-1001", "张三", null,
+                null, java.time.LocalDate.of(2026, 8, 1), java.time.LocalDate.of(2026, 8, 31),
+                List.of("TRAVEL"), false, "PDF", false
+        ));
+        when(fixture.subjectResolutionService.resolve(any())).thenReturn(resolvedPerson());
+        when(fixture.reportDatasetService.list()).thenReturn(personDatasets());
+        when(fixture.personBusinessQueryService.query(any())).thenReturn(personReportResult());
+        when(fixture.selectionTokenService.resolve(
+                "selection-token", "user-1", "conversation-1", BusinessSubjectType.PERSON
+        )).thenReturn(java.util.Optional.of("employee-raw-1"));
+        when(fixture.reportTaskService.create(any())).thenReturn(reportTask("person-report-task", "PDF"));
+
+        fixture.service.handle(
+                request("查询张三在 P-1001 项目期间的出差并生成 PDF"), fixture.stream, "run-1"
+        );
+
+        assertThat(capturedPersonCommand(fixture).plans()).allSatisfy(plan ->
+                assertThat(plan.canonicalInput()).containsEntry("projectCode", "P-1001")
+        );
+        ArgumentCaptor<BusinessAssistantReportService.PersonReportCommand> report =
+                ArgumentCaptor.forClass(BusinessAssistantReportService.PersonReportCommand.class);
+        verify(fixture.reportService).createPersonReport(report.capture());
+        assertThat(report.getValue().canonicalQuery()).containsEntry("projectCode", "P-1001");
+    }
+
+    @Test
     void personPdfShouldCreateReportWithRawSubjectAndSafeTerminalSections() throws Exception {
         Fixture fixture = new Fixture();
         when(fixture.intentResolver.resolve(any(), any())).thenReturn(new BusinessQueryIntent(

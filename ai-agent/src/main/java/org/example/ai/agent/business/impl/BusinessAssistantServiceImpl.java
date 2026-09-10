@@ -860,14 +860,16 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
         boolean managerSearch = !selected && subjectType == BusinessSubjectType.PROJECT
                 && request.getEffectiveQuestion().contains("项目经理")
                 && StringUtils.hasText(intent.personName());
-        String name = selected || myProjects || managerSearch || StringUtils.hasText(intent.projectCode())
+        boolean projectCodeSearch = !selected && subjectType == BusinessSubjectType.PROJECT
+                && StringUtils.hasText(intent.projectCode());
+        String name = selected || myProjects || managerSearch || projectCodeSearch
                 ? null : intent.personName();
         return new SubjectResolutionRequest(
                 runId, request.getUserId(), request.getConversationId(), request.getAuthorization(), Map.of(),
                 subjectType, selectionToken,
-                selected ? null : intent.projectCode(), name,
+                projectCodeSearch ? intent.projectCode() : null, name,
                 managerSearch ? intent.personName() : null,
-                selected ? null : intent.projectYear(), myProjects,
+                !selected && subjectType == BusinessSubjectType.PROJECT ? intent.projectYear() : null, myProjects,
                 selected ? null : intent.employeeNo(), pageNumber(request), pageSize(request)
         );
     }
@@ -983,6 +985,9 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
 
     private Map<String, Object> canonicalQuery(BusinessQueryIntent intent) {
         Map<String, Object> query = new LinkedHashMap<>();
+        if (StringUtils.hasText(intent.projectCode())) {
+            query.put("projectCode", intent.projectCode().trim());
+        }
         if (intent.projectYear() != null) {
             query.put("projectYear", intent.projectYear());
         }

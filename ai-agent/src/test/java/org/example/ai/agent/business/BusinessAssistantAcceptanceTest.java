@@ -1,5 +1,8 @@
 package org.example.ai.agent.business;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.example.ai.agent.business.answer.BusinessAnswerModelService;
+import org.example.ai.agent.business.answer.DeterministicBusinessAnswerComposer;
 import org.example.ai.agent.business.dataset.ReportDatasetExecutionService;
 import org.example.ai.agent.business.dataset.ReportDatasetService;
 import org.example.ai.agent.business.dataset.entity.ReportDataset;
@@ -9,11 +12,16 @@ import org.example.ai.agent.business.dataset.model.DatasetExecutionSource;
 import org.example.ai.agent.business.model.AssociationType;
 import org.example.ai.agent.business.model.BusinessSubjectType;
 import org.example.ai.agent.business.model.DatasetExecutionStatus;
+import org.example.ai.agent.business.department.DepartmentBusinessQueryService;
+import org.example.ai.agent.business.intent.BusinessIntentValidator;
+import org.example.ai.agent.business.intent.BusinessQueryIntent;
+import org.example.ai.agent.business.intent.BusinessQueryIntentResolver;
 import org.example.ai.agent.business.panorama.PanoramaDatasetExecutor;
 import org.example.ai.agent.business.panorama.ProjectIssueRuleService;
 import org.example.ai.agent.business.panorama.ProjectPanoramaExecutionService;
 import org.example.ai.agent.business.panorama.ProjectPanoramaProfileService;
 import org.example.ai.agent.business.panorama.ProjectPanoramaSnapshotService;
+import org.example.ai.agent.business.panorama.ProjectPanoramaSnapshotReuseService;
 import org.example.ai.agent.business.panorama.ProjectSubjectAuthorizationService;
 import org.example.ai.agent.business.panorama.model.AuthorizedProjectSubject;
 import org.example.ai.agent.business.panorama.model.PanoramaExecutionState;
@@ -22,8 +30,9 @@ import org.example.ai.agent.business.panorama.model.ProjectPanoramaPlan;
 import org.example.ai.agent.business.panorama.model.ProjectPanoramaResult;
 import org.example.ai.agent.business.person.AttendanceReconciliationService;
 import org.example.ai.agent.business.person.PersonBusinessQueryService;
+import org.example.ai.agent.business.person.PersonDatasetSelectionService;
 import org.example.ai.agent.business.person.PersonSnapshotReuseService;
-import org.example.ai.agent.business.person.ProjectRecordAssociationService;
+import org.example.ai.agent.business.person.model.AttendanceDayResult;
 import org.example.ai.agent.business.report.BusinessAssistantReportService;
 import org.example.ai.agent.business.report.CompositeReportTaskService;
 import org.example.ai.agent.business.report.entity.CompositeReportTask;
@@ -38,13 +47,21 @@ import org.example.ai.agent.business.subject.SubjectResolutionService;
 import org.example.ai.agent.business.subject.SubjectSelectionTokenService;
 import org.example.ai.agent.business.subject.model.AuthorizedSubjectCandidate;
 import org.example.ai.agent.business.subject.model.SubjectDirectoryPage;
-import org.example.ai.agent.business.subject.model.SubjectResolutionRequest;
-import org.example.ai.agent.business.subject.model.SubjectResolutionState;
+import org.example.ai.agent.chat.entity.AgentRequest;
+import org.example.ai.agent.chat.memory.service.ConversationStateService;
+import org.example.ai.agent.chat.service.AiChatSessionService;
+import org.example.ai.agent.chat.stream.ChatResponseAccumulator;
+import org.example.ai.agent.chat.stream.ResponseStreamContext;
+import org.example.ai.agent.chat.stream.ResponseStreamEventFactory;
+import org.example.ai.agent.chat.support.AgentStreamSession;
+import org.example.ai.agent.common.modelusage.TrackedChatClientService;
 import org.example.ai.agent.common.enums.protocol.BlockStatus;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.springframework.context.annotation.ClassPathScanningCandidateComponentProvider;
 import org.springframework.core.type.filter.AssignableTypeFilter;
+import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.ai.chat.prompt.ChatOptions;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
@@ -62,6 +79,9 @@ import static org.example.ai.agent.business.BusinessAssistantAcceptanceFixture.S
 import static org.example.ai.agent.business.BusinessAssistantAcceptanceFixture.USER_ID;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -76,33 +96,25 @@ class BusinessAssistantAcceptanceTest {
     private static final String POLICY_CHECKSUM = "a".repeat(64);
 
     @Test
-    void myProjectsReturnsPagedAuthorizedCandidatesBeforeAnyBusinessModuleCanRun() {
-        ProjectDirectoryService projects = mock(ProjectDirectoryService.class);
-        AuthorizedPersonDirectoryService people = mock(AuthorizedPersonDirectoryService.class);
-        DepartmentDirectoryService departments = mock(DepartmentDirectoryService.class);
-        SubjectResolutionService service = new SubjectResolutionService(
-                projects, people, departments, new SubjectSelectionTokenService(10)
-        );
-        when(projects.search(any())).thenReturn(new SubjectDirectoryPage(
+    void myProjectsShowsPagedAuthorizedCandidatesAndExecutesNoBusinessModule() {
+        FacadeHarness facade = new FacadeHarness();
+        facade.intents(new BusinessQueryIntent(
+                BusinessSubjectType.PROJECT, null, null, null,
+                LocalDate.now().getYear(), null, null, List.of(), false, null, false
+        ));
+        when(facade.projects.search(any())).thenReturn(new SubjectDirectoryPage(
                 true,
                 List.of(project("project-1", PROJECT_CODE), project("project-2", "XXXT2674050")),
                 1, 2, 6, true
         ));
 
-        var result = service.resolve(new SubjectResolutionRequest(
-                "run-1", USER_ID, SESSION_ID, "Bearer current-user", Map.of(),
-                BusinessSubjectType.PROJECT, null, null, null, null,
-                LocalDate.now().getYear(), true, null, 1, 2
-        ));
+        facade.handle("我的项目");
 
-        assertThat(result.state()).isEqualTo(SubjectResolutionState.CANDIDATES);
-        assertThat(result.resolvedSubject()).isNull();
-        assertThat(result.candidates()).extracting(candidate -> candidate.projectCode())
-                .containsExactly(PROJECT_CODE, "XXXT2674050");
-        assertThat(result.totalCount()).isEqualTo(6);
-        assertThat(result.hasNext()).isTrue();
-        verify(people, never()).search(any());
-        verify(departments, never()).search(any());
+        assertThat(facade.savedJson()).contains(
+                "SUBJECT_CANDIDATES", PROJECT_CODE, "XXXT2674050", "选择凭证"
+        );
+        verify(facade.panoramaExecution, never()).execute(any(), any());
+        verify(facade.personQuery, never()).query(any());
     }
 
     @Test
@@ -162,6 +174,26 @@ class BusinessAssistantAcceptanceTest {
         assertThat(created.getValue().items()).singleElement()
                 .extracting(BusinessSnapshotService.ItemCommand::associationType)
                 .isEqualTo(AssociationType.DIRECT);
+
+        FacadeHarness facade = new FacadeHarness();
+        facade.intents(new BusinessQueryIntent(
+                BusinessSubjectType.PROJECT, PROJECT_CODE, null, null,
+                null, null, null, List.of(), false, null, false
+        ));
+        when(facade.projects.search(any())).thenReturn(new SubjectDirectoryPage(
+                true, List.of(project("project-1", PROJECT_CODE)), 1, 20, 1, false
+        ));
+        when(facade.panoramaExecution.execute(any(), any())).thenReturn(result);
+        when(facade.datasets.list()).thenReturn(List.of(
+                dataset("CONTRACT"), dataset("CASH_FLOW")
+        ));
+
+        facade.handle("查询 XXXT2674040 项目全景");
+
+        assertThat(facade.savedJson()).contains(
+                PROJECT_CODE, "CONTRACT", "contractAmount", "8600.00",
+                "CASH_FLOW", "DENIED", "\"dataComplete\":false"
+        );
     }
 
     @Test
@@ -206,38 +238,43 @@ class BusinessAssistantAcceptanceTest {
                 .containsOnly(PersonBusinessQueryService.ModuleStatus.SUCCESS);
         verify(reuse, org.mockito.Mockito.times(6)).reuse(any());
         verify(execution, org.mockito.Mockito.times(6)).execute(any());
+
+        FacadeHarness facade = new FacadeHarness();
+        facade.intents(
+                personIntent(false, null),
+                personIntent(true, null)
+        );
+        when(facade.people.search(any())).thenReturn(new SubjectDirectoryPage(
+                true, List.of(person()), 1, 20, 1, false
+        ));
+        when(facade.datasets.list()).thenReturn(personDatasets());
+        when(facade.personQuery.query(any())).thenReturn(reused, refreshed);
+
+        facade.handle("我 6 次出差的总金额、缺卡日期和报销总金额");
+        facade.handle("明确刷新上述数据");
+
+        assertThat(facade.savedJsons().get(0)).contains(
+                "出差次数", "6", "出差总金额", "600.60",
+                "报销申请金额", "1000.00", "报销审批金额", "900.00",
+                "报销支付金额", "800.00", "2026-08-03", "MISSING_PUNCH"
+        );
+        ArgumentCaptor<PersonBusinessQueryService.Command> facadeCommands =
+                ArgumentCaptor.forClass(PersonBusinessQueryService.Command.class);
+        verify(facade.personQuery, org.mockito.Mockito.times(2)).query(facadeCommands.capture());
+        assertThat(facadeCommands.getAllValues())
+                .extracting(PersonBusinessQueryService.Command::refreshRequested)
+                .containsExactly(false, true);
     }
 
     @Test
-    void personProjectPeriodPdfKeepsContextOutOfTotalsAndDisclosesIncompleteSection() {
-        ProjectRecordAssociationService association = new ProjectRecordAssociationService();
-        ProjectRecordAssociationService.ProjectAssociationResult associated = association.associate(
-                new ProjectRecordAssociationService.ProjectIdentity(PROJECT_CODE, "project-1"),
-                LocalDate.of(2026, 8, 1), LocalDate.of(2026, 8, 31),
-                List.of(
-                        record("direct-travel", PROJECT_CODE, null, "100.00", "0"),
-                        record("context-reimbursement", null, LocalDate.of(2026, 1, 1), "0", "900.00")
-                )
-        );
-        assertThat(associated.directRecords()).singleElement()
-                .extracting(ProjectRecordAssociationService.AssociatedRecord::type)
-                .isEqualTo(AssociationType.DIRECT);
-        assertThat(associated.contextRecords()).singleElement()
-                .extracting(ProjectRecordAssociationService.AssociatedRecord::type)
-                .isEqualTo(AssociationType.PROJECT_PERSON_PERIOD);
-        assertThat(associated.contextLabel()).contains("不计入项目汇总");
-        assertThat(associated.totals().travelAmount()).isEqualByComparingTo("100.00");
-        assertThat(associated.totals().reimbursementAmount()).isEqualByComparingTo("0");
-
+    void personProjectPeriodPdfKeepsProjectContextAndDisclosesIncompleteSection() {
         SubjectSelectionTokenService tokens = new SubjectSelectionTokenService(10);
         String token = tokens.issue(EMPLOYEE_NO, USER_ID, SESSION_ID, BusinessSubjectType.PERSON);
         ReportDatasetService datasets = mock(ReportDatasetService.class);
         BusinessSnapshotReferenceValidationService validation =
                 mock(BusinessSnapshotReferenceValidationService.class);
         CompositeReportTaskService tasks = mock(CompositeReportTaskService.class);
-        when(datasets.list()).thenReturn(List.of(
-                dataset("PERSON_TRAVEL"), dataset("PERSON_PUNCH"), dataset("PERSON_REIMBURSEMENT")
-        ));
+        when(datasets.list()).thenReturn(personDatasets());
         when(validation.validate(any())).thenReturn(true);
         CompositeReportTask task = new CompositeReportTask();
         task.setTaskId("person-pdf-1");
@@ -260,6 +297,9 @@ class BusinessAssistantAcceptanceTest {
                 List.of(
                         module(PersonBusinessQueryService.DatasetType.TRAVEL, "PERSON_TRAVEL", true),
                         module(PersonBusinessQueryService.DatasetType.PUNCH, "PERSON_PUNCH", true),
+                        module(PersonBusinessQueryService.DatasetType.LEAVE, "PERSON_LEAVE", true),
+                        module(PersonBusinessQueryService.DatasetType.SCHEDULE, "PERSON_SCHEDULE", true),
+                        module(PersonBusinessQueryService.DatasetType.CALENDAR, "PERSON_CALENDAR", true),
                         new PersonBusinessQueryService.ModuleResult(
                                 PersonBusinessQueryService.DatasetType.REIMBURSEMENT,
                                 "PERSON_REIMBURSEMENT",
@@ -274,12 +314,43 @@ class BusinessAssistantAcceptanceTest {
         verify(tasks).create(command.capture());
         assertThat(command.getValue().plannedReport().plan().format()).isEqualTo("PDF");
         assertThat(command.getValue().plannedReport().plan().dataComplete()).isFalse();
+        assertThat(command.getValue().canonicalQuery()).containsEntry("projectCode", PROJECT_CODE);
         assertThat(command.getValue().plannedReport().plan().sections())
                 .extracting(section -> section.status() + ":" + section.safeMessage())
-                .containsExactly("REUSED:null", "REUSED:null", "FAILED:数据查询失败，章节未纳入");
+                .containsExactly(
+                        "REUSED:null", "REUSED:null", "REUSED:null",
+                        "REUSED:null", "REUSED:null", "FAILED:数据查询失败，章节未纳入"
+                );
         assertThat(artifact.format()).isEqualTo("PDF");
         assertThat(artifact.status()).isEqualTo(BlockStatus.PENDING);
         assertThat(artifact.dataComplete()).isFalse();
+
+        PersonBusinessQueryService.Result incomplete = incompletePersonResult();
+        FacadeHarness facade = new FacadeHarness();
+        facade.intents(personIntent(false, "PDF"));
+        when(facade.people.search(any())).thenReturn(new SubjectDirectoryPage(
+                true, List.of(person()), 1, 20, 1, false
+        ));
+        when(facade.datasets.list()).thenReturn(personDatasets());
+        when(facade.personQuery.query(any())).thenReturn(incomplete);
+        when(facade.reportService.createPersonReport(any())).thenReturn(artifact);
+
+        facade.handle("查询张三在项目期间的出差、打卡和报销并生成 PDF");
+
+        assertThat(facade.savedJson()).contains(
+                "PDF", "person-pdf-1", "PERSON_REIMBURSEMENT",
+                "FAILED", "数据不完整", "\"dataComplete\":false"
+        );
+        ArgumentCaptor<PersonBusinessQueryService.Command> personCommand =
+                ArgumentCaptor.forClass(PersonBusinessQueryService.Command.class);
+        verify(facade.personQuery).query(personCommand.capture());
+        assertThat(personCommand.getValue().plans()).allSatisfy(plan ->
+                assertThat(plan.canonicalInput()).containsEntry("projectCode", PROJECT_CODE)
+        );
+        ArgumentCaptor<BusinessAssistantReportService.PersonReportCommand> reportCommand =
+                ArgumentCaptor.forClass(BusinessAssistantReportService.PersonReportCommand.class);
+        verify(facade.reportService).createPersonReport(reportCommand.capture());
+        assertThat(reportCommand.getValue().canonicalQuery()).containsEntry("projectCode", PROJECT_CODE);
     }
 
     @Test
@@ -291,6 +362,59 @@ class BusinessAssistantAcceptanceTest {
         assertThat(scanner.findCandidateComponents("org.example.ai.agent"))
                 .extracting(definition -> definition.getBeanClassName())
                 .containsExactly("org.example.ai.agent.business.impl.BusinessAssistantServiceImpl");
+    }
+
+    private BusinessQueryIntent personIntent(boolean refresh, String exportFormat) {
+        boolean projectContext = exportFormat != null;
+        return new BusinessQueryIntent(
+                BusinessSubjectType.PERSON,
+                projectContext ? PROJECT_CODE : null,
+                projectContext ? "张三" : null,
+                null, null,
+                LocalDate.of(2026, 8, 3), LocalDate.of(2026, 8, 5),
+                List.of("TRAVEL", "ATTENDANCE", "REIMBURSEMENT"),
+                refresh, exportFormat, false
+        );
+    }
+
+    private List<ReportDataset> personDatasets() {
+        return Arrays.stream(PersonBusinessQueryService.DatasetType.values())
+                .map(type -> dataset(datasetCode(type)))
+                .toList();
+    }
+
+    private PersonBusinessQueryService.Result incompletePersonResult() {
+        List<AttendanceDayResult> attendance = List.of(
+                new AttendanceDayResult(
+                        LocalDate.of(2026, 8, 3), "NO_PUNCH", "NONE",
+                        "MISSING_PUNCH", List.of(PersonBusinessQueryService.PUNCH_RECORDS)
+                )
+        );
+        return new PersonBusinessQueryService.Result(
+                new PersonBusinessQueryService.TravelSummary(
+                        PersonBusinessQueryService.Metric.complete(6),
+                        PersonBusinessQueryService.Metric.complete(new BigDecimal("600.60"))
+                ),
+                new PersonBusinessQueryService.ReimbursementSummary(
+                        PersonBusinessQueryService.Metric.incomplete(),
+                        PersonBusinessQueryService.Metric.incomplete(),
+                        PersonBusinessQueryService.Metric.incomplete()
+                ),
+                attendance,
+                List.of(
+                        module(PersonBusinessQueryService.DatasetType.TRAVEL, "PERSON_TRAVEL", true),
+                        module(PersonBusinessQueryService.DatasetType.PUNCH, "PERSON_PUNCH", true),
+                        module(PersonBusinessQueryService.DatasetType.LEAVE, "PERSON_LEAVE", true),
+                        module(PersonBusinessQueryService.DatasetType.SCHEDULE, "PERSON_SCHEDULE", true),
+                        module(PersonBusinessQueryService.DatasetType.CALENDAR, "PERSON_CALENDAR", true),
+                        new PersonBusinessQueryService.ModuleResult(
+                                PersonBusinessQueryService.DatasetType.REIMBURSEMENT,
+                                "PERSON_REIMBURSEMENT",
+                                PersonBusinessQueryService.ModuleStatus.FAILED,
+                                false, null, null
+                        )
+                )
+        );
     }
 
     private void assertPersonStory(PersonBusinessQueryService.Result result) {
@@ -440,20 +564,12 @@ class BusinessAssistantAcceptanceTest {
         };
     }
 
-    private ProjectRecordAssociationService.BusinessRecord record(
-            String id, String projectCode, LocalDate rosterStart,
-            String travelAmount, String reimbursementAmount) {
-        return new ProjectRecordAssociationService.BusinessRecord(
-                id, projectCode, null, LocalDate.of(2026, 8, 15),
-                rosterStart, LocalDate.of(2026, 12, 31),
-                BigDecimal.ZERO, BigDecimal.ZERO,
-                new BigDecimal(travelAmount), new BigDecimal(reimbursementAmount)
-        );
-    }
-
     private ReportDataset dataset(String code) {
         ReportDataset dataset = new ReportDataset();
         dataset.setDatasetCode(code);
+        dataset.setDatasetName(code);
+        dataset.setDomainCode(code);
+        dataset.setSubjectTypesJson("[\"PERSON\",\"PROJECT\"]");
         dataset.setEnabled(true);
         dataset.setFieldPolicyChecksum(POLICY_CHECKSUM);
         return dataset;
@@ -465,5 +581,99 @@ class BusinessAssistantAcceptanceTest {
                 type, code, PersonBusinessQueryService.ModuleStatus.REUSED,
                 complete, "snapshot-" + code, POLICY_CHECKSUM
         );
+    }
+
+    private final class FacadeHarness {
+        private final ObjectMapper objectMapper = new ObjectMapper().findAndRegisterModules();
+        private final TrackedChatClientService intentModel = mock(TrackedChatClientService.class);
+        private final ChatResponse intentResponse = mock(ChatResponse.class, RETURNS_DEEP_STUBS);
+        private final ProjectDirectoryService projects = mock(ProjectDirectoryService.class);
+        private final AuthorizedPersonDirectoryService people = mock(AuthorizedPersonDirectoryService.class);
+        private final DepartmentDirectoryService departments = mock(DepartmentDirectoryService.class);
+        private final SubjectSelectionTokenService tokens = new SubjectSelectionTokenService(10);
+        private final ProjectPanoramaExecutionService panoramaExecution =
+                mock(ProjectPanoramaExecutionService.class);
+        private final ProjectPanoramaSnapshotReuseService panoramaReuse =
+                mock(ProjectPanoramaSnapshotReuseService.class);
+        private final PersonBusinessQueryService personQuery = mock(PersonBusinessQueryService.class);
+        private final DepartmentBusinessQueryService departmentQuery = mock(DepartmentBusinessQueryService.class);
+        private final ReportDatasetService datasets = mock(ReportDatasetService.class);
+        private final BusinessAssistantReportService reportService = mock(BusinessAssistantReportService.class);
+        private final ConversationStateService conversationState = mock(ConversationStateService.class);
+        private final AiChatSessionService chatSession = mock(AiChatSessionService.class);
+        private final AgentStreamSession stream = mock(AgentStreamSession.class);
+        private final ChatResponseAccumulator accumulator = new ChatResponseAccumulator(
+                new ResponseStreamContext("response-1", "run-1", "conversation-1")
+        );
+        private final BusinessAssistantService service;
+
+        private FacadeHarness() {
+            BusinessQueryIntentResolver intents = new BusinessQueryIntentResolver(
+                    intentModel, objectMapper, new BusinessIntentValidator()
+            );
+            SubjectResolutionService subjects = new SubjectResolutionService(
+                    projects, people, departments, tokens
+            );
+            BusinessAnswerModelService answerModel = mock(BusinessAnswerModelService.class);
+            when(answerModel.generate(any())).thenReturn("确定性结果说明");
+            when(stream.getMessageId()).thenReturn("response-1");
+            when(stream.getChatResponseAccumulator()).thenReturn(accumulator);
+            when(stream.getResponseEventFactory()).thenReturn(mock(ResponseStreamEventFactory.class));
+            try {
+                doAnswer(invocation -> {
+                    accumulator.completeBlock(invocation.getArgument(0));
+                    return null;
+                }).when(stream).publishResponseBlock(any());
+            } catch (Exception exception) {
+                throw new IllegalStateException(exception);
+            }
+            doAnswer(invocation -> {
+                accumulator.setDataComplete(invocation.getArgument(0));
+                return null;
+            }).when(stream).setResponseDataComplete(org.mockito.ArgumentMatchers.anyBoolean());
+            service = new org.example.ai.agent.business.impl.BusinessAssistantServiceImpl(
+                    intents, subjects, panoramaExecution, panoramaReuse,
+                    personQuery, new PersonDatasetSelectionService(), departmentQuery,
+                    datasets, new DeterministicBusinessAnswerComposer(answerModel), reportService,
+                    conversationState, chatSession, objectMapper
+            );
+        }
+
+        private void intents(BusinessQueryIntent... values) {
+            String[] json = Arrays.stream(values).map(value -> {
+                try {
+                    return objectMapper.writeValueAsString(value);
+                } catch (Exception exception) {
+                    throw new IllegalStateException(exception);
+                }
+            }).toArray(String[]::new);
+            when(intentResponse.getResult().getOutput().getText())
+                    .thenReturn(json[0], Arrays.copyOfRange(json, 1, json.length));
+            when(intentModel.call(
+                    any(), anyString(), anyString(), any(ChatOptions.Builder.class)
+            )).thenReturn(intentResponse);
+        }
+
+        private void handle(String question) {
+            AgentRequest request = new AgentRequest();
+            request.setConversationId("conversation-1");
+            request.setUserId(USER_ID);
+            request.setUserQuestion(question);
+            request.setAuthorization("Bearer current-user");
+            request.setModelCode("model-1");
+            service.handle(request, stream, "run-1");
+        }
+
+        private List<String> savedJsons() {
+            ArgumentCaptor<String> json = ArgumentCaptor.forClass(String.class);
+            verify(chatSession, org.mockito.Mockito.atLeastOnce()).saveAssistantMessage(
+                    any(), any(), any(), any(), any(), any(), json.capture()
+            );
+            return json.getAllValues();
+        }
+
+        private String savedJson() {
+            return savedJsons().get(0);
+        }
     }
 }
