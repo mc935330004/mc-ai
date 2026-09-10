@@ -2,12 +2,16 @@ package org.example.ai.agent.business.dataset;
 
 import com.baomidou.mybatisplus.core.conditions.Wrapper;
 import com.baomidou.mybatisplus.annotation.Version;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.example.ai.agent.business.dataset.dto.ReportDatasetSaveDTO;
 import org.example.ai.agent.business.dataset.entity.ReportDataset;
 import org.example.ai.agent.business.dataset.entity.ReportDatasetField;
 import org.example.ai.agent.business.dataset.impl.ReportDatasetServiceImpl;
 import org.example.ai.agent.business.dataset.mapper.ReportDatasetFieldMapper;
 import org.example.ai.agent.business.dataset.mapper.ReportDatasetMapper;
+import org.example.ai.agent.business.dataset.vo.ReportDatasetDetailVO;
+import org.example.ai.agent.business.dataset.vo.ReportDatasetListVO;
 import org.example.ai.agent.common.enums.GraphNodeType;
 import org.example.ai.agent.common.exception.BusinessException;
 import org.example.ai.agent.graph.compiler.CompiledGraphNode;
@@ -79,6 +83,54 @@ class ReportDatasetServiceTest {
         when(datasetMapper.updateById(any(ReportDataset.class))).thenReturn(1);
         when(fieldMapper.delete(any(Wrapper.class))).thenReturn(1);
         when(fieldMapper.insert(any(ReportDatasetField.class))).thenReturn(1);
+    }
+
+    @Test
+    void returnsPagedDatasetSummariesWithFieldCounts() {
+        ReportDataset dataset = existingDataset(10L, 2);
+        Page<ReportDataset> resultPage = new Page<>(1, 10, 1);
+        resultPage.setRecords(List.of(dataset));
+        when(datasetMapper.selectPage(any(Page.class), any(Wrapper.class)))
+                .thenReturn(resultPage);
+        ReportDatasetField first = validField("amount", 1);
+        first.setDatasetId(10L);
+        ReportDatasetField second = validField("count", 2);
+        second.setDatasetId(10L);
+        when(fieldMapper.selectList(any(Wrapper.class)))
+                .thenReturn(List.of(first, second));
+
+        Page<ReportDatasetListVO> result = service.pageCurrent(
+                1, 10, "EMPLOYEE", "HR", true
+        );
+
+        assertThat(result.getTotal()).isEqualTo(1);
+        assertThat(result.getRecords().get(0).getFieldCount()).isEqualTo(2);
+        assertThat(result.getRecords().get(0).getDatasetCode())
+                .isEqualTo("EMPLOYEE_PROFILE");
+        assertThat(result.getRecords().get(0).getSubjectTypes())
+                .containsExactly("PERSON");
+    }
+
+    @Test
+    void returnsDatasetDetailWithOrderedFieldsAndMappings() {
+        ReportDataset dataset = existingDataset(10L, 2);
+        dataset.setInputMappingJson(
+                "{\"query\":{\"employeeNo\":\"employee_no\"},\"access\":{}}"
+        );
+        when(datasetMapper.selectById(10L)).thenReturn(dataset);
+        ReportDatasetField field = validField("amount", 1);
+        field.setDatasetId(10L);
+        when(fieldMapper.selectList(any(Wrapper.class))).thenReturn(List.of(field));
+
+        ReportDatasetDetailVO detail = service.detailCurrent(10L);
+
+        assertThat(detail.getId()).isEqualTo(10L);
+        assertThat(detail.getQueryInputMapping())
+                .containsEntry("employeeNo", "employee_no");
+        assertThat(detail.getAccessInputMapping()).isEmpty();
+        assertThat(detail.getFields())
+                .extracting(ReportDatasetSaveDTO.FieldDTO::getFactCode)
+                .containsExactly("amount");
     }
 
     @Test
