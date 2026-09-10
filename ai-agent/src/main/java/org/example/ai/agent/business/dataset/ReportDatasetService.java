@@ -2,8 +2,10 @@ package org.example.ai.agent.business.dataset;
 
 import com.baomidou.mybatisplus.extension.service.IService;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import org.example.ai.agent.business.dataset.dto.ReportDatasetSaveDTO;
 import org.example.ai.agent.business.dataset.vo.ReportDatasetDetailVO;
 import org.example.ai.agent.business.dataset.vo.ReportDatasetListVO;
+import org.example.ai.agent.business.dataset.vo.ReportDatasetValidationVO;
 import org.example.ai.agent.business.dataset.entity.ReportDataset;
 import org.example.ai.agent.business.dataset.entity.ReportDatasetField;
 
@@ -24,6 +26,9 @@ public interface ReportDatasetService extends IService<ReportDataset> {
 
     /** 查询一份数据集当前配置及字段策略。 */
     ReportDatasetDetailVO detailCurrent(Long id);
+
+    /** 校验管理端配置，不写数据库。 */
+    ReportDatasetValidationVO validateCurrent(ReportDatasetSaveDTO dto);
 
     /**
      * 保存同一数据集编码的当前配置，并整体替换字段策略集合。

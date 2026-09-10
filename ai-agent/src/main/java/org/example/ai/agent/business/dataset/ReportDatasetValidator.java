@@ -121,6 +121,51 @@ public final class ReportDatasetValidator {
     }
 
     /**
+     * 保存配置时只校验映射定义，不要求此时提供真实运行参数值。
+     */
+    public void validateCanonicalMappingDefinition(
+            Map<String, String> explicitMapping,
+            JsonNode inputSchema) {
+        Map<String, String> mapping = explicitMapping == null
+                ? Map.of()
+                : explicitMapping;
+        JsonNode properties = requireObjectSchema(inputSchema);
+        Set<String> mappedTargets = new HashSet<>();
+        for (Map.Entry<String, String> entry : mapping.entrySet()) {
+            String canonicalName = requireExactText(entry.getKey(), "规范参数名不能为空");
+            String targetName = requireExactText(entry.getValue(), "目标工作流参数名不能为空");
+            rejectReserved(canonicalName, "规范参数");
+            rejectReserved(targetName, "目标参数");
+            if (!properties.has(targetName)) {
+                throw new IllegalArgumentException(
+                        "目标参数不在inputSchema.properties中：" + targetName
+                );
+            }
+            if (!mappedTargets.add(targetName)) {
+                throw new IllegalArgumentException("目标参数重复映射：" + targetName);
+            }
+        }
+
+        JsonNode required = inputSchema.get("required");
+        if (required == null) {
+            return;
+        }
+        if (!required.isArray()) {
+            throw new IllegalArgumentException("inputSchema.required必须是数组");
+        }
+        for (JsonNode item : required) {
+            if (!item.isTextual() || !properties.has(item.textValue())) {
+                throw new IllegalArgumentException("inputSchema.required包含非法参数");
+            }
+            if (!mappedTargets.contains(item.textValue())) {
+                throw new IllegalArgumentException(
+                        "required目标参数缺少映射：" + item.textValue()
+                );
+            }
+        }
+    }
+
+    /**
      * 校验运行时字段策略协议；空策略集合表示默认拒绝全部未知事实。
      */
     public void validateFieldPolicies(List<FieldPolicy> policies) {

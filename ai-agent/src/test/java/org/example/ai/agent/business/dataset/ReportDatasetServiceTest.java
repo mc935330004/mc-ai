@@ -4,6 +4,8 @@ import com.baomidou.mybatisplus.core.conditions.Wrapper;
 import com.baomidou.mybatisplus.annotation.Version;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import org.example.ai.agent.capability.entity.FieldDictionary;
+import org.example.ai.agent.capability.mapper.FieldDictionaryMapper;
 import org.example.ai.agent.business.dataset.dto.ReportDatasetSaveDTO;
 import org.example.ai.agent.business.dataset.entity.ReportDataset;
 import org.example.ai.agent.business.dataset.entity.ReportDatasetField;
@@ -58,6 +60,7 @@ class ReportDatasetServiceTest {
     private ReportDatasetFieldMapper fieldMapper;
     private WorkflowRuntimeSnapshotResolver workflowResolver;
     private GraphCapabilityCatalog capabilityCatalog;
+    private FieldDictionaryMapper dictionaryMapper;
     private ReportDatasetServiceImpl service;
 
     @BeforeEach
@@ -66,12 +69,24 @@ class ReportDatasetServiceTest {
         fieldMapper = mock(ReportDatasetFieldMapper.class);
         workflowResolver = mock(WorkflowRuntimeSnapshotResolver.class);
         capabilityCatalog = mock(GraphCapabilityCatalog.class);
+        dictionaryMapper = mock(FieldDictionaryMapper.class);
+        ObjectMapper objectMapper = new ObjectMapper();
+        ReportDatasetAdminAssembler assembler = new ReportDatasetAdminAssembler(objectMapper);
+        ReportDatasetAdminValidator adminValidator = new ReportDatasetAdminValidator(
+                workflowResolver,
+                capabilityCatalog,
+                new ReportDatasetValidator(),
+                dictionaryMapper,
+                assembler
+        );
         service = new ReportDatasetServiceImpl(
                 datasetMapper,
                 fieldMapper,
                 workflowResolver,
                 capabilityCatalog,
-                new ObjectMapper()
+                objectMapper,
+                assembler,
+                adminValidator
         );
 
         when(capabilityCatalog.sideEffect(anyString())).thenReturn("READ");
@@ -83,6 +98,9 @@ class ReportDatasetServiceTest {
         when(datasetMapper.updateById(any(ReportDataset.class))).thenReturn(1);
         when(fieldMapper.delete(any(Wrapper.class))).thenReturn(1);
         when(fieldMapper.insert(any(ReportDatasetField.class))).thenReturn(1);
+        when(dictionaryMapper.selectBatchIds(any())).thenReturn(List.of(
+                publishedDictionary(11L, "EMPLOYEE_QUERY")
+        ));
     }
 
     @Test
@@ -131,6 +149,60 @@ class ReportDatasetServiceTest {
         assertThat(detail.getFields())
                 .extracting(ReportDatasetSaveDTO.FieldDTO::getFactCode)
                 .containsExactly("amount");
+    }
+
+    @Test
+    void validationRejectsMappingTargetOutsideWorkflowSchemaWithoutWriting() {
+        ReportDatasetSaveDTO dto = validSaveDto();
+        dto.setQueryInputMapping(Map.of("employeeNo", "unknown_field"));
+        when(workflowResolver.resolveByCode("QUERY_EMPLOYEE"))
+                .thenReturn(publishedWorkflow(
+                        "QUERY_EMPLOYEE",
+                        "{\"type\":\"object\",\"properties\":{\"employee_no\":{\"type\":\"string\"}}}",
+                        graphWithCapability("EMPLOYEE_QUERY")
+                ));
+
+        assertThatThrownBy(() -> service.validateCurrent(dto))
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("目标参数不在inputSchema.properties中");
+
+        verify(datasetMapper, never()).insert(any(ReportDataset.class));
+        verify(datasetMapper, never()).updateById(any(ReportDataset.class));
+        verify(fieldMapper, never()).delete(any(Wrapper.class));
+    }
+
+    @Test
+    void validationAllowsWorkflowWithoutTimeParameters() {
+        ReportDatasetSaveDTO dto = validSaveDto();
+        when(workflowResolver.resolveByCode("QUERY_EMPLOYEE"))
+                .thenReturn(publishedWorkflow(
+                        "QUERY_EMPLOYEE",
+                        "{\"type\":\"object\",\"properties\":{\"employee_no\":{\"type\":\"string\"}},\"required\":[\"employee_no\"]}",
+                        graphWithCapability("EMPLOYEE_QUERY")
+                ));
+
+        assertThat(service.validateCurrent(dto).valid()).isTrue();
+        verify(datasetMapper, never()).insert(any(ReportDataset.class));
+        verify(datasetMapper, never()).updateById(any(ReportDataset.class));
+        verify(fieldMapper, never()).delete(any(Wrapper.class));
+    }
+
+    @Test
+    void validationRejectsFieldDictionaryOutsideQueryWorkflow() {
+        ReportDatasetSaveDTO dto = validSaveDto();
+        when(workflowResolver.resolveByCode("QUERY_EMPLOYEE"))
+                .thenReturn(publishedWorkflow(
+                        "QUERY_EMPLOYEE",
+                        "{\"type\":\"object\",\"properties\":{\"employee_no\":{\"type\":\"string\"}}}",
+                        graphWithCapability("EMPLOYEE_QUERY")
+                ));
+        when(dictionaryMapper.selectBatchIds(any())).thenReturn(List.of(
+                publishedDictionary(11L, "OTHER_QUERY")
+        ));
+
+        assertThatThrownBy(() -> service.validateCurrent(dto))
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("字段字典不属于当前查询工作流");
     }
 
     @Test
@@ -598,6 +670,37 @@ class ReportDatasetServiceTest {
         return existing;
     }
 
+    private ReportDatasetSaveDTO validSaveDto() {
+        ReportDatasetSaveDTO dto = new ReportDatasetSaveDTO();
+        dto.setDatasetCode("EMPLOYEE_PROFILE");
+        dto.setDatasetName("员工档案");
+        dto.setDomainCode("HR");
+        dto.setSubjectTypes(List.of("PERSON"));
+        dto.setQueryWorkflowCode("QUERY_EMPLOYEE");
+        dto.setAccessWorkflowCode(null);
+        dto.setQueryInputMapping(Map.of("employeeNo", "employee_no"));
+        dto.setAccessInputMapping(Map.of());
+        dto.setTtlMinutes(60);
+        dto.setAssociationMode("PROJECT_PERSON_PERIOD");
+        dto.setMaxConcurrency(4);
+        dto.setEnabled(true);
+        ReportDatasetSaveDTO.FieldDTO field = new ReportDatasetSaveDTO.FieldDTO();
+        field.setFieldId(11L);
+        field.setFactCode("employee_name");
+        field.setFactName("员工姓名");
+        field.setFactType("STRING");
+        field.setCalculable(false);
+        field.setDisplayable(true);
+        field.setExportable(true);
+        field.setModelVisible(true);
+        field.setFilterable(true);
+        field.setMaskStrategy("NONE");
+        field.setGrain("PERSON");
+        field.setDisplayOrder(10);
+        dto.setFields(List.of(field));
+        return dto;
+    }
+
     private ReportDatasetField validField(String factCode, int displayOrder) {
         ReportDatasetField field = new ReportDatasetField();
         field.setFieldId(11L);
@@ -613,6 +716,16 @@ class ReportDatasetServiceTest {
         field.setGrain("PERSON");
         field.setDisplayOrder(displayOrder);
         return field;
+    }
+
+    private FieldDictionary publishedDictionary(Long id, String capabilityCode) {
+        FieldDictionary dictionary = new FieldDictionary();
+        dictionary.setId(id);
+        dictionary.setCapabilityCode(capabilityCode);
+        dictionary.setPublishStatus("PUBLISHED");
+        dictionary.setUserVisible(1);
+        dictionary.setModelVisible(1);
+        return dictionary;
     }
 
     private PublishedWorkflow publishedWorkflow(

@@ -9,6 +9,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import lombok.RequiredArgsConstructor;
+import org.example.ai.agent.business.dataset.ReportDatasetAdminAssembler;
+import org.example.ai.agent.business.dataset.ReportDatasetAdminValidator;
 import org.example.ai.agent.business.dataset.ReportDatasetService;
 import org.example.ai.agent.business.dataset.dto.ReportDatasetSaveDTO;
 import org.example.ai.agent.business.dataset.entity.ReportDataset;
@@ -17,6 +19,7 @@ import org.example.ai.agent.business.dataset.mapper.ReportDatasetFieldMapper;
 import org.example.ai.agent.business.dataset.mapper.ReportDatasetMapper;
 import org.example.ai.agent.business.dataset.vo.ReportDatasetDetailVO;
 import org.example.ai.agent.business.dataset.vo.ReportDatasetListVO;
+import org.example.ai.agent.business.dataset.vo.ReportDatasetValidationVO;
 import org.example.ai.agent.business.model.BusinessSubjectType;
 import org.example.ai.agent.chat.support.ContentHashUtils;
 import org.example.ai.agent.common.exception.BusinessException;
@@ -62,6 +65,8 @@ public class ReportDatasetServiceImpl
     private final WorkflowRuntimeSnapshotResolver workflowResolver;
     private final GraphCapabilityCatalog capabilityCatalog;
     private final ObjectMapper objectMapper;
+    private final ReportDatasetAdminAssembler adminAssembler;
+    private final ReportDatasetAdminValidator adminValidator;
 
     /**
      * 管理端分页只查询当前配置，并用一次字段查询统计当前页字段数量。
@@ -103,7 +108,7 @@ public class ReportDatasetServiceImpl
                 : source.getRecords();
         Map<Long, Integer> fieldCounts = loadFieldCounts(datasets);
         List<ReportDatasetListVO> records = datasets.stream()
-                .map(dataset -> toListView(
+                .map(dataset -> adminAssembler.toListView(
                         dataset,
                         fieldCounts.getOrDefault(dataset.getId(), 0)
                 ))
@@ -132,7 +137,41 @@ public class ReportDatasetServiceImpl
                                 ReportDatasetField::getId
                         )
         );
-        return toDetailView(dataset, fields == null ? List.of() : fields);
+        return adminAssembler.toDetailView(
+                dataset,
+                fields == null ? List.of() : fields
+        );
+    }
+
+    /**
+     * 管理端校验只读取工作流和字段元数据，不执行真实业务查询。
+     */
+    @Override
+    @Transactional(readOnly = true)
+    public ReportDatasetValidationVO validateCurrent(ReportDatasetSaveDTO dto) {
+        prepare(dto);
+        return new ReportDatasetValidationVO(true, "配置校验通过");
+    }
+
+    private PreparedConfiguration prepare(ReportDatasetSaveDTO dto) {
+        if (dto == null) {
+            throw new BusinessException(400, "数据集配置不能为空");
+        }
+        ReportDataset dataset = adminAssembler.toDataset(dto);
+        List<ReportDatasetField> fields = adminAssembler.toFields(dto.getFields());
+        validateDataset(dataset);
+        List<ReportDatasetField> validatedFields = validateFields(fields);
+        JsonNode subjectTypes = normalizeSubjectTypesJson(dataset.getSubjectTypesJson());
+        JsonNode inputMapping = normalizeInputMappingJson(dataset.getInputMappingJson());
+        dataset.setSubjectTypesJson(writeJson(subjectTypes));
+        dataset.setInputMappingJson(writeJson(inputMapping));
+        adminValidator.validate(dataset, validatedFields);
+        return new PreparedConfiguration(dataset, validatedFields);
+    }
+
+    private record PreparedConfiguration(
+            ReportDataset dataset,
+            List<ReportDatasetField> fields) {
     }
 
     private Map<Long, Integer> loadFieldCounts(List<ReportDataset> datasets) {
@@ -158,117 +197,6 @@ public class ReportDatasetServiceImpl
         return counts;
     }
 
-    private ReportDatasetListVO toListView(ReportDataset dataset, int fieldCount) {
-        ReportDatasetListVO view = new ReportDatasetListVO();
-        view.setId(dataset.getId());
-        view.setDatasetCode(dataset.getDatasetCode());
-        view.setDatasetName(dataset.getDatasetName());
-        view.setDomainCode(dataset.getDomainCode());
-        view.setSubjectTypes(readSubjectTypes(dataset.getSubjectTypesJson()));
-        view.setQueryWorkflowCode(dataset.getQueryWorkflowCode());
-        view.setFieldCount(fieldCount);
-        view.setEnabled(dataset.getEnabled());
-        view.setVersion(dataset.getVersion());
-        view.setUpdatedAt(dataset.getUpdatedAt());
-        return view;
-    }
-
-    private ReportDatasetDetailVO toDetailView(
-            ReportDataset dataset,
-            List<ReportDatasetField> fields) {
-        InputMappings mappings = readInputMappings(dataset.getInputMappingJson());
-        ReportDatasetDetailVO view = new ReportDatasetDetailVO();
-        view.setId(dataset.getId());
-        view.setVersion(dataset.getVersion());
-        view.setDatasetCode(dataset.getDatasetCode());
-        view.setDatasetName(dataset.getDatasetName());
-        view.setDomainCode(dataset.getDomainCode());
-        view.setSubjectTypes(readSubjectTypes(dataset.getSubjectTypesJson()));
-        view.setQueryWorkflowCode(dataset.getQueryWorkflowCode());
-        view.setAccessWorkflowCode(dataset.getAccessWorkflowCode());
-        view.setQueryInputMapping(mappings.query());
-        view.setAccessInputMapping(mappings.access());
-        view.setTtlMinutes(dataset.getTtlMinutes());
-        view.setAssociationMode(dataset.getAssociationMode());
-        view.setMaxConcurrency(dataset.getMaxConcurrency());
-        view.setEnabled(dataset.getEnabled());
-        view.setFields(fields.stream().map(this::toFieldDto).toList());
-        view.setCreatedBy(dataset.getCreatedBy());
-        view.setUpdatedBy(dataset.getUpdatedBy());
-        view.setCreatedAt(dataset.getCreatedAt());
-        view.setUpdatedAt(dataset.getUpdatedAt());
-        return view;
-    }
-
-    private ReportDatasetSaveDTO.FieldDTO toFieldDto(ReportDatasetField field) {
-        ReportDatasetSaveDTO.FieldDTO dto = new ReportDatasetSaveDTO.FieldDTO();
-        dto.setFieldId(field.getFieldId());
-        dto.setFactCode(field.getFactCode());
-        dto.setFactName(field.getFactName());
-        dto.setFactType(field.getFactType());
-        dto.setCalculable(field.getCalculable());
-        dto.setDisplayable(field.getDisplayable());
-        dto.setExportable(field.getExportable());
-        dto.setModelVisible(field.getModelVisible());
-        dto.setFilterable(field.getFilterable());
-        dto.setMaskStrategy(field.getMaskStrategy());
-        dto.setGrain(field.getGrain());
-        dto.setDisplayOrder(field.getDisplayOrder());
-        return dto;
-    }
-
-    private List<String> readSubjectTypes(String json) {
-        try {
-            JsonNode root = objectMapper.readTree(json);
-            if (root == null || !root.isArray()) {
-                throw new BusinessException(500, "数据集主体类型配置不合法");
-            }
-            List<String> result = new ArrayList<>();
-            root.forEach(item -> {
-                if (!item.isTextual()) {
-                    throw new BusinessException(500, "数据集主体类型配置不合法");
-                }
-                result.add(item.textValue());
-            });
-            return List.copyOf(result);
-        } catch (JsonProcessingException exception) {
-            throw new BusinessException(500, "数据集主体类型配置不合法");
-        }
-    }
-
-    private InputMappings readInputMappings(String json) {
-        try {
-            JsonNode root = objectMapper.readTree(json);
-            if (root == null || !root.isObject()) {
-                throw new BusinessException(500, "数据集参数映射配置不合法");
-            }
-            return new InputMappings(
-                    readStringMap(root.get("query")),
-                    readStringMap(root.get("access"))
-            );
-        } catch (JsonProcessingException exception) {
-            throw new BusinessException(500, "数据集参数映射配置不合法");
-        }
-    }
-
-    private Map<String, String> readStringMap(JsonNode node) {
-        if (node == null || !node.isObject()) {
-            throw new BusinessException(500, "数据集参数映射配置不合法");
-        }
-        Map<String, String> result = new LinkedHashMap<>();
-        node.fields().forEachRemaining(entry -> {
-            if (!entry.getValue().isTextual()) {
-                throw new BusinessException(500, "数据集参数映射配置不合法");
-            }
-            result.put(entry.getKey(), entry.getValue().textValue());
-        });
-        return Map.copyOf(result);
-    }
-
-    private record InputMappings(
-            Map<String, String> query,
-            Map<String, String> access) {
-    }
 
     /**
      * 同一 datasetCode 更新当前行，不创建配置历史；字段策略在同一事务内整体替换。
