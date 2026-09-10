@@ -153,6 +153,90 @@ public class ReportDatasetServiceImpl
         return new ReportDatasetValidationVO(true, "配置校验通过");
     }
 
+    /**
+     * 管理端新增和编辑共用同一套结构化校验；编辑时数据集编码不可修改。
+     */
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public ReportDatasetDetailVO saveCurrent(
+            ReportDatasetSaveDTO dto,
+            String operatorId) {
+        String operator = requireText(operatorId, "操作人不能为空");
+        if (dto == null) {
+            throw new BusinessException(400, "数据集配置不能为空");
+        }
+
+        ReportDataset existing = null;
+        if (dto.getId() != null) {
+            if (dto.getId() <= 0) {
+                throw new BusinessException(400, "数据集ID不合法");
+            }
+            existing = datasetMapper.selectById(dto.getId());
+            if (existing == null) {
+                throw new BusinessException(404, "报告数据集不存在");
+            }
+            String datasetCode = requireText(dto.getDatasetCode(), "datasetCode不能为空");
+            if (!datasetCode.equals(existing.getDatasetCode())) {
+                throw new BusinessException(400, "数据集编码创建后不能修改");
+            }
+            if (dto.getVersion() == null) {
+                throw new BusinessException(400, "更新当前数据集配置时version不能为空");
+            }
+            if (!Objects.equals(dto.getVersion(), existing.getVersion())) {
+                throw new BusinessException(409, "报告数据集配置已被其他人修改，请刷新后重试");
+            }
+        }
+
+        PreparedConfiguration prepared = prepare(dto);
+        if (existing == null) {
+            ReportDataset sameCode = findByCode(prepared.dataset().getDatasetCode());
+            if (sameCode != null) {
+                throw new BusinessException(409, "相同datasetCode的当前配置已经存在");
+            }
+        }
+        persistConfiguration(prepared, existing, operator);
+        return adminAssembler.toDetailView(prepared.dataset(), prepared.fields());
+    }
+
+    /**
+     * 启停只提交必要字段，避免把旧页面数据覆盖到其它配置列。
+     */
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void updateStatus(
+            Long id,
+            Boolean enabled,
+            Integer version,
+            String operatorId) {
+        if (id == null || id <= 0) {
+            throw new BusinessException(400, "数据集ID不合法");
+        }
+        if (enabled == null) {
+            throw new BusinessException(400, "enabled不能为空");
+        }
+        if (version == null || version < 0) {
+            throw new BusinessException(400, "version不合法");
+        }
+        String operator = requireText(operatorId, "操作人不能为空");
+        ReportDataset existing = datasetMapper.selectById(id);
+        if (existing == null) {
+            throw new BusinessException(404, "报告数据集不存在");
+        }
+        if (!Objects.equals(version, existing.getVersion())) {
+            throw new BusinessException(409, "报告数据集配置已被其他人修改，请刷新后重试");
+        }
+
+        ReportDataset update = new ReportDataset();
+        update.setId(id);
+        update.setEnabled(enabled);
+        update.setVersion(version);
+        update.setUpdatedBy(operator);
+        update.setUpdatedAt(LocalDateTime.now());
+        if (datasetMapper.updateById(update) != 1) {
+            throw new BusinessException(409, "报告数据集配置已被其他人修改，请刷新后重试");
+        }
+    }
+
     private PreparedConfiguration prepare(ReportDatasetSaveDTO dto) {
         if (dto == null) {
             throw new BusinessException(400, "数据集配置不能为空");
@@ -166,12 +250,19 @@ public class ReportDatasetServiceImpl
         dataset.setSubjectTypesJson(writeJson(subjectTypes));
         dataset.setInputMappingJson(writeJson(inputMapping));
         adminValidator.validate(dataset, validatedFields);
-        return new PreparedConfiguration(dataset, validatedFields);
+        return new PreparedConfiguration(
+                dataset,
+                validatedFields,
+                subjectTypes,
+                inputMapping
+        );
     }
 
     private record PreparedConfiguration(
             ReportDataset dataset,
-            List<ReportDatasetField> fields) {
+            List<ReportDatasetField> fields,
+            JsonNode subjectTypes,
+            JsonNode inputMapping) {
     }
 
     private Map<Long, Integer> loadFieldCounts(List<ReportDataset> datasets) {
@@ -228,17 +319,41 @@ public class ReportDatasetServiceImpl
             validateReadOnlyWorkflow(dataset.getAccessWorkflowCode(), accessWorkflow);
         }
 
-        dataset.setConfigChecksum(buildConfigChecksum(dataset, subjectTypes, inputMapping));
-        dataset.setFieldPolicyChecksum(buildFieldPolicyChecksum(validatedFields));
-
-        ReportDataset existing = datasetMapper.selectOne(
-                Wrappers.<ReportDataset>lambdaQuery()
-                        .eq(ReportDataset::getDatasetCode, dataset.getDatasetCode())
+        ReportDataset existing = findByCode(dataset.getDatasetCode());
+        persistConfiguration(
+                new PreparedConfiguration(
+                        dataset,
+                        validatedFields,
+                        subjectTypes,
+                        inputMapping
+                ),
+                existing,
+                operator
         );
+        return dataset;
+    }
+
+    private ReportDataset findByCode(String datasetCode) {
+        return datasetMapper.selectOne(
+                Wrappers.<ReportDataset>lambdaQuery()
+                        .eq(ReportDataset::getDatasetCode, datasetCode)
+        );
+    }
+
+    private void persistConfiguration(
+            PreparedConfiguration prepared,
+            ReportDataset existing,
+            String operator) {
+        ReportDataset dataset = prepared.dataset();
+        dataset.setConfigChecksum(buildConfigChecksum(
+                dataset,
+                prepared.subjectTypes(),
+                prepared.inputMapping()
+        ));
+        dataset.setFieldPolicyChecksum(buildFieldPolicyChecksum(prepared.fields()));
         LocalDateTime now = LocalDateTime.now();
         persistDataset(dataset, existing, operator, now);
-        replaceFields(dataset.getId(), validatedFields, operator, now);
-        return dataset;
+        replaceFields(dataset.getId(), prepared.fields(), operator, now);
     }
 
     private void validateDataset(ReportDataset dataset) {

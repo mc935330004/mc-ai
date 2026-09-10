@@ -30,6 +30,12 @@ public interface ReportDatasetService extends IService<ReportDataset> {
     /** 校验管理端配置，不写数据库。 */
     ReportDatasetValidationVO validateCurrent(ReportDatasetSaveDTO dto);
 
+    /** 保存管理端结构化配置并返回最新详情。 */
+    ReportDatasetDetailVO saveCurrent(ReportDatasetSaveDTO dto, String operatorId);
+
+    /** 使用乐观锁启用或停用当前配置。 */
+    void updateStatus(Long id, Boolean enabled, Integer version, String operatorId);
+
     /**
      * 保存同一数据集编码的当前配置，并整体替换字段策略集合。
      */

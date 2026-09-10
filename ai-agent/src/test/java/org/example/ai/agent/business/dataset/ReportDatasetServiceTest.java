@@ -206,6 +206,94 @@ class ReportDatasetServiceTest {
     }
 
     @Test
+    void updateShouldRejectChangingStableDatasetCode() {
+        ReportDatasetSaveDTO dto = validSaveDto();
+        dto.setId(10L);
+        dto.setVersion(2);
+        dto.setDatasetCode("CHANGED_CODE");
+        when(datasetMapper.selectById(10L)).thenReturn(existingDataset(10L, 2));
+
+        assertThatThrownBy(() -> service.saveCurrent(dto, "admin-1"))
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("数据集编码创建后不能修改");
+
+        verify(datasetMapper, never()).insert(any(ReportDataset.class));
+        verify(datasetMapper, never()).updateById(any(ReportDataset.class));
+    }
+
+    @Test
+    void saveDtoShouldReturnPersistedDetail() {
+        ReportDatasetSaveDTO dto = validSaveDto();
+        when(workflowResolver.resolveByCode("QUERY_EMPLOYEE"))
+                .thenReturn(publishedWorkflow(
+                        "QUERY_EMPLOYEE",
+                        "{\"type\":\"object\",\"properties\":{\"employee_no\":{\"type\":\"string\"}},\"required\":[\"employee_no\"]}",
+                        graphWithCapability("EMPLOYEE_QUERY")
+                ));
+
+        ReportDatasetDetailVO detail = service.saveCurrent(dto, "admin-1");
+
+        assertThat(detail.getId()).isEqualTo(101L);
+        assertThat(detail.getDatasetCode()).isEqualTo("EMPLOYEE_PROFILE");
+        assertThat(detail.getVersion()).isZero();
+        assertThat(detail.getCreatedBy()).isEqualTo("admin-1");
+        assertThat(detail.getFields())
+                .extracting(ReportDatasetSaveDTO.FieldDTO::getFactCode)
+                .containsExactly("employee_name");
+    }
+
+    @Test
+    void statusUpdateShouldUseVersionAndOperator() {
+        ReportDataset existing = existingDataset(10L, 2);
+        when(datasetMapper.selectById(10L)).thenReturn(existing);
+
+        service.updateStatus(10L, false, 2, "admin-1");
+
+        var captor = org.mockito.ArgumentCaptor.forClass(ReportDataset.class);
+        verify(datasetMapper).updateById(captor.capture());
+        ReportDataset update = captor.getValue();
+        assertThat(update.getId()).isEqualTo(10L);
+        assertThat(update.getEnabled()).isFalse();
+        assertThat(update.getVersion()).isEqualTo(2);
+        assertThat(update.getUpdatedBy()).isEqualTo("admin-1");
+        assertThat(update.getDatasetCode()).isNull();
+    }
+
+    @Test
+    void statusUpdateShouldRejectMissingDatasetAndStaleVersion() {
+        when(datasetMapper.selectById(99L)).thenReturn(null);
+
+        BusinessException missing = catchThrowableOfType(
+                BusinessException.class,
+                () -> service.updateStatus(99L, true, 0, "admin-1")
+        );
+        assertThat(missing.getCode()).isEqualTo(404);
+
+        when(datasetMapper.selectById(10L)).thenReturn(existingDataset(10L, 3));
+        BusinessException conflict = catchThrowableOfType(
+                BusinessException.class,
+                () -> service.updateStatus(10L, false, 2, "admin-1")
+        );
+        assertThat(conflict.getCode()).isEqualTo(409);
+        assertThat(conflict).hasMessageContaining("配置已被其他人修改");
+        verify(datasetMapper, never()).updateById(any(ReportDataset.class));
+    }
+
+    @Test
+    void statusUpdateShouldReportConflictWhenOptimisticUpdateMisses() {
+        when(datasetMapper.selectById(10L)).thenReturn(existingDataset(10L, 2));
+        when(datasetMapper.updateById(any(ReportDataset.class))).thenReturn(0);
+
+        BusinessException conflict = catchThrowableOfType(
+                BusinessException.class,
+                () -> service.updateStatus(10L, false, 2, "admin-1")
+        );
+
+        assertThat(conflict.getCode()).isEqualTo(409);
+        assertThat(conflict).hasMessageContaining("配置已被其他人修改");
+    }
+
+    @Test
     void savesCurrentDatasetWhenQueryWorkflowIsPublishedEnabledAndReadOnly() {
         when(workflowResolver.resolveByCode("QUERY_EMPLOYEE"))
                 .thenReturn(publishedWorkflow(
