@@ -29,7 +29,7 @@ import static org.example.ai.agent.business.person.PersonBusinessQueryService.TR
 /**
  * 只处理字段策略已批准的 calculation 事实，不接触来源响应、Spring 或数据库。
  */
-final class PersonBusinessFactAggregator {
+public final class PersonBusinessFactAggregator {
 
     private static final int MAX_ATTENDANCE_DAYS = 366;
     private final AttendanceReconciliationService attendanceService;
@@ -38,6 +38,25 @@ final class PersonBusinessFactAggregator {
         this.attendanceService = Objects.requireNonNull(
                 attendanceService, "attendanceService不能为空"
         );
+    }
+
+    /** 根业务事实只使用已约定的发生时间字段，不猜测其他日期。 */
+    public static LocalDate occurredOn(DatasetType type, Map<String, Object> record) {
+        String field = switch (type) {
+            case TRAVEL -> "startAt";
+            case PUNCH -> "time";
+            case REIMBURSEMENT -> "occurredAt";
+            default -> null;
+        };
+        Object value = field == null ? null : record.get(field);
+        if (!(value instanceof String text) || text.length() < 10) {
+            return null;
+        }
+        try {
+            return LocalDate.parse(text.substring(0, 10));
+        } catch (DateTimeException exception) {
+            return null;
+        }
     }
 
     @SuppressWarnings("unchecked")

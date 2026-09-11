@@ -2,6 +2,7 @@ package org.example.ai.agent.business.snapshot;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.ai.agent.business.dataset.ReportDatasetValidator;
 import org.example.ai.agent.business.dataset.BusinessFactSanitizer;
@@ -10,6 +11,12 @@ import org.example.ai.agent.business.dataset.mapper.ReportDatasetFieldMapper;
 import org.example.ai.agent.business.dataset.model.FieldPolicy;
 import org.example.ai.agent.business.model.AssociationType;
 import org.example.ai.agent.business.model.BusinessSubjectType;
+import org.example.ai.agent.business.person.PersonBusinessQueryService;
+import org.example.ai.agent.business.person.PersonBusinessFactAggregator;
+import org.example.ai.agent.business.person.PersonBusinessQueryService.AssociationSummary;
+import org.example.ai.agent.business.person.PersonBusinessQueryService.DatasetType;
+import org.example.ai.agent.business.person.PersonBusinessQueryService.ProjectAssociationContext;
+import org.example.ai.agent.business.person.ProjectRecordAssociationService;
 import org.example.ai.agent.business.snapshot.entity.BusinessSnapshot;
 import org.example.ai.agent.business.snapshot.entity.BusinessSnapshotItem;
 import org.example.ai.agent.business.snapshot.mapper.BusinessSnapshotItemMapper;
@@ -54,6 +61,7 @@ public class BusinessSnapshotDerivationService {
     private final ReportDatasetFieldMapper fieldMapper;
     private final BusinessSnapshotAccessService accessService;
     private final BusinessFactSanitizer factSanitizer;
+    private final ProjectRecordAssociationService associationService;
     private final ObjectMapper objectMapper;
     private final Clock clock;
 
@@ -64,8 +72,9 @@ public class BusinessSnapshotDerivationService {
             ReportDatasetFieldMapper fieldMapper,
             BusinessSnapshotAccessService accessService,
             BusinessFactSanitizer factSanitizer,
+            ProjectRecordAssociationService associationService,
             ObjectMapper objectMapper) {
-        this(snapshotMapper, itemMapper, fieldMapper, accessService, factSanitizer,
+        this(snapshotMapper, itemMapper, fieldMapper, accessService, factSanitizer, associationService,
                 objectMapper, Clock.systemDefaultZone());
     }
 
@@ -76,6 +85,7 @@ public class BusinessSnapshotDerivationService {
             ReportDatasetFieldMapper fieldMapper,
             BusinessSnapshotAccessService accessService,
             BusinessFactSanitizer factSanitizer,
+            ProjectRecordAssociationService associationService,
             ObjectMapper objectMapper,
             Clock clock) {
         this.snapshotMapper = Objects.requireNonNull(snapshotMapper, "snapshotMapper不能为空");
@@ -83,6 +93,9 @@ public class BusinessSnapshotDerivationService {
         this.fieldMapper = Objects.requireNonNull(fieldMapper, "fieldMapper不能为空");
         this.accessService = Objects.requireNonNull(accessService, "accessService不能为空");
         this.factSanitizer = Objects.requireNonNull(factSanitizer, "factSanitizer不能为空");
+        this.associationService = Objects.requireNonNull(
+                associationService, "associationService不能为空"
+        );
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper不能为空");
         this.clock = Objects.requireNonNull(clock, "clock不能为空");
     }
@@ -166,6 +179,287 @@ public class BusinessSnapshotDerivationService {
             }
         }
         return child;
+    }
+
+    /**
+     * 从人员来源快照派生仅含项目直接关联记录的安全快照。
+     */
+    @Transactional(rollbackFor = Exception.class)
+    public ProjectAssociationDerivation deriveProjectAssociation(
+            ProjectAssociationCommand command) {
+        validateProjectAssociation(command);
+        BusinessSnapshotAccessService.AccessGrant grant = accessService.reauthorize(
+                new BusinessSnapshotAccessService.AccessCommand(
+                        command.agentRunId(), command.userId(), command.sessionId(),
+                        command.authorization(), command.secureContext(), command.datasetCode(),
+                        BusinessSubjectType.PERSON, command.subjectId(), command.targetQuery()
+                )
+        ).orElseThrow(this::unavailable);
+        LocalDateTime now = LocalDateTime.now(clock);
+        BusinessSnapshot source = snapshotMapper.selectOne(
+                Wrappers.<BusinessSnapshot>lambdaQuery()
+                        .eq(BusinessSnapshot::getSnapshotId, command.sourceSnapshotId())
+                        .eq(BusinessSnapshot::getUserId, command.userId())
+                        .eq(BusinessSnapshot::getSessionId, command.sessionId())
+                        .last("LIMIT 1 FOR UPDATE")
+        );
+        if (!projectSourceUsable(source, command, grant, now)) {
+            throw unavailable();
+        }
+        List<BusinessSnapshotItem> sourceItems = itemMapper.selectList(
+                Wrappers.<BusinessSnapshotItem>lambdaQuery()
+                        .eq(BusinessSnapshotItem::getSnapshotId, source.getSnapshotId())
+                        .orderByAsc(BusinessSnapshotItem::getId)
+                        .last("LIMIT " + (MAX_ITEMS + 1) + " FOR UPDATE")
+        );
+        if (sourceItems == null || sourceItems.size() != 1
+                || !projectSourceItemUsable(sourceItems.get(0))) {
+            throw unavailable();
+        }
+        List<ReportDatasetField> fields = fieldMapper.selectList(
+                Wrappers.<ReportDatasetField>lambdaQuery()
+                        .eq(ReportDatasetField::getDatasetId, grant.datasetId())
+                        .orderByAsc(ReportDatasetField::getDisplayOrder, ReportDatasetField::getId)
+        );
+        String factCode = associationFactCode(command.datasetType());
+        ReportDatasetField field = fieldMap(fields).get(factCode);
+        if (field == null || !Boolean.TRUE.equals(field.getCalculable())) {
+            throw unavailable();
+        }
+        rejectOversized(source.getFactsJson(), MAX_FACT_BYTES);
+        List<Map<String, Object>> records = projectRecords(
+                readMap(source.getFactsJson(), "来源安全事实"),
+                sourceItems.get(0).getItemKey(), factCode
+        );
+        ClassifiedRecords classified = classify(records, command.datasetType(), command.projectContext());
+        BusinessFactSanitizer.SanitizedFacts sanitized = factSanitizer.sanitize(
+                Map.of(factCode, classified.direct()), List.of(toPolicy(field))
+        );
+        Map<String, Object> envelope = new LinkedHashMap<>();
+        envelope.put("calculation", sanitized.calculationFacts());
+        envelope.put("display", sanitized.displayFacts());
+        envelope.put("export", sanitized.exportFacts());
+        envelope.put("model", sanitized.modelFacts());
+        String factsJson = writeJson(Map.of("direct", envelope), "项目关联派生事实");
+        if (factsJson.getBytes(StandardCharsets.UTF_8).length > MAX_FACT_BYTES) {
+            throw unavailable();
+        }
+        BusinessSnapshot child = projectAssociationSnapshot(source, command, factsJson, now);
+        if (snapshotMapper.insert(child) != 1) {
+            throw internal("项目关联派生快照写入失败");
+        }
+        insertAssociationItem(child.getSnapshotId(), sourceItems.get(0),
+                "direct", AssociationType.DIRECT, classified.direct().size(), now);
+        insertAssociationItem(child.getSnapshotId(), sourceItems.get(0),
+                "context", AssociationType.PROJECT_PERSON_PERIOD, classified.contextCount(), now);
+        insertAssociationItem(child.getSnapshotId(), sourceItems.get(0),
+                "unknown", AssociationType.UNKNOWN, classified.unknownCount(), now);
+        insertAssociationItem(child.getSnapshotId(), sourceItems.get(0),
+                "unrelated", AssociationType.UNRELATED, classified.unrelatedCount(), now);
+        AssociationSummary summary = new AssociationSummary(
+                classified.direct().size(), classified.contextCount(),
+                classified.unknownCount(), classified.unrelatedCount()
+        );
+        return new ProjectAssociationDerivation(
+                child, sanitized.calculationFacts(), summary, associationLabels(summary)
+        );
+    }
+
+    private void validateProjectAssociation(ProjectAssociationCommand command) {
+        if (command == null || command.datasetType() == null || command.projectContext() == null
+                || !Set.of(DatasetType.TRAVEL, DatasetType.PUNCH, DatasetType.REIMBURSEMENT)
+                .contains(command.datasetType())
+                || !StringUtils.hasText(command.agentRunId())
+                || !StringUtils.hasText(command.userId())
+                || !StringUtils.hasText(command.sessionId())
+                || !StringUtils.hasText(command.authorization())
+                || !StringUtils.hasText(command.datasetCode())
+                || !StringUtils.hasText(command.subjectId())
+                || !StringUtils.hasText(command.sourceSnapshotId())) {
+            throw unavailable();
+        }
+        requireLength(command.userId(), 128);
+        requireLength(command.sessionId(), 64);
+        requireLength(command.subjectId(), 128);
+        requireLength(command.datasetCode(), 128);
+        requireLength(command.sourceSnapshotId(), 32);
+        String queryJson = writeJson(command.targetQuery(), "目标查询条件");
+        if (queryJson.getBytes(StandardCharsets.UTF_8).length > MAX_QUERY_BYTES) {
+            throw unavailable();
+        }
+    }
+
+    private boolean projectSourceUsable(
+            BusinessSnapshot source,
+            ProjectAssociationCommand command,
+            BusinessSnapshotAccessService.AccessGrant grant,
+            LocalDateTime now) {
+        if (source == null
+                || !Objects.equals(source.getUserId(), command.userId())
+                || !Objects.equals(source.getSessionId(), command.sessionId())
+                || !Objects.equals(source.getSubjectType(), BusinessSubjectType.PERSON.name())
+                || !Objects.equals(source.getSubjectId(), command.subjectId())
+                || !Objects.equals(source.getDatasetCode(), command.datasetCode())
+                || !Objects.equals(source.getConfigChecksum(), grant.configChecksum())
+                || !Objects.equals(source.getFieldPolicyChecksum(), grant.fieldPolicyChecksum())
+                || !Set.of("COMPLETE", "PARTIAL_SUCCESS").contains(source.getStatus())
+                || source.getExpiresAt() == null
+                || !source.getExpiresAt().isAfter(now)) {
+            return false;
+        }
+        rejectOversized(source.getQueryJson(), MAX_QUERY_BYTES);
+        return Objects.equals(
+                ReportDatasetValidator.canonicalSafeValue(
+                        readMap(source.getQueryJson(), "来源查询条件")
+                ),
+                ReportDatasetValidator.canonicalSafeValue(command.targetQuery())
+        );
+    }
+
+    private boolean projectSourceItemUsable(BusinessSnapshotItem item) {
+        return item != null
+                && StringUtils.hasText(item.getItemKey())
+                && item.getItemKey().length() <= 128
+                && Set.of(
+                BusinessSnapshotItemStatus.SUCCESS.name(),
+                BusinessSnapshotItemStatus.NO_DATA.name()
+        ).contains(item.getStatus())
+                && Objects.equals(item.getAssociationType(), AssociationType.DIRECT.name());
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<Map<String, Object>> projectRecords(
+            Map<String, Object> sourceFacts,
+            String itemKey,
+            String factCode) {
+        if (sourceFacts.size() != 1
+                || !(sourceFacts.get(itemKey) instanceof Map<?, ?> envelope)
+                || !envelope.keySet().equals(CHANNELS)
+                || !(envelope.get("calculation") instanceof Map<?, ?> calculation)
+                || !calculation.containsKey(factCode)
+                || !(calculation.get(factCode) instanceof List<?> values)) {
+            throw unavailable();
+        }
+        List<Map<String, Object>> records = new ArrayList<>(values.size());
+        for (Object value : values) {
+            if (!(value instanceof Map<?, ?> record)) {
+                throw unavailable();
+            }
+            records.add((Map<String, Object>) record);
+        }
+        return List.copyOf(records);
+    }
+
+    private ClassifiedRecords classify(
+            List<Map<String, Object>> records,
+            DatasetType type,
+            ProjectAssociationContext context) {
+        List<ProjectRecordAssociationService.MembershipPeriod> memberships =
+                context.membershipAvailable()
+                        ? context.membershipPeriods().stream()
+                        .map(value -> new ProjectRecordAssociationService.MembershipPeriod(
+                                value.start(), value.end()
+                        )).toList()
+                        : List.of();
+        ProjectRecordAssociationService.ProjectIdentity project =
+                new ProjectRecordAssociationService.ProjectIdentity(
+                        context.projectCode(), context.projectId()
+                );
+        List<Map<String, Object>> direct = new ArrayList<>();
+        int contextual = 0;
+        int unknown = 0;
+        int unrelated = 0;
+        for (int index = 0; index < records.size(); index++) {
+            Map<String, Object> record = records.get(index);
+            AssociationType association = associationService.classify(
+                    project, context.periodStart(), context.periodEnd(), memberships,
+                    new ProjectRecordAssociationService.RecordReference(
+                            recordId(record, index), textValue(record.get("projectCode")),
+                            textValue(record.get("projectId")),
+                            PersonBusinessFactAggregator.occurredOn(type, record)
+                    )
+            );
+            switch (association) {
+                case DIRECT -> direct.add(record);
+                case PROJECT_PERSON_PERIOD -> contextual++;
+                case UNKNOWN -> unknown++;
+                case UNRELATED -> unrelated++;
+            }
+        }
+        return new ClassifiedRecords(List.copyOf(direct), contextual, unknown, unrelated);
+    }
+
+    private String recordId(Map<String, Object> record, int index) {
+        String value = textValue(record.get("recordId"));
+        return StringUtils.hasText(value) ? value : "record-" + index;
+    }
+
+    private String textValue(Object value) {
+        String text = value instanceof String string ? string.trim() : null;
+        return StringUtils.hasText(text) ? text : null;
+    }
+
+    private String associationFactCode(DatasetType type) {
+        return switch (type) {
+            case TRAVEL -> PersonBusinessQueryService.TRAVEL_RECORDS;
+            case PUNCH -> PersonBusinessQueryService.PUNCH_RECORDS;
+            case REIMBURSEMENT -> PersonBusinessQueryService.REIMBURSEMENT_RECORDS;
+            default -> throw unavailable();
+        };
+    }
+
+    private BusinessSnapshot projectAssociationSnapshot(
+            BusinessSnapshot source,
+            ProjectAssociationCommand command,
+            String factsJson,
+            LocalDateTime now) {
+        BusinessSnapshot child = new BusinessSnapshot();
+        child.setSnapshotId(UUID.randomUUID().toString().replace("-", ""));
+        child.setUserId(command.userId());
+        child.setSessionId(command.sessionId());
+        child.setSubjectType(BusinessSubjectType.PERSON.name());
+        child.setSubjectId(command.subjectId());
+        child.setDatasetCode(command.datasetCode());
+        child.setQueryJson(writeJson(command.targetQuery(), "目标查询条件"));
+        child.setQueryHash(ContentHashUtils.sha256(
+                ReportDatasetValidator.canonicalSafeValue(command.targetQuery())
+        ));
+        child.setStatus(source.getStatus());
+        child.setDataComplete(source.getDataComplete());
+        child.setFactsJson(factsJson);
+        child.setConfigChecksum(source.getConfigChecksum());
+        child.setFieldPolicyChecksum(source.getFieldPolicyChecksum());
+        child.setSourceSnapshotId(source.getSnapshotId());
+        child.setExpiresAt(source.getExpiresAt());
+        child.setCreatedAt(now);
+        child.setCompletedAt(now);
+        return child;
+    }
+
+    private void insertAssociationItem(
+            String snapshotId,
+            BusinessSnapshotItem source,
+            String itemKey,
+            AssociationType association,
+            int count,
+            LocalDateTime now) {
+        BusinessSnapshotItem item = childItem(snapshotId, source, count, now);
+        item.setItemKey(itemKey);
+        item.setAssociationType(association.name());
+        if (itemMapper.insert(item) != 1) {
+            throw internal("项目关联派生快照执行项写入失败");
+        }
+    }
+
+    private List<String> associationLabels(AssociationSummary summary) {
+        List<String> labels = new ArrayList<>(2);
+        if (summary.contextCount() > 0) {
+            labels.add("存在项目人员期间关联记录，仅供上下文参考，不计入项目直接统计");
+        }
+        if (summary.unknownCount() > 0) {
+            labels.add("部分记录的项目关联无法确认，未计入项目直接统计");
+        }
+        return List.copyOf(labels);
     }
 
     private void validate(DeriveCommand command) {
@@ -475,7 +769,9 @@ public class BusinessSnapshotDerivationService {
 
     private Map<String, Object> readMap(String json, String name) {
         try {
-            Map<String, Object> value = objectMapper.readValue(json, new TypeReference<>() { });
+            Map<String, Object> value = objectMapper.readerFor(new TypeReference<Map<String, Object>>() { })
+                    .with(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS)
+                    .readValue(json);
             return value == null ? Map.of() : value;
         } catch (Exception exception) {
             throw badRequest(name + "不可用");
@@ -544,11 +840,71 @@ public class BusinessSnapshotDerivationService {
         }
     }
 
+    /** 项目关联派生只接收安全定位信息，不接收调用方提供的业务事实。 */
+    public record ProjectAssociationCommand(
+            String agentRunId,
+            String userId,
+            String sessionId,
+            String authorization,
+            Map<String, Object> secureContext,
+            String datasetCode,
+            String subjectId,
+            String sourceSnapshotId,
+            Map<String, Object> targetQuery,
+            DatasetType datasetType,
+            ProjectAssociationContext projectContext) {
+
+        @SuppressWarnings("unchecked")
+        public ProjectAssociationCommand {
+            secureContext = (Map<String, Object>) ReportDatasetValidator.freezeSafeValue(
+                    secureContext == null ? Map.of() : secureContext
+            );
+            targetQuery = (Map<String, Object>) ReportDatasetValidator.freezeSafeValue(
+                    targetQuery == null ? Map.of() : targetQuery
+            );
+        }
+
+        @Override
+        public String toString() {
+            return "ProjectAssociationCommand[userId=" + userId
+                    + ", sessionId=" + sessionId
+                    + ", datasetCode=" + datasetCode
+                    + ", datasetType=" + datasetType
+                    + ", sourceSnapshotPresent=" + StringUtils.hasText(sourceSnapshotId)
+                    + ", authorizationPresent=" + StringUtils.hasText(authorization)
+                    + ", secureContextSize=" + secureContext.size()
+                    + ", targetQuerySize=" + targetQuery.size() + ']';
+        }
+    }
+
+    /** 项目直接事实与快照引用来自同一次派生，回答和报告共享同一口径。 */
+    public record ProjectAssociationDerivation(
+            BusinessSnapshot snapshot,
+            Map<String, Object> directCalculationFacts,
+            AssociationSummary summary,
+            List<String> labels) {
+
+        @SuppressWarnings("unchecked")
+        public ProjectAssociationDerivation {
+            directCalculationFacts = (Map<String, Object>) ReportDatasetValidator.freezeSafeValue(
+                    directCalculationFacts == null ? Map.of() : directCalculationFacts
+            );
+            labels = labels == null ? List.of() : List.copyOf(labels);
+        }
+    }
+
     private record DerivedValue(Object value, int count) {
     }
 
     private record DerivationFacts(
             Map<String, Object> facts,
             Map<String, Integer> counts) {
+    }
+
+    private record ClassifiedRecords(
+            List<Map<String, Object>> direct,
+            int contextCount,
+            int unknownCount,
+            int unrelatedCount) {
     }
 }

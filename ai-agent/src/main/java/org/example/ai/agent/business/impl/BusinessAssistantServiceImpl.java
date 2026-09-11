@@ -311,7 +311,8 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
         PersonBusinessQueryService.Result result = personBusinessQueryService.query(
                 new PersonBusinessQueryService.Command(
                         runId, request.getUserId(), request.getConversationId(),
-                        request.getAuthorization(), Map.of(), subject.selectionToken(), intent.refresh(), plans
+                        request.getAuthorization(), Map.of(), subject.selectionToken(), intent.refresh(), plans,
+                        null
                 )
         );
         List<DatasetAnswerInput> datasets = new ArrayList<>(personDatasets(plans, result));

@@ -9,6 +9,7 @@ import org.example.ai.agent.business.model.BusinessSubjectType;
 import org.example.ai.agent.business.model.DatasetExecutionStatus;
 import org.example.ai.agent.business.person.model.AttendanceDayResult;
 import org.example.ai.agent.business.snapshot.BusinessSnapshotMatcher;
+import org.example.ai.agent.business.snapshot.BusinessSnapshotDerivationService;
 import org.example.ai.agent.business.snapshot.BusinessSnapshotService;
 import org.example.ai.agent.business.snapshot.SnapshotFactChannel;
 import org.example.ai.agent.business.snapshot.entity.BusinessSnapshot;
@@ -30,6 +31,7 @@ import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -68,6 +70,7 @@ public class PersonBusinessQueryService {
     private final PersonSnapshotReuseService snapshotReuseService;
     private final ReportDatasetExecutionService executionService;
     private final BusinessSnapshotService snapshotService;
+    private final BusinessSnapshotDerivationService snapshotDerivationService;
     private final PersonBusinessFactAggregator factAggregator;
 
     public PersonBusinessQueryService(
@@ -76,6 +79,7 @@ public class PersonBusinessQueryService {
             PersonSnapshotReuseService snapshotReuseService,
             ReportDatasetExecutionService executionService,
             BusinessSnapshotService snapshotService,
+            BusinessSnapshotDerivationService snapshotDerivationService,
             AttendanceReconciliationService attendanceService) {
         this.selectionTokenService = Objects.requireNonNull(
                 selectionTokenService, "selectionTokenService不能为空"
@@ -88,6 +92,9 @@ public class PersonBusinessQueryService {
         );
         this.executionService = Objects.requireNonNull(executionService, "executionService不能为空");
         this.snapshotService = Objects.requireNonNull(snapshotService, "snapshotService不能为空");
+        this.snapshotDerivationService = Objects.requireNonNull(
+                snapshotDerivationService, "snapshotDerivationService不能为空"
+        );
         this.factAggregator = new PersonBusinessFactAggregator(attendanceService);
     }
 
@@ -104,12 +111,24 @@ public class PersonBusinessQueryService {
         EnumMap<DatasetType, PersonBusinessFactAggregator.SafeFacts> safeFacts =
                 new EnumMap<>(DatasetType.class);
         List<ModuleResult> modules = new ArrayList<>(validated.plans().size());
+        AssociationSummary associationSummary = AssociationSummary.empty();
+        Set<String> associationLabels = new LinkedHashSet<>();
         for (DatasetType type : DatasetType.values()) {
             DatasetPlan plan = validated.plans().get(type);
             if (plan == null) {
                 continue;
             }
             ModuleData module = loadModule(validated, person.rawSubjectId(), plan);
+            if (validated.projectContext() != null
+                    && isRequestRoot(type)
+                    && module.successful()) {
+                ProjectModule projectModule = deriveProjectModule(
+                        validated, person.rawSubjectId(), plan, module
+                );
+                module = projectModule.module();
+                associationSummary = associationSummary.plus(projectModule.summary());
+                associationLabels.addAll(projectModule.labels());
+            }
             safeFacts.put(type, new PersonBusinessFactAggregator.SafeFacts(
                     module.complete(), module.calculation()
             ));
@@ -130,8 +149,46 @@ public class PersonBusinessQueryService {
                 factAggregator.travelSummary(safeFacts.get(DatasetType.TRAVEL)),
                 factAggregator.reimbursementSummary(safeFacts.get(DatasetType.REIMBURSEMENT)),
                 attendance,
-                modules
+                modules,
+                associationSummary,
+                List.copyOf(associationLabels)
         );
+    }
+
+    private ProjectModule deriveProjectModule(
+            ValidatedCommand command,
+            String subjectId,
+            DatasetPlan plan,
+            ModuleData source) {
+        try {
+            Map<String, Object> targetQuery = authorizedInput(plan.canonicalInput(), subjectId);
+            BusinessSnapshotDerivationService.ProjectAssociationDerivation derived =
+                    snapshotDerivationService.deriveProjectAssociation(
+                            new BusinessSnapshotDerivationService.ProjectAssociationCommand(
+                                    command.agentRunId(), command.userId(), command.sessionId(),
+                                    command.authorization(), command.secureContext(), plan.datasetCode(),
+                                    subjectId, source.snapshotId(), targetQuery,
+                                    plan.type(), command.projectContext()
+                            )
+                    );
+            BusinessSnapshot snapshot = derived == null ? null : derived.snapshot();
+            if (snapshot == null
+                    || !StringUtils.hasText(snapshot.getSnapshotId())
+                    || !StringUtils.hasText(snapshot.getFieldPolicyChecksum())
+                    || derived.summary() == null) {
+                return ProjectModule.failed();
+            }
+            return new ProjectModule(
+                    new ModuleData(
+                            source.status(), source.complete(), derived.directCalculationFacts(),
+                            snapshot.getSnapshotId(), snapshot.getFieldPolicyChecksum()
+                    ),
+                    derived.summary(), derived.labels()
+            );
+        } catch (RuntimeException exception) {
+            warnModuleFailure("PROJECT_ASSOCIATION", plan.datasetCode(), exception);
+            return ProjectModule.failed();
+        }
     }
 
     private ValidatedCommand validate(Command command) {
@@ -185,7 +242,7 @@ public class PersonBusinessQueryService {
         return new ValidatedCommand(
                 command.agentRunId(), command.userId(), command.sessionId(),
                 command.authorization(), command.secureContext(), command.selectionToken(),
-                command.refreshRequested(), plans
+                command.refreshRequested(), plans, command.projectContext()
         );
     }
 
@@ -465,7 +522,8 @@ public class PersonBusinessQueryService {
             Map<String, Object> secureContext,
             String selectionToken,
             boolean refreshRequested,
-            List<DatasetPlan> plans) {
+            List<DatasetPlan> plans,
+            ProjectAssociationContext projectContext) {
 
         @SuppressWarnings("unchecked")
         public Command {
@@ -525,11 +583,66 @@ public class PersonBusinessQueryService {
             TravelSummary travelSummary,
             ReimbursementSummary reimbursementSummary,
             List<AttendanceDayResult> attendance,
-            List<ModuleResult> modules) {
+            List<ModuleResult> modules,
+            AssociationSummary associationSummary,
+            List<String> associationLabels) {
 
         public Result {
             attendance = attendance == null ? List.of() : List.copyOf(attendance);
             modules = modules == null ? List.of() : List.copyOf(modules);
+            associationSummary = associationSummary == null
+                    ? AssociationSummary.empty()
+                    : associationSummary;
+            associationLabels = associationLabels == null
+                    ? List.of()
+                    : List.copyOf(associationLabels);
+        }
+    }
+
+    /** 项目关联上下文仅包含已复权的项目标识和有效期。 */
+    public record ProjectAssociationContext(
+            String projectCode,
+            String projectId,
+            LocalDate periodStart,
+            LocalDate periodEnd,
+            List<ProjectPeriodContextService.MembershipPeriod> membershipPeriods,
+            boolean membershipAvailable) {
+
+        public ProjectAssociationContext {
+            membershipPeriods = membershipPeriods == null
+                    ? List.of()
+                    : List.copyOf(membershipPeriods);
+            if ((!StringUtils.hasText(projectCode) && !StringUtils.hasText(projectId))
+                    || periodStart == null || periodEnd == null || periodStart.isAfter(periodEnd)) {
+                throw new IllegalArgumentException("项目关联上下文不完整");
+            }
+        }
+    }
+
+    /** 仅记录四类关联数量，不携带人员记录。 */
+    public record AssociationSummary(
+            int directCount,
+            int contextCount,
+            int unknownCount,
+            int unrelatedCount) {
+
+        public AssociationSummary {
+            if (directCount < 0 || contextCount < 0 || unknownCount < 0 || unrelatedCount < 0) {
+                throw new IllegalArgumentException("项目关联数量不能小于零");
+            }
+        }
+
+        public static AssociationSummary empty() {
+            return new AssociationSummary(0, 0, 0, 0);
+        }
+
+        private AssociationSummary plus(AssociationSummary other) {
+            return other == null ? this : new AssociationSummary(
+                    directCount + other.directCount,
+                    contextCount + other.contextCount,
+                    unknownCount + other.unknownCount,
+                    unrelatedCount + other.unrelatedCount
+            );
         }
     }
 
@@ -582,7 +695,8 @@ public class PersonBusinessQueryService {
             Map<String, Object> secureContext,
             String selectionToken,
             boolean refreshRequested,
-            EnumMap<DatasetType, DatasetPlan> plans) {
+            EnumMap<DatasetType, DatasetPlan> plans,
+            ProjectAssociationContext projectContext) {
 
         @Override
         public String toString() {
@@ -607,11 +721,29 @@ public class PersonBusinessQueryService {
             return new ModuleData(status, false, Map.of(), null, null);
         }
 
+        private boolean successful() {
+            return status == ModuleStatus.SUCCESS
+                    || status == ModuleStatus.EMPTY
+                    || status == ModuleStatus.REUSED;
+        }
+
         @Override
         public String toString() {
             return "ModuleData[status=" + status
                     + ", complete=" + complete
                     + ", calculationFactCount=" + calculation.size() + ']';
+        }
+    }
+
+    private record ProjectModule(
+            ModuleData module,
+            AssociationSummary summary,
+            List<String> labels) {
+
+        private static ProjectModule failed() {
+            return new ProjectModule(
+                    ModuleData.failed(ModuleStatus.FAILED), AssociationSummary.empty(), List.of()
+            );
         }
     }
 

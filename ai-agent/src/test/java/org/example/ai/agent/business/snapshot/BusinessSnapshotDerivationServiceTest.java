@@ -8,6 +8,11 @@ import org.example.ai.agent.business.dataset.mapper.ReportDatasetFieldMapper;
 import org.example.ai.agent.business.model.AssociationType;
 import org.example.ai.agent.business.model.BusinessSubjectType;
 import org.example.ai.agent.business.snapshot.BusinessSnapshotDerivationService.DeriveCommand;
+import org.example.ai.agent.business.person.PersonBusinessQueryService;
+import org.example.ai.agent.business.person.PersonBusinessQueryService.DatasetType;
+import org.example.ai.agent.business.person.PersonBusinessQueryService.ProjectAssociationContext;
+import org.example.ai.agent.business.person.ProjectPeriodContextService;
+import org.example.ai.agent.business.person.ProjectRecordAssociationService;
 import org.example.ai.agent.business.snapshot.entity.BusinessSnapshot;
 import org.example.ai.agent.business.snapshot.entity.BusinessSnapshotItem;
 import org.example.ai.agent.business.snapshot.mapper.BusinessSnapshotItemMapper;
@@ -57,7 +62,7 @@ class BusinessSnapshotDerivationServiceTest {
         service = new BusinessSnapshotDerivationService(
                 snapshotMapper, itemMapper, fieldMapper, accessService,
                 new BusinessFactSanitizer(new ReportDatasetValidator()),
-                objectMapper, fixedClock()
+                new ProjectRecordAssociationService(), objectMapper, fixedClock()
         );
         when(accessService.reauthorize(any())).thenReturn(Optional.of(
                 new BusinessSnapshotAccessService.AccessGrant(9L, CONFIG, POLICY)
@@ -203,10 +208,102 @@ class BusinessSnapshotDerivationServiceTest {
                 .isEqualTo(BusinessFactSanitizer.SUMMARY_ONLY_VALUE);
     }
 
+    @Test
+    void shouldDeriveOnlyDirectProjectFactsAndPersistAssociationAuditCounts() throws Exception {
+        ReportDatasetField travelField = field();
+        travelField.setFactCode(PersonBusinessQueryService.TRAVEL_RECORDS);
+        when(fieldMapper.selectList(any())).thenReturn(List.of(travelField));
+        BusinessSnapshot source = sourceSnapshot();
+        source.setDatasetCode("PERSON_TRAVEL");
+        source.setQueryJson(objectMapper.writeValueAsString(Map.of(
+                "startDate", "2026-03-01", "endDate", "2026-03-31"
+        )));
+        source.setFactsJson(objectMapper.writeValueAsString(Map.of(
+                "person", Map.of(
+                        "calculation", Map.of(PersonBusinessQueryService.TRAVEL_RECORDS, List.of(
+                                travel("T-1", "XXXT2674040", "2026-03-01T08:00:00", "10.00"),
+                                travel("T-2", null, "2026-03-02T08:00:00", "20.00"),
+                                travel("T-3", null, null, "30.00"),
+                                travel("T-4", "OTHER", "2026-03-03T08:00:00", "40.00")
+                        )),
+                        "display", Map.of(PersonBusinessQueryService.TRAVEL_RECORDS, List.of()),
+                        "export", Map.of(PersonBusinessQueryService.TRAVEL_RECORDS, List.of()),
+                        "model", Map.of(PersonBusinessQueryService.TRAVEL_RECORDS, List.of())
+                )
+        )));
+        BusinessSnapshotItem item = sourceItem();
+        item.setItemKey("person");
+        when(snapshotMapper.selectOne(any())).thenReturn(source);
+        when(itemMapper.selectList(any())).thenReturn(List.of(item));
+
+        BusinessSnapshotDerivationService.ProjectAssociationDerivation result =
+                service.deriveProjectAssociation(projectAssociationCommand());
+
+        assertThat(result.snapshot().getSourceSnapshotId()).isEqualTo("source-1");
+        assertThat(result.directCalculationFacts().get(PersonBusinessQueryService.TRAVEL_RECORDS))
+                .asList().singleElement().asInstanceOf(org.assertj.core.api.InstanceOfAssertFactories.MAP)
+                .containsEntry("recordId", "T-1")
+                .containsEntry("amount", new java.math.BigDecimal("10.00"));
+        assertThat(result.summary())
+                .isEqualTo(new PersonBusinessQueryService.AssociationSummary(1, 1, 1, 1));
+        assertThat(result.labels()).containsExactly(
+                "存在项目人员期间关联记录，仅供上下文参考，不计入项目直接统计",
+                "部分记录的项目关联无法确认，未计入项目直接统计"
+        );
+        ArgumentCaptor<BusinessSnapshotItem> items =
+                ArgumentCaptor.forClass(BusinessSnapshotItem.class);
+        verify(itemMapper, org.mockito.Mockito.times(4)).insert(items.capture());
+        assertThat(items.getAllValues()).extracting(
+                BusinessSnapshotItem::getAssociationType,
+                BusinessSnapshotItem::getTotalCount
+        ).containsExactly(
+                org.assertj.core.groups.Tuple.tuple("DIRECT", 1),
+                org.assertj.core.groups.Tuple.tuple("PROJECT_PERSON_PERIOD", 1),
+                org.assertj.core.groups.Tuple.tuple("UNKNOWN", 1),
+                org.assertj.core.groups.Tuple.tuple("UNRELATED", 1)
+        );
+
+        Map<?, ?> root = objectMapper.readValue(result.snapshot().getFactsJson(), Map.class);
+        assertThat(root.keySet().stream().map(Object::toString).toList())
+                .containsExactly("direct");
+        Map<?, ?> direct = (Map<?, ?>) root.get("direct");
+        assertThat(direct.keySet().stream().map(Object::toString).toList())
+                .containsExactlyInAnyOrder(
+                "calculation", "display", "export", "model"
+        );
+        for (String channel : List.of("calculation", "display", "export", "model")) {
+            Map<?, ?> facts = (Map<?, ?>) direct.get(channel);
+            List<?> records = (List<?>) facts.get(PersonBusinessQueryService.TRAVEL_RECORDS);
+            assertThat(records).singleElement()
+                    .asInstanceOf(org.assertj.core.api.InstanceOfAssertFactories.MAP)
+                    .containsEntry("recordId", "T-1");
+        }
+    }
+
     private DeriveCommand command() {
         return command(Map.of(
                 "startDate", "2026-01-01", "endDate", "2026-03-31", "grain", "QUARTER"
         ), "QUARTER");
+    }
+
+    private BusinessSnapshotDerivationService.ProjectAssociationCommand
+            projectAssociationCommand() {
+        return new BusinessSnapshotDerivationService.ProjectAssociationCommand(
+                "agent-1", "user-1", "session-1", "Bearer current", Map.of(),
+                "PERSON_TRAVEL", "E100", "source-1",
+                Map.of("startDate", "2026-03-01", "endDate", "2026-03-31"),
+                DatasetType.TRAVEL,
+                new ProjectAssociationContext(
+                        "XXXT2674040", "P-1",
+                        java.time.LocalDate.of(2026, 3, 1),
+                        java.time.LocalDate.of(2026, 3, 31),
+                        List.of(new ProjectPeriodContextService.MembershipPeriod(
+                                java.time.LocalDate.of(2026, 3, 1),
+                                java.time.LocalDate.of(2026, 3, 31)
+                        )),
+                        true
+                )
+        );
     }
 
     private DeriveCommand command(Map<String, Object> target, String grain) {
@@ -283,6 +380,20 @@ class BusinessSnapshotDerivationServiceTest {
 
     private Map<String, Object> record(String date, int amount) {
         return Map.of("date", date, "amount", amount);
+    }
+
+    private Map<String, Object> travel(
+            String recordId,
+            String projectCode,
+            String startAt,
+            String amount) {
+        Map<String, Object> record = new java.util.LinkedHashMap<>();
+        record.put("recordId", recordId);
+        record.put("projectCode", projectCode);
+        record.put("startAt", startAt);
+        record.put("approvalStatus", "APPROVED");
+        record.put("amount", new java.math.BigDecimal(amount));
+        return record;
     }
 
     private Clock fixedClock() {

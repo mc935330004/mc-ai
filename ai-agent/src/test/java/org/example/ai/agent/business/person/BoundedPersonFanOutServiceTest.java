@@ -176,7 +176,8 @@ class BoundedPersonFanOutServiceTest {
                 complete.attendance(),
                 complete.modules().stream()
                         .filter(module -> module.type() != DatasetType.LEAVE)
-                        .toList()
+                        .toList(),
+                complete.associationSummary(), complete.associationLabels()
         );
         PersonBusinessQueryService singlePersonService = mock(PersonBusinessQueryService.class);
         when(singlePersonService.query(any())).thenReturn(missingLeaveModule);
@@ -203,7 +204,8 @@ class BoundedPersonFanOutServiceTest {
                 List.of(new ModuleResult(
                         module.type(), "OTHER_REIMBURSEMENT", module.status(), module.complete(),
                         module.snapshotId(), module.fieldPolicyChecksum()
-                ))
+                )),
+                complete.associationSummary(), complete.associationLabels()
         );
         PersonBusinessQueryService singlePersonService = mock(PersonBusinessQueryService.class);
         when(singlePersonService.query(any())).thenReturn(mismatchedCode);
@@ -225,7 +227,8 @@ class BoundedPersonFanOutServiceTest {
                 complete.travelSummary(),
                 complete.reimbursementSummary(),
                 complete.attendance(),
-                modules
+                modules,
+                complete.associationSummary(), complete.associationLabels()
         );
         PersonBusinessQueryService singlePersonService = mock(PersonBusinessQueryService.class);
         when(singlePersonService.query(any())).thenReturn(duplicateType);
@@ -451,7 +454,8 @@ class BoundedPersonFanOutServiceTest {
                         false,
                         "snapshot-travel",
                         "a".repeat(64)
-                ))
+                )),
+                result.associationSummary(), result.associationLabels()
         ));
         service = new BoundedPersonFanOutService(singlePersonService, properties(10, 1, 100, 1_000, 0));
 
@@ -473,7 +477,8 @@ class BoundedPersonFanOutServiceTest {
                 new TravelSummary(Metric.incomplete(), complete.travelSummary().totalAmount()),
                 complete.reimbursementSummary(),
                 complete.attendance(),
-                complete.modules()
+                complete.modules(),
+                complete.associationSummary(), complete.associationLabels()
         ));
         service = new BoundedPersonFanOutService(singlePersonService, properties(10, 1, 100, 1_000, 0));
 
@@ -633,7 +638,10 @@ class BoundedPersonFanOutServiceTest {
         return new PersonRequest(
                 label,
                 allowAnomalyDisclosure,
-                new Command("run", "user", "session", "Bearer token", Map.of(), label, false, plans)
+                new Command(
+                        "run", "user", "session", "Bearer token", Map.of(), label, false, plans,
+                        null
+                )
         );
     }
 
@@ -677,7 +685,8 @@ class BoundedPersonFanOutServiceTest {
                         plan.type() != incompleteType,
                         "snapshot-" + plan.type().name().toLowerCase(java.util.Locale.ROOT),
                         "a".repeat(64)
-                )).toList()
+                )).toList(),
+                PersonBusinessQueryService.AssociationSummary.empty(), List.of()
         );
     }
 

@@ -132,7 +132,7 @@ public class DepartmentBusinessQueryService {
                         command.anomalyPeopleRequested(),
                         new PersonBusinessQueryService.Command(command.agentRunId(), command.userId(),
                                 command.sessionId(), command.authorization(), command.secureContext(),
-                                token, command.refreshRequested(), command.plans())));
+                                token, command.refreshRequested(), command.plans(), null)));
             }
             MultiPersonSummary summary = fanOutService.query(requests, cancellationRequested);
             EnumMap<PersonQueryStatus, Integer> counts = new EnumMap<>(PersonQueryStatus.class);

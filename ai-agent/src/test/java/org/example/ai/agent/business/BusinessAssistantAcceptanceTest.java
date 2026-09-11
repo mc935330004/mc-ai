@@ -229,7 +229,9 @@ class BusinessAssistantAcceptanceTest {
             return snapshot("fresh-" + command.datasetCode(), command.datasetCode());
         });
         PersonBusinessQueryService service = new PersonBusinessQueryService(
-                tokens, directory, reuse, execution, snapshots, new AttendanceReconciliationService()
+                tokens, directory, reuse, execution, snapshots,
+                mock(org.example.ai.agent.business.snapshot.BusinessSnapshotDerivationService.class),
+                new AttendanceReconciliationService()
         );
 
         PersonBusinessQueryService.Result reused = service.query(personCommand(token, false));
@@ -416,7 +418,9 @@ class BusinessAssistantAcceptanceTest {
                                 PersonBusinessQueryService.ModuleStatus.FAILED,
                                 false, null, null
                         )
-                )
+                ),
+                PersonBusinessQueryService.AssociationSummary.empty(),
+                List.of()
         );
     }
 
@@ -448,7 +452,8 @@ class BusinessAssistantAcceptanceTest {
                 ))
                 .toList();
         return new PersonBusinessQueryService.Command(
-                "run-1", USER_ID, SESSION_ID, "Bearer current-user", Map.of(), token, refresh, plans
+                "run-1", USER_ID, SESSION_ID, "Bearer current-user", Map.of(), token, refresh, plans,
+                null
         );
     }
 

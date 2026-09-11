@@ -716,7 +716,8 @@ class BusinessAssistantServiceTest {
                                 type, "PERSON_" + type.name(),
                                 PersonBusinessQueryService.ModuleStatus.REUSED, true,
                                 "snapshot-" + type.name(), "d".repeat(64)
-                        )).toList()
+                        )).toList(),
+                PersonBusinessQueryService.AssociationSummary.empty(), List.of()
         );
         when(fixture.personBusinessQueryService.query(any())).thenReturn(result);
         when(fixture.modelService.generate(any())).thenReturn("统计完成");
@@ -908,7 +909,8 @@ class BusinessAssistantServiceTest {
                     List.of(personModule(
                             PersonBusinessQueryService.DatasetType.TRAVEL,
                             PersonBusinessQueryService.ModuleStatus.SUCCESS
-                    ))
+                    )),
+                    PersonBusinessQueryService.AssociationSummary.empty(), List.of()
             );
             Fixture fixture = personFixture(personIntent(List.of("TRAVEL"), null), result);
 
@@ -947,7 +949,8 @@ class BusinessAssistantServiceTest {
                     List.of(personModule(
                             PersonBusinessQueryService.DatasetType.REIMBURSEMENT,
                             PersonBusinessQueryService.ModuleStatus.SUCCESS
-                    ))
+                    )),
+                    PersonBusinessQueryService.AssociationSummary.empty(), List.of()
             );
             Fixture fixture = personFixture(personIntent(List.of("REIMBURSEMENT"), null), result);
 
@@ -1436,7 +1439,8 @@ class BusinessAssistantServiceTest {
                         PersonBusinessQueryService.Metric.complete(new java.math.BigDecimal("800")),
                         PersonBusinessQueryService.Metric.complete(new java.math.BigDecimal("700"))
                 ),
-                List.of(), modules
+                List.of(), modules,
+                PersonBusinessQueryService.AssociationSummary.empty(), List.of()
         );
     }
 
@@ -1514,7 +1518,8 @@ class BusinessAssistantServiceTest {
         return new PersonBusinessQueryService.Result(
                 completeTravelSummary(),
                 completeReimbursementSummary(),
-                List.of(), modules
+                List.of(), modules,
+                PersonBusinessQueryService.AssociationSummary.empty(), List.of()
         );
     }
 

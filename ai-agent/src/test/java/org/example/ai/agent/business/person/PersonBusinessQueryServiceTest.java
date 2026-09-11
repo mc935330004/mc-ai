@@ -17,6 +17,7 @@ import org.example.ai.agent.business.person.PersonBusinessQueryService.DatasetTy
 import org.example.ai.agent.business.person.PersonBusinessQueryService.Result;
 import org.example.ai.agent.business.person.model.AttendanceDayResult;
 import org.example.ai.agent.business.snapshot.BusinessSnapshotMatcher;
+import org.example.ai.agent.business.snapshot.BusinessSnapshotDerivationService;
 import org.example.ai.agent.business.snapshot.BusinessSnapshotService;
 import org.example.ai.agent.business.snapshot.SnapshotMatchDecision;
 import org.example.ai.agent.business.snapshot.SnapshotMatchResult;
@@ -69,6 +70,8 @@ class PersonBusinessQueryServiceTest {
     @Mock
     private BusinessSnapshotService snapshotService;
     @Mock
+    private BusinessSnapshotDerivationService snapshotDerivationService;
+    @Mock
     private BusinessSnapshotMapper snapshotMapper;
 
     private SubjectSelectionTokenService selectionTokenService;
@@ -86,6 +89,7 @@ class PersonBusinessQueryServiceTest {
                 ),
                 executionService,
                 snapshotService,
+                snapshotDerivationService,
                 new AttendanceReconciliationService()
         );
         selectionToken = selectionTokenService.issue(
@@ -211,6 +215,9 @@ class PersonBusinessQueryServiceTest {
         assertThat(result.travelSummary().totalAmount().complete()).isFalse();
         assertThat(result.reimbursementSummary().paidAmount().complete()).isTrue();
         assertThat(result.attendance()).isEmpty();
+        assertThat(result.associationSummary())
+                .isEqualTo(PersonBusinessQueryService.AssociationSummary.empty());
+        assertThat(result.associationLabels()).isEmpty();
         verify(executionService, org.mockito.Mockito.times(1)).execute(any());
     }
 
@@ -228,6 +235,79 @@ class PersonBusinessQueryServiceTest {
         assertThat(result.reimbursementSummary().paidAmount().complete()).isFalse();
         assertThat(result.attendance()).isEmpty();
         verify(executionService, org.mockito.Mockito.times(1)).execute(any());
+    }
+
+    @Test
+    void projectContextUsesOnlyDerivedDirectTravelFactsAndSnapshot() {
+        prepareSuccessfulExecution();
+        BusinessSnapshot derived = derivedSnapshot();
+        when(snapshotDerivationService.deriveProjectAssociation(any())).thenReturn(
+                new BusinessSnapshotDerivationService.ProjectAssociationDerivation(
+                        derived,
+                        Map.of(PersonBusinessQueryService.TRAVEL_RECORDS, List.of(Map.of(
+                                "recordId", "T-1",
+                                "approvalStatus", "APPROVED",
+                                "amount", new BigDecimal("10.00")
+                        ))),
+                        new PersonBusinessQueryService.AssociationSummary(1, 1, 1, 1),
+                        List.of(
+                                "存在项目人员期间关联记录，仅供上下文参考，不计入项目直接统计",
+                                "部分记录的项目关联无法确认，未计入项目直接统计"
+                        )
+                )
+        );
+
+        Result result = service.query(projectCommand());
+
+        assertThat(result.travelSummary().tripCount().value()).isEqualTo(1);
+        assertThat(result.travelSummary().totalAmount().value())
+                .isEqualByComparingTo("10.00");
+        assertThat(result.associationSummary())
+                .isEqualTo(new PersonBusinessQueryService.AssociationSummary(1, 1, 1, 1));
+        assertThat(result.associationLabels()).hasSize(2);
+        assertThat(result.modules()).singleElement()
+                .extracting(PersonBusinessQueryService.ModuleResult::snapshotId)
+                .isEqualTo("derived-travel");
+    }
+
+    @Test
+    void projectDirectTravelWithMissingAmountRemainsIncomplete() {
+        prepareSuccessfulExecution();
+        BusinessSnapshot derived = derivedSnapshot();
+        when(snapshotDerivationService.deriveProjectAssociation(any())).thenReturn(
+                new BusinessSnapshotDerivationService.ProjectAssociationDerivation(
+                        derived,
+                        Map.of(PersonBusinessQueryService.TRAVEL_RECORDS, List.of(Map.of(
+                                "recordId", "T-1", "approvalStatus", "APPROVED"
+                        ))),
+                        new PersonBusinessQueryService.AssociationSummary(1, 0, 0, 0),
+                        List.of()
+                )
+        );
+
+        Result result = service.query(projectCommand());
+
+        assertThat(result.travelSummary().tripCount().value()).isEqualTo(1);
+        assertThat(result.travelSummary().totalAmount().complete()).isFalse();
+        assertThat(result.travelSummary().totalAmount().value()).isNull();
+    }
+
+    @Test
+    void projectRootFactsUseOnlyTheirDeclaredOccurrenceDateFields() {
+        LocalDate date = LocalDate.of(2026, 3, 1);
+
+        assertThat(PersonBusinessFactAggregator.occurredOn(
+                DatasetType.TRAVEL, Map.of("startAt", "2026-03-01T08:00:00")
+        )).isEqualTo(date);
+        assertThat(PersonBusinessFactAggregator.occurredOn(
+                DatasetType.PUNCH, Map.of("time", "2026-03-01T08:00:00")
+        )).isEqualTo(date);
+        assertThat(PersonBusinessFactAggregator.occurredOn(
+                DatasetType.REIMBURSEMENT, Map.of("occurredAt", "2026-03-01T08:00:00")
+        )).isEqualTo(date);
+        assertThat(PersonBusinessFactAggregator.occurredOn(
+                DatasetType.TRAVEL, Map.of("occurredAt", "2026-03-01T08:00:00")
+        )).isNull();
     }
 
     @Test
@@ -995,6 +1075,8 @@ class PersonBusinessQueryServiceTest {
                 ),
                 new PersonBusinessQueryService.ReimbursementSummary(amount, amount, amount),
                 List.of(attendance),
+                List.of(),
+                PersonBusinessQueryService.AssociationSummary.empty(),
                 List.of()
         );
 
@@ -1055,7 +1137,8 @@ class PersonBusinessQueryServiceTest {
                                 plan.requestedGrain(), plan.requiredFactCodes(),
                                 requestedTypes.contains(plan.type())
                         ))
-                        .toList()
+                        .toList(),
+                null
         );
     }
 
@@ -1086,7 +1169,24 @@ class PersonBusinessQueryServiceTest {
                 Map.of("tenant", "tenant-secret"),
                 token,
                 refreshRequested,
-                plans
+                plans,
+                null
+        );
+    }
+
+    private Command projectCommand() {
+        Command source = commandWithPlans(Set.of(DatasetType.TRAVEL), DatasetType.TRAVEL);
+        return new Command(
+                source.agentRunId(), source.userId(), source.sessionId(),
+                source.authorization(), source.secureContext(), source.selectionToken(),
+                source.refreshRequested(), source.plans(),
+                new PersonBusinessQueryService.ProjectAssociationContext(
+                        "XXXT2674040", "P-1",
+                        LocalDate.of(2026, 3, 1), LocalDate.of(2026, 3, 31),
+                        List.of(new ProjectPeriodContextService.MembershipPeriod(
+                                LocalDate.of(2026, 3, 1), LocalDate.of(2026, 3, 31)
+                        )), true
+                )
         );
     }
 
@@ -1126,7 +1226,7 @@ class PersonBusinessQueryServiceTest {
         return new Command(
                 source.agentRunId(), source.userId(), source.sessionId(),
                 source.authorization(), source.secureContext(), source.selectionToken(),
-                source.refreshRequested(), plans
+                source.refreshRequested(), plans, source.projectContext()
         );
     }
 
@@ -1174,6 +1274,13 @@ class PersonBusinessQueryServiceTest {
                 command.datasetCode(),
                 result.safeFacts()
         );
+    }
+
+    private BusinessSnapshot derivedSnapshot() {
+        BusinessSnapshot snapshot = new BusinessSnapshot();
+        snapshot.setSnapshotId("derived-travel");
+        snapshot.setFieldPolicyChecksum("c".repeat(64));
+        return snapshot;
     }
 
     private BusinessSnapshot reusableSnapshot(
