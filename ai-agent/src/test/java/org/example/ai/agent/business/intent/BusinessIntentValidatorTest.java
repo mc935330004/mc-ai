@@ -51,6 +51,43 @@ class BusinessIntentValidatorTest {
     }
 
     @Test
+    void projectPeriodFlagDoesNotInventDates() {
+        BusinessQueryIntent intent = validator.validate(new BusinessQueryIntent(
+                BusinessSubjectType.PERSON,
+                "XXXT2674040",
+                "张三",
+                null,
+                null,
+                null,
+                null,
+                List.of("TRAVEL"),
+                false,
+                null,
+                false,
+                true
+        ));
+
+        assertThat(intent.projectPeriodRequested()).isTrue();
+        assertThat(intent.periodStart()).isNull();
+        assertThat(intent.periodEnd()).isNull();
+    }
+
+    @Test
+    void explicitPeriodMustProvideBothDates() {
+        BusinessQueryIntent intent = intent(
+                null,
+                LocalDate.of(2026, 1, 1),
+                null,
+                List.of("TRAVEL"),
+                null
+        );
+
+        assertThatThrownBy(() -> validator.validate(intent))
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("时间范围");
+    }
+
+    @Test
     void rejectsDatasetCodeThatLooksLikeExecutionTarget() {
         BusinessQueryIntent intent = intent(
                 null,
@@ -201,7 +238,8 @@ class BusinessIntentValidatorTest {
                   "datasetCodes": ["PROJECT_OVERVIEW"],
                   "refresh": false,
                   "exportFormat": "XLSX",
-                  "anomalyPeopleRequested": false
+                  "anomalyPeopleRequested": false,
+                  "projectPeriodRequested": false
                 }
                 ```
                 """
@@ -226,6 +264,7 @@ class BusinessIntentValidatorTest {
         assertThat(resolved.periodEnd()).isNull();
         assertThat(resolved.exportFormat()).isEqualTo("XLSX");
         assertThat(resolved.anomalyPeopleRequested()).isFalse();
+        assertThat(resolved.projectPeriodRequested()).isFalse();
 
         ArgumentCaptor<String> systemPrompt = ArgumentCaptor.forClass(String.class);
         verify(chatClientService).call(
@@ -254,6 +293,8 @@ class BusinessIntentValidatorTest {
                 .contains("PERSON、DEPARTMENT")
                 .contains("TRAVEL、ATTENDANCE、REIMBURSEMENT")
                 .contains("打卡、缺卡或考勤")
+                .contains("projectPeriodRequested")
+                .contains("项目期间")
                 .contains("PROJECT");
     }
 
@@ -293,6 +334,44 @@ class BusinessIntentValidatorTest {
     }
 
     @Test
+    void resolverParsesExplicitProjectPeriodWithoutInventingDates() {
+        TrackedChatClientService chatClientService = mock(TrackedChatClientService.class);
+        ChatResponse response = mock(ChatResponse.class, RETURNS_DEEP_STUBS);
+        when(response.getResult().getOutput().getText()).thenReturn("""
+                {
+                  "subjectType": "PERSON",
+                  "projectCode": "XXXT2674040",
+                  "personName": "张三",
+                  "employeeNo": null,
+                  "projectYear": null,
+                  "periodStart": null,
+                  "periodEnd": null,
+                  "datasetCodes": ["TRAVEL"],
+                  "refresh": false,
+                  "exportFormat": null,
+                  "anomalyPeopleRequested": false,
+                  "projectPeriodRequested": true
+                }
+                """);
+        when(chatClientService.call(any(), anyString(), anyString(), any(ChatOptions.Builder.class)))
+                .thenReturn(response);
+        BusinessQueryIntentResolver resolver = new BusinessQueryIntentResolver(
+                chatClientService,
+                new ObjectMapper().findAndRegisterModules(),
+                validator
+        );
+
+        BusinessQueryIntent resolved = resolver.resolve(
+                "查询张三在 XXXT2674040 项目期间的出差",
+                ModelCallContext.builder().build()
+        );
+
+        assertThat(resolved.projectPeriodRequested()).isTrue();
+        assertThat(resolved.periodStart()).isNull();
+        assertThat(resolved.periodEnd()).isNull();
+    }
+
+    @Test
     void resolverParsesExplicitAnomalyPeopleRequest() {
         TrackedChatClientService chatClientService = mock(TrackedChatClientService.class);
         ChatResponse response = mock(ChatResponse.class, RETURNS_DEEP_STUBS);
@@ -308,7 +387,8 @@ class BusinessIntentValidatorTest {
                   "datasetCodes": ["PERSON_OVERVIEW"],
                   "refresh": false,
                   "exportFormat": null,
-                  "anomalyPeopleRequested": true
+                  "anomalyPeopleRequested": true,
+                  "projectPeriodRequested": false
                 }
                 """);
         when(chatClientService.call(any(), anyString(), anyString(), any(ChatOptions.Builder.class)))
@@ -353,6 +433,7 @@ class BusinessIntentValidatorTest {
         );
 
         assertThat(resolved.anomalyPeopleRequested()).isFalse();
+        assertThat(resolved.projectPeriodRequested()).isFalse();
     }
 
     private BusinessQueryIntent intent(
@@ -373,6 +454,7 @@ class BusinessIntentValidatorTest {
                 datasetCodes,
                 false,
                 exportFormat,
+                false,
                 false
         );
     }
@@ -393,6 +475,7 @@ class BusinessIntentValidatorTest {
                 datasetCodes,
                 false,
                 exportFormat,
+                false,
                 false
         );
     }

@@ -251,7 +251,7 @@ class BusinessAssistantServiceTest {
         when(fixture.intentResolver.resolve(any(), any())).thenReturn(new BusinessQueryIntent(
                 BusinessSubjectType.DEPARTMENT, null, null, null, null,
                 java.time.LocalDate.of(2026, 8, 1), java.time.LocalDate.of(2026, 8, 31),
-                datasetCodes, true, export, anomalies));
+                datasetCodes, true, export, anomalies, false));
         when(fixture.subjectResolutionService.resolve(any())).thenReturn(new SubjectResolutionResult(
                 SubjectResolutionState.RESOLVED,
                 new SubjectCandidate(BusinessSubjectType.DEPARTMENT, "department-selection-token", "工程部",
@@ -521,7 +521,7 @@ class BusinessAssistantServiceTest {
         Fixture fixture = new Fixture();
         when(fixture.intentResolver.resolve(any(), any())).thenReturn(new BusinessQueryIntent(
                 BusinessSubjectType.PROJECT, null, null, null,
-                2026, null, null, List.of(), false, null, false
+                2026, null, null, List.of(), false, null, false, false
         ));
         when(fixture.subjectResolutionService.resolve(any())).thenReturn(new SubjectResolutionResult(
                 SubjectResolutionState.CANDIDATES,
@@ -551,7 +551,7 @@ class BusinessAssistantServiceTest {
         Fixture fixture = new Fixture();
         when(fixture.intentResolver.resolve(any(), any())).thenReturn(new BusinessQueryIntent(
                 BusinessSubjectType.PROJECT, "P-1001", null, null,
-                2026, null, null, List.of(), false, "PDF", false
+                2026, null, null, List.of(), false, "PDF", false, false
         ));
         when(fixture.subjectResolutionService.resolve(any())).thenReturn(resolvedProject());
         ProjectPanoramaResult panorama = new ProjectPanoramaResult(
@@ -698,7 +698,7 @@ class BusinessAssistantServiceTest {
         when(fixture.intentResolver.resolve(any(), any())).thenReturn(new BusinessQueryIntent(
                 BusinessSubjectType.PERSON, "P-1001", "张三", null,
                 null, java.time.LocalDate.of(2026, 8, 1), java.time.LocalDate.of(2026, 8, 31),
-                List.of("TRAVEL"), false, null, false
+                List.of("TRAVEL"), false, null, false, true
         ));
         when(fixture.subjectResolutionService.resolve(any())).thenReturn(new SubjectResolutionResult(
                 SubjectResolutionState.EMPTY, null, List.of(), 1, 20, 0, false, "未找到"
@@ -720,7 +720,7 @@ class BusinessAssistantServiceTest {
         when(fixture.intentResolver.resolve(any(), any())).thenReturn(new BusinessQueryIntent(
                 BusinessSubjectType.PERSON, "P-1001", "张三", null,
                 null, java.time.LocalDate.of(2026, 8, 1), java.time.LocalDate.of(2026, 8, 31),
-                List.of("TRAVEL"), false, "PDF", false
+                List.of("TRAVEL"), false, "PDF", false, true
         ));
         when(fixture.subjectResolutionService.resolve(any())).thenReturn(resolvedPerson());
         when(fixture.reportDatasetService.list()).thenReturn(personDatasets());
@@ -749,7 +749,7 @@ class BusinessAssistantServiceTest {
         when(fixture.intentResolver.resolve(any(), any())).thenReturn(new BusinessQueryIntent(
                 BusinessSubjectType.PERSON, null, "张三", null,
                 null, java.time.LocalDate.of(2026, 8, 1), java.time.LocalDate.of(2026, 8, 31),
-                List.of(), false, "PDF", false
+                List.of(), false, "PDF", false, false
         ));
         when(fixture.subjectResolutionService.resolve(any())).thenReturn(resolvedPerson());
         when(fixture.reportDatasetService.list()).thenReturn(personDatasets());
@@ -1139,7 +1139,7 @@ class BusinessAssistantServiceTest {
         when(fixture.intentResolver.resolve(any(), any())).thenReturn(new BusinessQueryIntent(
                 BusinessSubjectType.PROJECT, "P-1001", null, null, 2026, null, null,
                 List.of("CONTRACT", "BUDGET", "CASH_FLOW", "OUTPUT", "RISK", "SCHEDULE"),
-                false, null, false
+                false, null, false, false
         ));
         when(fixture.subjectResolutionService.resolve(any())).thenReturn(resolvedProject());
         when(fixture.panoramaExecutionService.execute(any(), any())).thenReturn(projectPanorama());
@@ -1197,7 +1197,7 @@ class BusinessAssistantServiceTest {
     void clientExtraSubjectTypeMustNotBecomeTrustedSubject() throws Exception {
         Fixture fixture = new Fixture();
         when(fixture.intentResolver.resolve(any(), any())).thenReturn(new BusinessQueryIntent(
-                null, null, null, null, null, null, null, List.of(), false, null, false
+                null, null, null, null, null, null, null, List.of(), false, null, false, false
         ));
         AgentRequest request = request("查一下相关情况");
         request.setExtra(Map.of("subjectType", "PERSON"));
@@ -1234,7 +1234,7 @@ class BusinessAssistantServiceTest {
     private BusinessQueryIntent projectIntent(boolean refresh, String projectCode) {
         return new BusinessQueryIntent(
                 BusinessSubjectType.PROJECT, projectCode, null, null,
-                2026, null, null, List.of(), refresh, null, false
+                2026, null, null, List.of(), refresh, null, false, false
         );
     }
 
@@ -1313,7 +1313,7 @@ class BusinessAssistantServiceTest {
         return new BusinessQueryIntent(
                 BusinessSubjectType.PERSON, null, null, null,
                 null, java.time.LocalDate.of(2026, 8, 1), java.time.LocalDate.of(2026, 8, 31),
-                List.of(), refresh, null, false
+                List.of(), refresh, null, false, false
         );
     }
 
@@ -1321,7 +1321,7 @@ class BusinessAssistantServiceTest {
         return new BusinessQueryIntent(
                 BusinessSubjectType.PERSON, null, null, null,
                 null, java.time.LocalDate.of(2026, 8, 1), java.time.LocalDate.of(2026, 8, 31),
-                datasetCodes, false, exportFormat, false
+                datasetCodes, false, exportFormat, false, false
         );
     }
 

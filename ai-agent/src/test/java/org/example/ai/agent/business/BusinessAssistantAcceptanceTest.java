@@ -100,7 +100,7 @@ class BusinessAssistantAcceptanceTest {
         FacadeHarness facade = new FacadeHarness();
         facade.intents(new BusinessQueryIntent(
                 BusinessSubjectType.PROJECT, null, null, null,
-                LocalDate.now().getYear(), null, null, List.of(), false, null, false
+                LocalDate.now().getYear(), null, null, List.of(), false, null, false, false
         ));
         when(facade.projects.search(any())).thenReturn(new SubjectDirectoryPage(
                 true,
@@ -183,7 +183,7 @@ class BusinessAssistantAcceptanceTest {
         );
         facade.intents(new BusinessQueryIntent(
                 BusinessSubjectType.PROJECT, PROJECT_CODE, null, null,
-                null, null, null, List.of(), false, null, false
+                null, null, null, List.of(), false, null, false, false
         ));
         when(facade.projects.search(any())).thenReturn(new SubjectDirectoryPage(
                 true, List.of(project("project-1", PROJECT_CODE)), 1, 20, 1, false
@@ -374,7 +374,7 @@ class BusinessAssistantAcceptanceTest {
                 null, null,
                 LocalDate.of(2026, 8, 3), LocalDate.of(2026, 8, 5),
                 List.of("TRAVEL", "ATTENDANCE", "REIMBURSEMENT"),
-                refresh, exportFormat, false
+                refresh, exportFormat, false, projectContext
         );
     }
 

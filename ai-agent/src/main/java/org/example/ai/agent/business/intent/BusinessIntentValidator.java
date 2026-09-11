@@ -57,8 +57,11 @@ public class BusinessIntentValidator {
             throw new BusinessException(400, "导出格式仅支持 XLSX、DOCX 或 PDF");
         }
 
+        if ((intent.periodStart() == null) != (intent.periodEnd() == null)) {
+            throw new BusinessException(400, "业务数据时间范围必须同时提供开始和结束日期");
+        }
+
         if (intent.periodStart() != null
-                && intent.periodEnd() != null
                 && intent.periodEnd().isBefore(intent.periodStart())) {
             throw new BusinessException(400, "结束日期不能早于开始日期");
         }
