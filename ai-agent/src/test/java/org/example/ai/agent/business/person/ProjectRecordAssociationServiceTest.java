@@ -1,128 +1,104 @@
 package org.example.ai.agent.business.person;
 
 import org.example.ai.agent.business.model.AssociationType;
-import org.example.ai.agent.business.person.ProjectRecordAssociationService.BusinessRecord;
+import org.example.ai.agent.business.person.ProjectRecordAssociationService.MembershipPeriod;
 import org.example.ai.agent.business.person.ProjectRecordAssociationService.ProjectIdentity;
-import org.example.ai.agent.business.person.ProjectRecordAssociationService.ProjectAssociationResult;
+import org.example.ai.agent.business.person.ProjectRecordAssociationService.RecordReference;
 import org.junit.jupiter.api.Test;
 
-import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 
 class ProjectRecordAssociationServiceTest {
 
     private final ProjectRecordAssociationService service = new ProjectRecordAssociationService();
 
     @Test
-    void directProjectCodeWinsAndOnlyDirectRecordsEnterProjectTotals() {
-        BusinessRecord direct = record("direct", "P-100", null, null, null, "10", "8", "30", "20");
-        BusinessRecord contextual = record(
-                "context", null, null,
-                LocalDate.of(2025, 12, 1), LocalDate.of(2026, 12, 31),
-                "99", "99", "99", "99"
-        );
-        BusinessRecord otherProject = record(
-                "other", "P-200", null,
-                LocalDate.of(2025, 12, 1), LocalDate.of(2026, 12, 31),
-                "50", "50", "50", "50"
-        );
-
-        ProjectAssociationResult result = service.associate(
-                new ProjectIdentity("P-100", "ID-100"),
+    void matchingProjectIdentityIsDirect() {
+        AssociationType type = service.classify(
+                new ProjectIdentity("XXXT2674040", "P-1"),
                 LocalDate.of(2026, 1, 1),
                 LocalDate.of(2026, 12, 31),
-                List.of(direct, contextual, otherProject)
+                List.of(),
+                new RecordReference("T-1", "XXXT2674040", "P-1", null)
         );
 
-        assertThat(result.directRecords()).extracting(item -> item.record().recordId())
-                .containsExactly("direct");
-        assertThat(result.directRecords()).allMatch(item -> item.type() == AssociationType.DIRECT);
-        assertThat(result.contextRecords()).extracting(item -> item.record().recordId())
-                .containsExactly("context");
-        assertThat(result.contextRecords()).allMatch(
-                item -> item.type() == AssociationType.PROJECT_PERSON_PERIOD
-        );
-        assertThat(result.contextLabel()).contains("不计入项目汇总");
-        assertThat(result.totals().cost()).isEqualByComparingTo("10");
-        assertThat(result.totals().hours()).isEqualByComparingTo("8");
-        assertThat(result.totals().travelAmount()).isEqualByComparingTo("30");
-        assertThat(result.totals().reimbursementAmount()).isEqualByComparingTo("20");
+        assertThat(type).isEqualTo(AssociationType.DIRECT);
     }
 
     @Test
-    void rosterMatchRequiresNoProjectIdentityAndOverlappingMembershipPeriod() {
-        BusinessRecord before = new BusinessRecord(
-                "before", null, null, LocalDate.of(2025, 12, 31),
-                LocalDate.of(2025, 1, 1), LocalDate.of(2026, 12, 31),
-                BigDecimal.ONE, BigDecimal.ONE, BigDecimal.ONE, BigDecimal.ONE
-        );
-        BusinessRecord membershipOutsidePeriod = new BusinessRecord(
-                "outside-membership", null, null, LocalDate.of(2026, 6, 1),
-                LocalDate.of(2025, 1, 1), LocalDate.of(2025, 12, 31),
-                BigDecimal.ONE, BigDecimal.ONE, BigDecimal.ONE, BigDecimal.ONE
-        );
-
-        ProjectAssociationResult result = service.associate(
-                new ProjectIdentity("P-100", null),
+    void conflictingProjectIdentityIsUnrelatedAndNeverFallsBackToMembership() {
+        AssociationType type = service.classify(
+                new ProjectIdentity("XXXT2674040", "P-1"),
                 LocalDate.of(2026, 1, 1),
                 LocalDate.of(2026, 12, 31),
-                List.of(before, membershipOutsidePeriod)
+                List.of(new MembershipPeriod(LocalDate.of(2026, 1, 1), null)),
+                new RecordReference("T-1", "OTHER", null, LocalDate.of(2026, 3, 1))
         );
 
-        assertThat(result.directRecords()).isEmpty();
-        assertThat(result.contextRecords()).isEmpty();
-        assertThat(result.unrelatedRecords()).extracting(BusinessRecord::recordId)
-                .containsExactly("before", "outside-membership");
+        assertThat(type).isEqualTo(AssociationType.UNRELATED);
     }
 
     @Test
-    void projectIdCanAssociateDirectlyAndConflictingCodeIdFailClosed() {
-        BusinessRecord byId = record(
-                "by-id", null, "ID-100", null, null,
-                "1", "1", "1", "1"
-        );
-        BusinessRecord conflict = record(
-                "conflict", "P-100", "ID-OTHER", null, null,
-                "9", "9", "9", "9"
-        );
-
-        ProjectAssociationResult result = service.associate(
-                new ProjectIdentity(null, "ID-100"),
+    void recordWithoutProjectIdentityWithinProjectAndMembershipPeriodsIsContextual() {
+        AssociationType type = service.classify(
+                new ProjectIdentity("XXXT2674040", "P-1"),
                 LocalDate.of(2026, 1, 1),
                 LocalDate.of(2026, 12, 31),
-                List.of(byId, conflict)
+                List.of(new MembershipPeriod(LocalDate.of(2026, 2, 1), LocalDate.of(2026, 6, 30))),
+                new RecordReference("T-1", null, null, LocalDate.of(2026, 3, 1))
         );
 
-        assertThat(result.directRecords()).extracting(item -> item.record().recordId())
-                .containsExactly("by-id");
-        assertThat(result.unrelatedRecords()).extracting(BusinessRecord::recordId)
-                .containsExactly("conflict");
+        assertThat(type).isEqualTo(AssociationType.PROJECT_PERSON_PERIOD);
     }
 
-    private BusinessRecord record(
-            String id,
-            String projectCode,
-            String projectId,
-            LocalDate rosterStart,
-            LocalDate rosterEnd,
-            String cost,
-            String hours,
-            String travel,
-            String reimbursement) {
-        return new BusinessRecord(
-                id,
-                projectCode,
-                projectId,
-                LocalDate.of(2026, 6, 1),
-                rosterStart,
-                rosterEnd,
-                new BigDecimal(cost),
-                new BigDecimal(hours),
-                new BigDecimal(travel),
-                new BigDecimal(reimbursement)
+    @Test
+    void missingIdentityAndMembershipIsUnknownWithoutInventingTotals() {
+        AssociationType type = service.classify(
+                new ProjectIdentity("XXXT2674040", "P-1"),
+                LocalDate.of(2026, 1, 1),
+                LocalDate.of(2026, 12, 31),
+                List.of(),
+                new RecordReference("T-1", null, null, LocalDate.of(2026, 3, 1))
         );
+
+        assertThat(type).isEqualTo(AssociationType.UNKNOWN);
+    }
+
+    @Test
+    void missingDateOrPeriodMatchIsUnknown() {
+        ProjectIdentity target = new ProjectIdentity("XXXT2674040", "P-1");
+        LocalDate start = LocalDate.of(2026, 1, 1);
+        LocalDate end = LocalDate.of(2026, 12, 31);
+        List<MembershipPeriod> memberships = List.of(new MembershipPeriod(start, end));
+
+        assertThat(service.classify(target, start, end, memberships,
+                new RecordReference("T-1", null, null, null)))
+                .isEqualTo(AssociationType.UNKNOWN);
+        assertThat(service.classify(target, start, end, memberships,
+                new RecordReference("T-2", null, null, LocalDate.of(2027, 1, 1))))
+                .isEqualTo(AssociationType.UNKNOWN);
+    }
+
+    @Test
+    void invalidInputFailsClosed() {
+        ProjectIdentity target = new ProjectIdentity("XXXT2674040", "P-1");
+        LocalDate start = LocalDate.of(2026, 1, 1);
+        LocalDate end = LocalDate.of(2026, 12, 31);
+        RecordReference record = new RecordReference("T-1", null, null, start);
+
+        assertThatIllegalArgumentException()
+                .isThrownBy(() -> service.classify(null, start, end, List.of(), record));
+        assertThatIllegalArgumentException()
+                .isThrownBy(() -> service.classify(target, end, start, List.of(), record));
+        assertThatIllegalArgumentException()
+                .isThrownBy(() -> service.classify(target, start, end, null, record));
+        assertThatIllegalArgumentException()
+                .isThrownBy(() -> service.classify(target, start, end, List.of(), null));
+        assertThatIllegalArgumentException()
+                .isThrownBy(() -> new MembershipPeriod(null, end));
     }
 }

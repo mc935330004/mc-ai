@@ -11,6 +11,9 @@ public enum AssociationType {
     /** 项目、人员与期间共同形成的关联。 */
     PROJECT_PERSON_PERIOD,
 
+    /** 缺少足够信息，无法确认关联关系。 */
+    UNKNOWN,
+
     /** 不相关。 */
     UNRELATED
 }

@@ -29,6 +29,6 @@ class BusinessDomainContractTest {
     @Test
     void associationTypesKeepStableNamesAndOrder() {
         assertThat(Arrays.stream(AssociationType.values()).map(Enum::name))
-                .containsExactly("DIRECT", "PROJECT_PERSON_PERIOD", "UNRELATED");
+                .containsExactly("DIRECT", "PROJECT_PERSON_PERIOD", "UNKNOWN", "UNRELATED");
     }
 }
