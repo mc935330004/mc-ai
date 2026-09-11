@@ -20,6 +20,7 @@ import org.example.ai.agent.business.panorama.ProjectPanoramaSnapshotReuseServic
 import org.example.ai.agent.business.panorama.model.PanoramaExecutionState;
 import org.example.ai.agent.business.panorama.model.ProjectPanoramaResult;
 import org.example.ai.agent.business.person.PersonBusinessQueryService;
+import org.example.ai.agent.business.person.PersonDatasetPlanService;
 import org.example.ai.agent.business.person.PersonDatasetSelectionService;
 import org.example.ai.agent.business.report.BusinessAssistantReportService;
 import org.example.ai.agent.business.report.entity.CompositeReportTask;
@@ -236,6 +237,27 @@ class BusinessAssistantServiceTest {
                 .containsKey("anomalyRows")
                 .doesNotContainKeys("tripCount", "travelAmount", "reimbursementAmount");
         assertThat(answer.tableDefinitions()).hasSize(1);
+    }
+
+    @Test
+    void departmentWithoutExecutablePlansShouldFinishWithoutDepartmentQuery() throws Exception {
+        Fixture fixture = departmentFixture(
+                false,
+                null,
+                completedDepartment(),
+                List.of("REIMBURSEMENT")
+        );
+        when(fixture.reportDatasetService.list()).thenReturn(List.of());
+
+        fixture.service.handle(request("查询部门报销"), fixture.stream, "run-1");
+
+        verify(fixture.departmentBusinessQueryService, never()).query(any(), any());
+        assertThat(composedDepartment(fixture).datasets()).singleElement().satisfies(dataset -> {
+            assertThat(dataset.datasetCode()).isEqualTo("REIMBURSEMENT");
+            assertThat(dataset.label()).isEqualTo("报销");
+            assertThat(dataset.safeMessage()).isEqualTo("数据源尚未配置，本次未纳入统计");
+        });
+        verify(fixture.stream).finishChatResponse();
     }
 
     private Fixture departmentFixture(boolean anomalies, String export, DepartmentBusinessQueryService.Result result) {
@@ -1065,7 +1087,33 @@ class BusinessAssistantServiceTest {
     }
 
     @Test
-    void attendanceShouldFailWhenAnyDependencyConfigurationIsMissing() {
+    void reimbursementWithoutConfigurationShouldFinishWithUnavailableStatus() throws Exception {
+        Fixture fixture = new Fixture();
+        when(fixture.intentResolver.resolve(any(), any()))
+                .thenReturn(personIntent(List.of("REIMBURSEMENT"), "PDF"));
+        when(fixture.subjectResolutionService.resolve(any())).thenReturn(resolvedPerson());
+        when(fixture.reportDatasetService.list()).thenReturn(List.of());
+
+        fixture.service.handle(request("查询报销并导出 PDF"), fixture.stream, "run-1");
+
+        verify(fixture.personBusinessQueryService, never()).query(any());
+        verify(fixture.reportService, never()).createPersonReport(any());
+        assertThat(composedDepartment(fixture).datasets()).singleElement().satisfies(dataset -> {
+            assertThat(dataset.datasetCode()).isEqualTo("REIMBURSEMENT");
+            assertThat(dataset.label()).isEqualTo("报销");
+            assertThat(dataset.status()).isEqualTo(
+                    org.example.ai.agent.business.model.DatasetExecutionStatus.FAILED
+            );
+            assertThat(dataset.dataComplete()).isFalse();
+            assertThat(dataset.displayFacts()).isEmpty();
+            assertThat(dataset.modelFacts()).isEmpty();
+            assertThat(dataset.safeMessage()).isEqualTo("数据源尚未配置，本次未纳入统计");
+        });
+        verify(fixture.stream).finishChatResponse();
+    }
+
+    @Test
+    void attendanceMissingDependencyShouldFinishWithoutBusinessQuery() throws Exception {
         Fixture fixture = new Fixture();
         when(fixture.intentResolver.resolve(any(), any()))
                 .thenReturn(personIntent(List.of("ATTENDANCE"), null));
@@ -1077,25 +1125,74 @@ class BusinessAssistantServiceTest {
                 personDataset(PersonBusinessQueryService.DatasetType.SCHEDULE, "CFG_SCHEDULE")
         ));
 
-        assertThatThrownBy(() -> fixture.service.handle(request("查询考勤"), fixture.stream, "run-1"))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("数据集配置");
+        fixture.service.handle(request("查询考勤"), fixture.stream, "run-1");
+
         verify(fixture.personBusinessQueryService, never()).query(any());
+        verify(fixture.reportService, never()).createPersonReport(any());
+        assertThat(composedDepartment(fixture).datasets()).singleElement().satisfies(dataset -> {
+            assertThat(dataset.datasetCode()).isEqualTo("ATTENDANCE");
+            assertThat(dataset.label()).isEqualTo("考勤");
+            assertThat(dataset.safeMessage()).isEqualTo("数据源尚未配置，本次未纳入统计");
+        });
     }
 
     @Test
-    void defaultPersonOverviewShouldStillRequireAllConfigurations() {
+    void availableTravelAndMissingReimbursementShouldExecuteTravelAndDiscloseUnavailable() throws Exception {
         Fixture fixture = new Fixture();
-        when(fixture.intentResolver.resolve(any(), any())).thenReturn(personIntent(List.of(), null));
+        when(fixture.intentResolver.resolve(any(), any()))
+                .thenReturn(personIntent(List.of("TRAVEL", "REIMBURSEMENT"), null));
         when(fixture.subjectResolutionService.resolve(any())).thenReturn(resolvedPerson());
-        when(fixture.reportDatasetService.list()).thenReturn(personDatasets().stream()
-                .filter(dataset -> !"PERSON_CALENDAR".equals(dataset.getDomainCode()))
-                .toList());
+        when(fixture.reportDatasetService.list()).thenReturn(List.of(
+                personDataset(PersonBusinessQueryService.DatasetType.TRAVEL, "CFG_TRAVEL")
+        ));
+        when(fixture.personBusinessQueryService.query(any())).thenReturn(personResult(
+                List.of(PersonBusinessQueryService.DatasetType.TRAVEL), Set.of()
+        ));
 
-        assertThatThrownBy(() -> fixture.service.handle(request("查询人员全览"), fixture.stream, "run-1"))
-                .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("数据集配置");
-        verify(fixture.personBusinessQueryService, never()).query(any());
+        fixture.service.handle(request("查询出差和报销"), fixture.stream, "run-1");
+
+        assertThat(capturedPersonCommand(fixture).plans())
+                .extracting(PersonBusinessQueryService.DatasetPlan::type)
+                .containsExactly(PersonBusinessQueryService.DatasetType.TRAVEL);
+        assertThat(composedDepartment(fixture).datasets()).satisfiesExactly(
+                dataset -> assertThat(dataset.datasetCode()).isEqualTo("CFG_TRAVEL"),
+                dataset -> {
+                    assertThat(dataset.datasetCode()).isEqualTo("REIMBURSEMENT");
+                    assertThat(dataset.label()).isEqualTo("报销");
+                    assertThat(dataset.safeMessage()).isEqualTo("数据源尚未配置，本次未纳入统计");
+                }
+        );
+    }
+
+    @Test
+    void incompleteAttendanceAndIndependentTravelShouldExecuteTravelOnly() throws Exception {
+        Fixture fixture = new Fixture();
+        when(fixture.intentResolver.resolve(any(), any()))
+                .thenReturn(personIntent(List.of("TRAVEL", "ATTENDANCE"), null));
+        when(fixture.subjectResolutionService.resolve(any())).thenReturn(resolvedPerson());
+        when(fixture.reportDatasetService.list()).thenReturn(List.of(
+                personDataset(PersonBusinessQueryService.DatasetType.TRAVEL, "CFG_TRAVEL"),
+                personDataset(PersonBusinessQueryService.DatasetType.PUNCH, "CFG_PUNCH"),
+                personDataset(PersonBusinessQueryService.DatasetType.LEAVE, "CFG_LEAVE"),
+                personDataset(PersonBusinessQueryService.DatasetType.SCHEDULE, "CFG_SCHEDULE")
+        ));
+        when(fixture.personBusinessQueryService.query(any())).thenReturn(personResult(
+                List.of(PersonBusinessQueryService.DatasetType.TRAVEL), Set.of()
+        ));
+
+        fixture.service.handle(request("查询考勤和出差"), fixture.stream, "run-1");
+
+        assertThat(capturedPersonCommand(fixture).plans()).singleElement().satisfies(plan -> {
+            assertThat(plan.type()).isEqualTo(PersonBusinessQueryService.DatasetType.TRAVEL);
+            assertThat(plan.userRequested()).isTrue();
+        });
+        assertThat(composedDepartment(fixture).datasets()).satisfiesExactly(
+                dataset -> assertThat(dataset.datasetCode()).isEqualTo("CFG_TRAVEL"),
+                dataset -> {
+                    assertThat(dataset.datasetCode()).isEqualTo("ATTENDANCE");
+                    assertThat(dataset.label()).isEqualTo("考勤");
+                }
+        );
     }
 
     @Test
@@ -1437,8 +1534,11 @@ class BusinessAssistantServiceTest {
         private final ProjectPanoramaSnapshotReuseService panoramaSnapshotReuseService =
                 mock(ProjectPanoramaSnapshotReuseService.class);
         private final PersonBusinessQueryService personBusinessQueryService = mock(PersonBusinessQueryService.class);
+        private final ObjectMapper objectMapper = new ObjectMapper().findAndRegisterModules();
         private final PersonDatasetSelectionService personDatasetSelectionService =
                 spy(new PersonDatasetSelectionService());
+        private final PersonDatasetPlanService personDatasetPlanService =
+                new PersonDatasetPlanService(objectMapper);
         private final DepartmentBusinessQueryService departmentBusinessQueryService = mock(DepartmentBusinessQueryService.class);
         private final ReportDatasetService reportDatasetService = mock(ReportDatasetService.class);
         private final BusinessAnswerModelService modelService = mock(BusinessAnswerModelService.class);
@@ -1453,7 +1553,6 @@ class BusinessAssistantServiceTest {
         ));
         private final ConversationStateService conversationStateService = mock(ConversationStateService.class);
         private final AiChatSessionService chatSessionService = mock(AiChatSessionService.class);
-        private final ObjectMapper objectMapper = new ObjectMapper().findAndRegisterModules();
         private final AgentStreamSession stream = mock(AgentStreamSession.class);
         private final ChatResponseAccumulator accumulator = spy(new ChatResponseAccumulator(
                 new ResponseStreamContext("response-1", "run-1", "conversation-1")
@@ -1482,6 +1581,7 @@ class BusinessAssistantServiceTest {
                     intentResolver, subjectResolutionService, panoramaExecutionService,
                     panoramaSnapshotReuseService,
                     personBusinessQueryService, personDatasetSelectionService,
+                    personDatasetPlanService,
                     departmentBusinessQueryService, reportDatasetService, composer,
                     reportService, conversationStateService, chatSessionService, objectMapper
             );

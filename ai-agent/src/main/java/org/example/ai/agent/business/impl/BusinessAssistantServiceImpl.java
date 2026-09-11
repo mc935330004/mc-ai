@@ -1,6 +1,5 @@
 package org.example.ai.agent.business.impl;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.example.ai.agent.business.BusinessAssistantService;
@@ -27,6 +26,8 @@ import org.example.ai.agent.business.panorama.model.ProjectPanoramaResult;
 import org.example.ai.agent.business.person.PersonBusinessQueryService;
 import org.example.ai.agent.business.person.PersonBusinessQueryService.DatasetPlan;
 import org.example.ai.agent.business.person.PersonBusinessQueryService.DatasetType;
+import org.example.ai.agent.business.person.PersonDatasetPlanService;
+import org.example.ai.agent.business.person.PersonDatasetPlanService.PlanResult;
 import org.example.ai.agent.business.person.PersonDatasetSelectionService;
 import org.example.ai.agent.business.person.PersonDatasetSelectionService.Selection;
 import org.example.ai.agent.business.person.model.AttendanceDayResult;
@@ -88,6 +89,7 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
     private final ProjectPanoramaSnapshotReuseService panoramaSnapshotReuseService;
     private final PersonBusinessQueryService personBusinessQueryService;
     private final PersonDatasetSelectionService personDatasetSelectionService;
+    private final PersonDatasetPlanService personDatasetPlanService;
     private final DepartmentBusinessQueryService departmentBusinessQueryService;
     private final ReportDatasetService reportDatasetService;
     private final DeterministicBusinessAnswerComposer answerComposer;
@@ -103,6 +105,7 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
             ProjectPanoramaSnapshotReuseService panoramaSnapshotReuseService,
             PersonBusinessQueryService personBusinessQueryService,
             PersonDatasetSelectionService personDatasetSelectionService,
+            PersonDatasetPlanService personDatasetPlanService,
             DepartmentBusinessQueryService departmentBusinessQueryService,
             ReportDatasetService reportDatasetService,
             DeterministicBusinessAnswerComposer answerComposer,
@@ -125,6 +128,9 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
         );
         this.personDatasetSelectionService = Objects.requireNonNull(
                 personDatasetSelectionService, "personDatasetSelectionService不能为空"
+        );
+        this.personDatasetPlanService = Objects.requireNonNull(
+                personDatasetPlanService, "personDatasetPlanService不能为空"
         );
         this.departmentBusinessQueryService = Objects.requireNonNull(
                 departmentBusinessQueryService, "departmentBusinessQueryService不能为空"
@@ -288,14 +294,28 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
             ResponseContext context) throws Exception {
         Set<String> startedBlocks = new HashSet<>();
         StatusProgress progress = new StatusProgress(stream, datasetNames());
-        List<DatasetPlan> plans = personPlans(intent, selection);
+        PlanResult planResult = personPlanResult(intent, selection);
+        List<DatasetPlan> plans = planResult.plans();
+        if (plans.isEmpty()) {
+            List<DatasetAnswerInput> datasets = unavailablePersonDatasets(
+                    planResult.unavailableSemanticCodes()
+            );
+            AiResponse composed = response(
+                    request, stream, runId, context, false, datasets,
+                    List.of(), List.of(), List.of(), null, false
+            );
+            saveState(request, runId, subject, intent, null, selection.semanticCodes());
+            finish(request, stream, composed, false, startedBlocks);
+            return;
+        }
         PersonBusinessQueryService.Result result = personBusinessQueryService.query(
                 new PersonBusinessQueryService.Command(
                         runId, request.getUserId(), request.getConversationId(),
                         request.getAuthorization(), Map.of(), subject.selectionToken(), intent.refresh(), plans
                 )
         );
-        List<DatasetAnswerInput> datasets = personDatasets(plans, result);
+        List<DatasetAnswerInput> datasets = new ArrayList<>(personDatasets(plans, result));
+        datasets.addAll(unavailablePersonDatasets(planResult.unavailableSemanticCodes()));
         ArtifactBlock artifact = null;
         if (StringUtils.hasText(intent.exportFormat())) {
             try {
@@ -309,7 +329,6 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
                 // 报告创建失败不清空已成功查询的人员确定性事实。
                 log.warn("人员报告任务创建失败，runId={}，errorType={}",
                         runId, exception.getClass().getSimpleName());
-                datasets = new ArrayList<>(datasets);
                 datasets.add(failedDataset("PERSON_REPORT", "报告任务创建失败，业务数据仍可查看"));
             }
         }
@@ -332,11 +351,30 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
             Selection selection,
             SubjectCandidate subject,
             ResponseContext context) throws Exception {
+        PlanResult planResult = personPlanResult(intent, selection);
+        if (planResult.plans().isEmpty()) {
+            List<DatasetAnswerInput> datasets = new ArrayList<>(unavailablePersonDatasets(
+                    planResult.unavailableSemanticCodes()
+            ));
+            if (StringUtils.hasText(intent.exportFormat())) {
+                datasets.add(failedDataset(
+                        "DEPARTMENT_REPORT",
+                        "本阶段暂不支持部门报告导出，请缩小到单个人员后导出"
+                ));
+            }
+            AiResponse composed = response(
+                    request, stream, runId, context, false, datasets,
+                    List.of(), List.of(), List.of(), null, false
+            );
+            saveState(request, runId, subject, intent, null, selection.semanticCodes());
+            finish(request, stream, composed, false);
+            return;
+        }
         DepartmentBusinessQueryService.Result result = departmentBusinessQueryService.query(
                 new DepartmentBusinessQueryService.Command(
                         runId, request.getUserId(), request.getConversationId(), request.getAuthorization(),
                         Map.of(), subject.selectionToken(), intent.refresh(), intent.anomalyPeopleRequested(),
-                        personPlans(intent, selection)
+                        planResult.plans()
                 ), stream::shouldStopBusinessQuery
         );
         String code = "DEPARTMENT_SUMMARY";
@@ -360,18 +398,18 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
                 metric(code, "cancelledPeople", "取消人数", ValueType.NUMBER, "人")
         ));
         // 不完整聚合不发布次数和金额，避免部分结果被误读为正式总数。
-        if (result.aggregate().complete() && selection.requested(DatasetType.TRAVEL)) {
+        if (result.aggregate().complete() && requested(planResult.plans(), DatasetType.TRAVEL)) {
             facts.put("tripCount", result.aggregate().tripCount());
             facts.put("travelAmount", result.aggregate().travelAmount());
             metrics.add(metric(code, "tripCount", "出差次数", ValueType.NUMBER, "次"));
             metrics.add(metric(code, "travelAmount", "出差总金额", ValueType.AMOUNT, "元"));
         }
-        if (result.aggregate().complete() && selection.requested(DatasetType.REIMBURSEMENT)) {
+        if (result.aggregate().complete() && requested(planResult.plans(), DatasetType.REIMBURSEMENT)) {
             facts.put("reimbursementAmount", result.aggregate().reimbursementAmount());
             metrics.add(metric(code, "reimbursementAmount", "报销总金额", ValueType.AMOUNT, "元"));
         }
         List<TableDefinition> tables = List.of();
-        if (selection.requested(DatasetType.PUNCH)
+        if (requested(planResult.plans(), DatasetType.PUNCH)
                 && intent.anomalyPeopleRequested() && !result.anomalyPeople().isEmpty()) {
             facts.put("anomalyRows", result.anomalyPeople().stream()
                     .map(person -> Map.of(
@@ -394,7 +432,8 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
         }
         List<DatasetAnswerInput> datasets = new ArrayList<>();
         datasets.add(new DatasetAnswerInput(code, "部门汇总", status, result.dataComplete(), facts, Map.of(), message));
-        boolean complete = result.dataComplete();
+        datasets.addAll(unavailablePersonDatasets(planResult.unavailableSemanticCodes()));
+        boolean complete = result.dataComplete() && planResult.unavailableSemanticCodes().isEmpty();
         if (StringUtils.hasText(intent.exportFormat())) {
             datasets.add(failedDataset("DEPARTMENT_REPORT", "本阶段暂不支持部门报告导出，请缩小到单个人员后导出"));
             complete = false;
@@ -434,68 +473,12 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
         );
     }
 
-    private List<DatasetPlan> personPlans(BusinessQueryIntent intent, Selection selection) {
-        Set<DatasetType> requiredTypes = Set.copyOf(selection.executionTypes());
-        EnumMap<DatasetType, ReportDataset> configured = new EnumMap<>(DatasetType.class);
-        for (ReportDataset dataset : safeList(reportDatasetService.list())) {
-            DatasetType type = personType(dataset);
-            if (type == null || !requiredTypes.contains(type)) {
-                continue;
-            }
-            if (configured.putIfAbsent(type, dataset) != null) {
-                throw new IllegalStateException("人员业务数据集逻辑类型配置重复：" + type.name());
-            }
-        }
-        if (configured.size() != requiredTypes.size()) {
-            throw new IllegalStateException("人员业务查询缺少完整且唯一的已启用数据集配置");
-        }
-        Map<String, Object> query = canonicalQuery(intent);
-        return selection.executionTypes().stream()
-                .map(type -> personPlan(type, configured, query, selection.requested(type)))
-                .toList();
-    }
-
-    private DatasetPlan personPlan(
-            DatasetType type,
-            EnumMap<DatasetType, ReportDataset> configured,
-            Map<String, Object> query,
-            boolean userRequested) {
-        return new DatasetPlan(
-                type, configured.get(type).getDatasetCode(), query,
-                query.containsKey("startDate") ? "DAY" : null, Set.of(personFactCode(type)),
-                userRequested
+    private PlanResult personPlanResult(BusinessQueryIntent intent, Selection selection) {
+        return personDatasetPlanService.plan(
+                selection,
+                safeList(reportDatasetService.list()),
+                canonicalQuery(intent)
         );
-    }
-
-    private DatasetType personType(ReportDataset dataset) {
-        if (dataset == null || !Boolean.TRUE.equals(dataset.getEnabled())
-                || !StringUtils.hasText(dataset.getDomainCode()) || !allowsPerson(dataset)) {
-            return null;
-        }
-        String domain = dataset.getDomainCode().trim().toUpperCase(Locale.ROOT);
-        for (DatasetType type : DatasetType.values()) {
-            if (domain.equals(type.name()) || domain.equals("PERSON_" + type.name())) {
-                return type;
-            }
-        }
-        return null;
-    }
-
-    private boolean allowsPerson(ReportDataset dataset) {
-        try {
-            JsonNode types = objectMapper.readTree(dataset.getSubjectTypesJson());
-            if (types == null || !types.isArray()) {
-                return false;
-            }
-            for (JsonNode type : types) {
-                if (type.isTextual() && "PERSON".equals(type.textValue().trim().toUpperCase(Locale.ROOT))) {
-                    return true;
-                }
-            }
-            return false;
-        } catch (Exception ignored) {
-            return false;
-        }
     }
 
     private List<DatasetAnswerInput> projectDatasets(
@@ -539,6 +522,33 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
             ));
         }
         return List.copyOf(datasets);
+    }
+
+    private List<DatasetAnswerInput> unavailablePersonDatasets(List<String> semanticCodes) {
+        return semanticCodes.stream()
+                .map(code -> new DatasetAnswerInput(
+                        code,
+                        personSemanticLabel(code),
+                        DatasetExecutionStatus.FAILED,
+                        false,
+                        Map.of(),
+                        Map.of(),
+                        "数据源尚未配置，本次未纳入统计"
+                ))
+                .toList();
+    }
+
+    private String personSemanticLabel(String semanticCode) {
+        return switch (semanticCode) {
+            case "TRAVEL" -> "出差";
+            case "ATTENDANCE" -> "考勤";
+            case "REIMBURSEMENT" -> "报销";
+            default -> semanticCode;
+        };
+    }
+
+    private boolean requested(List<DatasetPlan> plans, DatasetType type) {
+        return plans.stream().anyMatch(plan -> plan.type() == type && plan.userRequested());
     }
 
     private boolean requestedDatasetComplete(
@@ -1127,17 +1137,6 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
             case DENIED -> DatasetExecutionStatus.DENIED;
             case TIMEOUT -> DatasetExecutionStatus.TIMEOUT;
             case FAILED -> DatasetExecutionStatus.FAILED;
-        };
-    }
-
-    private String personFactCode(DatasetType type) {
-        return switch (type) {
-            case TRAVEL -> PersonBusinessQueryService.TRAVEL_RECORDS;
-            case PUNCH -> PersonBusinessQueryService.PUNCH_RECORDS;
-            case LEAVE -> PersonBusinessQueryService.LEAVE_RECORDS;
-            case SCHEDULE -> PersonBusinessQueryService.SCHEDULE_RECORDS;
-            case CALENDAR -> PersonBusinessQueryService.CALENDAR_RECORDS;
-            case REIMBURSEMENT -> PersonBusinessQueryService.REIMBURSEMENT_RECORDS;
         };
     }
 

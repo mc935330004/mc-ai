@@ -30,6 +30,7 @@ import org.example.ai.agent.business.panorama.model.ProjectPanoramaPlan;
 import org.example.ai.agent.business.panorama.model.ProjectPanoramaResult;
 import org.example.ai.agent.business.person.AttendanceReconciliationService;
 import org.example.ai.agent.business.person.PersonBusinessQueryService;
+import org.example.ai.agent.business.person.PersonDatasetPlanService;
 import org.example.ai.agent.business.person.PersonDatasetSelectionService;
 import org.example.ai.agent.business.person.PersonSnapshotReuseService;
 import org.example.ai.agent.business.person.model.AttendanceDayResult;
@@ -650,7 +651,8 @@ class BusinessAssistantAcceptanceTest {
             }).when(stream).setResponseDataComplete(org.mockito.ArgumentMatchers.anyBoolean());
             service = new org.example.ai.agent.business.impl.BusinessAssistantServiceImpl(
                     intents, subjects, panoramaExecution, panoramaReuse,
-                    personQuery, new PersonDatasetSelectionService(), departmentQuery,
+                    personQuery, new PersonDatasetSelectionService(),
+                    new PersonDatasetPlanService(objectMapper), departmentQuery,
                     datasets, new DeterministicBusinessAnswerComposer(answerModel), reportService,
                     conversationState, chatSession, objectMapper
             );
