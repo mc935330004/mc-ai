@@ -200,8 +200,11 @@ public class CompositeReportTaskService {
         boolean structurallyComplete = plan.sections().stream()
                 .allMatch(section -> Set.of("REUSED", "QUERIED", "EMPTY")
                         .contains(section.status()));
-        if (plan.dataComplete() && !structurallyComplete) {
-            throw new IllegalArgumentException("dataComplete与章节状态不一致");
+        boolean hasUnavailableDisclosure = plan.sections().stream()
+                .anyMatch(section -> BusinessAssistantReportService
+                        .isPersonUnavailableMessage(section.safeMessage()));
+        if (plan.dataComplete() && (!structurallyComplete || hasUnavailableDisclosure)) {
+            throw new IllegalArgumentException("dataComplete与章节状态或缺失说明不一致");
         }
         Object safeQuery = ReportDatasetValidator.freezeSafeValue(command.canonicalQuery());
         if (!(safeQuery instanceof Map<?, ?> queryMap)) {

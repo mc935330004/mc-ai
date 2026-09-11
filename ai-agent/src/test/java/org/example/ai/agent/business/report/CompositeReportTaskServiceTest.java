@@ -308,6 +308,64 @@ class CompositeReportTaskServiceTest {
     }
 
     @Test
+    void personUnavailableNoticeShouldRejectCompletePlan() {
+        CompositeReportTaskMapper taskMapper = mock(CompositeReportTaskMapper.class);
+        CompositeReportSectionMapper sectionMapper = mock(CompositeReportSectionMapper.class);
+        CompositeReportTaskService service = taskService(taskMapper, sectionMapper);
+
+        assertThatThrownBy(() -> service.create(personDisclosureCommand(
+                "报销数据源尚未配置，本次未纳入统计", true
+        ))).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("dataComplete");
+        verify(taskMapper, never()).insertTask(any());
+    }
+
+    @Test
+    void projectSectionShouldRejectPersonUnavailableNotice() {
+        CompositeReportTaskMapper taskMapper = mock(CompositeReportTaskMapper.class);
+        CompositeReportSectionMapper sectionMapper = mock(CompositeReportSectionMapper.class);
+        CompositeReportTaskService service = taskService(taskMapper, sectionMapper);
+        CompositeReportTaskService.CreateCommand command = disclosureCommand(
+                BusinessSubjectType.PROJECT,
+                List.of(new LogicalReportSection(
+                        "travel", "snapshot-1", SHA, "REUSED",
+                        "出差数据源尚未配置，本次未纳入统计"
+                )),
+                false
+        );
+
+        assertThatThrownBy(() -> service.create(command))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("安全说明");
+        verify(taskMapper, never()).insertTask(any());
+    }
+
+    @Test
+    void personUnavailableNoticeShouldRejectNonFirstResolvedSection() {
+        CompositeReportTaskMapper taskMapper = mock(CompositeReportTaskMapper.class);
+        CompositeReportSectionMapper sectionMapper = mock(CompositeReportSectionMapper.class);
+        CompositeReportTaskService service = taskService(taskMapper, sectionMapper);
+        CompositeReportTaskService.CreateCommand command = disclosureCommand(
+                BusinessSubjectType.PERSON,
+                List.of(
+                        new LogicalReportSection(
+                                "travel", "snapshot-1", SHA, "REUSED", null
+                        ),
+                        new LogicalReportSection(
+                                "reimbursement", "snapshot-2", SHA, "REUSED",
+                                "报销数据源尚未配置，本次未纳入统计"
+                        )
+                ),
+                false
+        );
+
+        assertThatThrownBy(() -> service.create(command))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("安全说明");
+        verify(taskMapper, never()).insertTask(any());
+    }
+
+    @Test
     void requestKeyShouldDistinguishUnavailablePersonSemantics() {
         CompositeReportTaskMapper taskMapper = mock(CompositeReportTaskMapper.class);
         CompositeReportSectionMapper sectionMapper = mock(CompositeReportSectionMapper.class);
@@ -421,15 +479,32 @@ class CompositeReportTaskServiceTest {
     }
 
     private CompositeReportTaskService.CreateCommand personDisclosureCommand(String safeMessage) {
-        LogicalReportPlan plan = new LogicalReportPlan(
-                "PERSON_STANDARD",
+        return personDisclosureCommand(safeMessage, false);
+    }
+
+    private CompositeReportTaskService.CreateCommand personDisclosureCommand(
+            String safeMessage,
+            boolean dataComplete) {
+        return disclosureCommand(
                 BusinessSubjectType.PERSON,
-                "employee-1",
-                "PDF",
                 List.of(new LogicalReportSection(
                         "travel", "snapshot-1", SHA, "REUSED", safeMessage
                 )),
-                false
+                dataComplete
+        );
+    }
+
+    private CompositeReportTaskService.CreateCommand disclosureCommand(
+            BusinessSubjectType subjectType,
+            List<LogicalReportSection> sections,
+            boolean dataComplete) {
+        LogicalReportPlan plan = new LogicalReportPlan(
+                subjectType == BusinessSubjectType.PERSON ? "PERSON_STANDARD" : "PROJECT_DEFAULT",
+                subjectType,
+                subjectType == BusinessSubjectType.PERSON ? "employee-1" : "project-1",
+                "PDF",
+                sections,
+                dataComplete
         );
         return new CompositeReportTaskService.CreateCommand(
                 "user-1", "session-1", "Bearer secret",
