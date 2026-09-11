@@ -1,7 +1,9 @@
 package org.example.ai.agent.business.person;
 
+import org.example.ai.agent.business.dataset.DatasetExecutionProofVerifier;
 import org.example.ai.agent.business.dataset.ReportDatasetExecutionService;
 import org.example.ai.agent.business.dataset.ReportDatasetService;
+import org.example.ai.agent.business.dataset.ReportDatasetValidator;
 import org.example.ai.agent.business.dataset.entity.ReportDataset;
 import org.example.ai.agent.business.dataset.model.DatasetExecutionRequest;
 import org.example.ai.agent.business.dataset.model.DatasetExecutionResult;
@@ -14,6 +16,7 @@ import org.example.ai.agent.business.subject.SubjectDirectoryQuery;
 import org.example.ai.agent.business.subject.SubjectSelectionTokenService;
 import org.example.ai.agent.business.subject.model.AuthorizedSubjectCandidate;
 import org.example.ai.agent.business.subject.model.SubjectDirectoryPage;
+import org.example.ai.agent.chat.support.ContentHashUtils;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -28,6 +31,7 @@ import java.util.Optional;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -50,6 +54,7 @@ class ProjectPeriodContextServiceTest {
     private ProjectDirectoryService projectDirectoryService;
     private ReportDatasetService datasetService;
     private ReportDatasetExecutionService executionService;
+    private DatasetExecutionProofVerifier proofVerifier;
     private ProjectPeriodContextService service;
 
     @BeforeEach
@@ -59,12 +64,15 @@ class ProjectPeriodContextServiceTest {
         projectDirectoryService = mock(ProjectDirectoryService.class);
         datasetService = mock(ReportDatasetService.class);
         executionService = mock(ReportDatasetExecutionService.class);
+        proofVerifier = mock(DatasetExecutionProofVerifier.class);
+        when(proofVerifier.verify(any())).thenReturn(true);
         service = new ProjectPeriodContextService(
                 tokenService,
                 personDirectoryService,
                 projectDirectoryService,
                 datasetService,
-                executionService
+                executionService,
+                proofVerifier
         );
         prepareAuthorizedPersonAndProject();
     }
@@ -76,7 +84,8 @@ class ProjectPeriodContextServiceTest {
         ));
         when(executionService.execute(any())).thenAnswer(invocation ->
                 result(invocation.getArgument(0), DatasetExecutionStatus.SUCCESS,
-                        projectBaseFacts("other-id", "OTHER", "2026-01-01", "2026-12-31"))
+                        projectBaseFacts(PROJECT_ID, PROJECT_CODE,
+                                "2026-01-01", "2026-12-31"))
         );
 
         ProjectPeriodContextService.Result result = service.resolve(command());
@@ -280,6 +289,91 @@ class ProjectPeriodContextServiceTest {
 
         assertThat(result.status())
                 .isEqualTo(ProjectPeriodContextService.Status.PERIOD_UNAVAILABLE);
+    }
+
+    @Test
+    void projectBaseAcceptsOnlyIdentifiersConsistentWithAuthorizedProject() {
+        for (Map<String, Object> base : List.of(
+                projectBaseIdentity(PROJECT_ID, null),
+                projectBaseIdentity(null, PROJECT_CODE),
+                projectBaseIdentity(PROJECT_ID, PROJECT_CODE)
+        )) {
+            prepareBaseResult(base);
+
+            ProjectPeriodContextService.Result result = service.resolve(command());
+
+            assertThat(result.status()).isEqualTo(ProjectPeriodContextService.Status.READY);
+            assertThat(result.context().projectId()).isEqualTo(PROJECT_ID);
+            assertThat(result.context().projectCode()).isEqualTo(PROJECT_CODE);
+            reset(datasetService, executionService);
+        }
+
+        for (Map<String, Object> base : List.of(
+                projectBaseIdentity("P-OTHER", null),
+                projectBaseIdentity(null, "OTHER-CODE"),
+                projectBaseIdentity(PROJECT_ID, "OTHER-CODE"),
+                projectBaseIdentity("P-OTHER", PROJECT_CODE)
+        )) {
+            prepareBaseResult(base);
+
+            ProjectPeriodContextService.Result result = service.resolve(command());
+
+            assertThat(result.status())
+                    .isEqualTo(ProjectPeriodContextService.Status.PERIOD_UNAVAILABLE);
+            assertThat(result.context()).isNull();
+            reset(datasetService, executionService);
+        }
+    }
+
+    @Test
+    void untrustedProjectBaseProofOrSourceFailsClosed() {
+        when(datasetService.list()).thenReturn(List.of(dataset("base", "PROJECT_BASE", true)));
+        when(executionService.execute(any())).thenAnswer(invocation ->
+                result(invocation.getArgument(0), DatasetExecutionStatus.SUCCESS,
+                        projectBaseFacts(PROJECT_ID, PROJECT_CODE,
+                                "2026-01-01", "2026-12-31"))
+        );
+        when(proofVerifier.verify(any())).thenReturn(false);
+        assertThat(service.resolve(command()).status())
+                .isEqualTo(ProjectPeriodContextService.Status.FAILED);
+
+        when(proofVerifier.verify(any())).thenReturn(true);
+        for (String tampering : List.of(
+                "subjectType", "subjectId", "datasetCode", "canonicalInputHash",
+                "userId", "sessionId"
+        )) {
+            doAnswer(invocation -> {
+                DatasetExecutionRequest request = invocation.getArgument(0);
+                return tamperedSourceResult(request, tampering);
+            }).when(executionService).execute(any());
+
+            ProjectPeriodContextService.Result result = service.resolve(command());
+
+            assertThat(result.status()).isEqualTo(ProjectPeriodContextService.Status.FAILED);
+            assertThat(result.context()).isNull();
+        }
+    }
+
+    @Test
+    void untrustedMembershipProofKeepsOnlyDirectAssociation() {
+        prepareBothDatasets();
+        when(executionService.execute(any())).thenAnswer(invocation -> {
+            DatasetExecutionRequest request = invocation.getArgument(0);
+            return "base".equals(request.datasetCode())
+                    ? result(request, DatasetExecutionStatus.SUCCESS,
+                    projectBaseFacts(PROJECT_ID, PROJECT_CODE,
+                            "2026-01-01", "2026-12-31"))
+                    : result(request, DatasetExecutionStatus.SUCCESS, membershipFacts(List.of(
+                    membership(EMPLOYEE_NO, PROJECT_ID, PROJECT_CODE,
+                            "2026-02-01", null)
+            )));
+        });
+        when(proofVerifier.verify(any())).thenAnswer(invocation -> {
+            DatasetExecutionResult result = invocation.getArgument(0);
+            return "base".equals(result.datasetCode());
+        });
+
+        assertDirectOnlyFailure(service.resolve(command()));
     }
 
     @Test
@@ -594,6 +688,29 @@ class ProjectPeriodContextServiceTest {
         return fact;
     }
 
+    private Map<String, Object> projectBaseIdentity(String projectId, String projectCode) {
+        Map<String, Object> fact = new LinkedHashMap<>();
+        if (projectId != null) {
+            fact.put("projectId", projectId);
+        }
+        if (projectCode != null) {
+            fact.put("projectCode", projectCode);
+        }
+        fact.put("projectStartDate", "2026-01-01");
+        fact.put("projectEndDate", "2026-12-31");
+        return fact;
+    }
+
+    private void prepareBaseResult(Map<String, Object> base) {
+        when(datasetService.list()).thenReturn(List.of(dataset("base", "PROJECT_BASE", true)));
+        when(executionService.execute(any())).thenAnswer(invocation ->
+                result(invocation.getArgument(0), DatasetExecutionStatus.SUCCESS,
+                        Map.of("calculation", Map.of(
+                                ProjectPeriodContextService.PROJECT_BASE_FACT, base
+                        )))
+        );
+    }
+
     private Map<String, Object> membershipFacts(List<Map<String, Object>> records) {
         return Map.of("calculation", Map.of(
                 ProjectPeriodContextService.PROJECT_MEMBER_FACT, records
@@ -628,7 +745,7 @@ class ProjectPeriodContextServiceTest {
         return new DatasetExecutionResult(
                 new DatasetExecutionSource(
                         request.userId(), request.sessionId(), request.subjectType(),
-                        request.subjectId(), request.datasetCode(), "a".repeat(64),
+                        request.subjectId(), request.datasetCode(), canonicalInputHash(request),
                         "configured-read-workflow", 1L, "b".repeat(64), "c".repeat(64)
                 ),
                 status,
@@ -639,6 +756,38 @@ class ProjectPeriodContextServiceTest {
                 null,
                 "安全提示",
                 "d".repeat(64)
+        );
+    }
+
+    private DatasetExecutionResult tamperedSourceResult(
+            DatasetExecutionRequest request,
+            String tampering) {
+        DatasetExecutionSource source = new DatasetExecutionSource(
+                "userId".equals(tampering) ? "other-user" : request.userId(),
+                "sessionId".equals(tampering) ? "other-session" : request.sessionId(),
+                "subjectType".equals(tampering)
+                        ? BusinessSubjectType.PERSON
+                        : request.subjectType(),
+                "subjectId".equals(tampering) ? "P-OTHER" : request.subjectId(),
+                "datasetCode".equals(tampering) ? "other-dataset" : request.datasetCode(),
+                "canonicalInputHash".equals(tampering)
+                        ? "f".repeat(64)
+                        : canonicalInputHash(request),
+                "configured-read-workflow", 1L, "b".repeat(64), "c".repeat(64)
+        );
+        return new DatasetExecutionResult(
+                source,
+                DatasetExecutionStatus.SUCCESS,
+                true,
+                projectBaseFacts(PROJECT_ID, PROJECT_CODE,
+                        "2026-01-01", "2026-12-31"),
+                "workflow-run-1", null, null, "安全提示", "d".repeat(64)
+        );
+    }
+
+    private String canonicalInputHash(DatasetExecutionRequest request) {
+        return ContentHashUtils.sha256(
+                ReportDatasetValidator.canonicalSafeValue(request.canonicalInput())
         );
     }
 }

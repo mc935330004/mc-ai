@@ -1,11 +1,13 @@
 package org.example.ai.agent.business.person;
 
+import org.example.ai.agent.business.dataset.DatasetExecutionProofVerifier;
 import org.example.ai.agent.business.dataset.ReportDatasetExecutionService;
 import org.example.ai.agent.business.dataset.ReportDatasetService;
 import org.example.ai.agent.business.dataset.ReportDatasetValidator;
 import org.example.ai.agent.business.dataset.entity.ReportDataset;
 import org.example.ai.agent.business.dataset.model.DatasetExecutionRequest;
 import org.example.ai.agent.business.dataset.model.DatasetExecutionResult;
+import org.example.ai.agent.business.dataset.model.DatasetExecutionSource;
 import org.example.ai.agent.business.model.BusinessSubjectType;
 import org.example.ai.agent.business.model.DatasetExecutionStatus;
 import org.example.ai.agent.business.subject.AuthorizedPersonDirectoryService;
@@ -15,6 +17,7 @@ import org.example.ai.agent.business.subject.SubjectSelectionTokenService;
 import org.example.ai.agent.business.subject.model.AuthorizedSubjectCandidate;
 import org.example.ai.agent.business.subject.model.SubjectDirectoryPage;
 import org.example.ai.agent.business.subject.model.SubjectSearchMode;
+import org.example.ai.agent.chat.support.ContentHashUtils;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
@@ -56,13 +59,15 @@ public class ProjectPeriodContextService {
     private final ProjectDirectoryService projectDirectoryService;
     private final ReportDatasetService datasetService;
     private final ReportDatasetExecutionService executionService;
+    private final DatasetExecutionProofVerifier proofVerifier;
 
     public ProjectPeriodContextService(
             SubjectSelectionTokenService tokenService,
             AuthorizedPersonDirectoryService personDirectoryService,
             ProjectDirectoryService projectDirectoryService,
             ReportDatasetService datasetService,
-            ReportDatasetExecutionService executionService) {
+            ReportDatasetExecutionService executionService,
+            DatasetExecutionProofVerifier proofVerifier) {
         this.tokenService = Objects.requireNonNull(tokenService, "tokenService不能为空");
         this.personDirectoryService = Objects.requireNonNull(
                 personDirectoryService, "personDirectoryService不能为空"
@@ -74,6 +79,7 @@ public class ProjectPeriodContextService {
         this.executionService = Objects.requireNonNull(
                 executionService, "executionService不能为空"
         );
+        this.proofVerifier = Objects.requireNonNull(proofVerifier, "proofVerifier不能为空");
     }
 
     /**
@@ -314,21 +320,43 @@ public class ProjectPeriodContextService {
             AuthorizedSubjectCandidate project,
             ReportDataset dataset,
             Map<String, Object> canonicalInput) {
+        DatasetExecutionRequest request = new DatasetExecutionRequest(
+                command.agentRunId(),
+                command.userId(),
+                command.sessionId(),
+                command.authorization(),
+                command.secureContext(),
+                dataset.getDatasetCode(),
+                BusinessSubjectType.PROJECT,
+                project.rawSubjectId(),
+                canonicalInput
+        );
         try {
-            return executionService.execute(new DatasetExecutionRequest(
-                    command.agentRunId(),
-                    command.userId(),
-                    command.sessionId(),
-                    command.authorization(),
-                    command.secureContext(),
-                    dataset.getDatasetCode(),
-                    BusinessSubjectType.PROJECT,
-                    project.rawSubjectId(),
-                    canonicalInput
-            ));
+            DatasetExecutionResult result = executionService.execute(request);
+            return trustedResult(request, result) ? result : null;
         } catch (RuntimeException exception) {
             return null;
         }
+    }
+
+    /** 验证结果由受控执行链产生，并且来源与本次请求完全一致。 */
+    private boolean trustedResult(
+            DatasetExecutionRequest request,
+            DatasetExecutionResult result) {
+        if (result == null || !proofVerifier.verify(result)) {
+            return false;
+        }
+        DatasetExecutionSource source = result.source();
+        String inputHash = ContentHashUtils.sha256(
+                ReportDatasetValidator.canonicalSafeValue(request.canonicalInput())
+        );
+        return source != null
+                && Objects.equals(source.userId(), request.userId())
+                && Objects.equals(source.sessionId(), request.sessionId())
+                && source.subjectType() == BusinessSubjectType.PROJECT
+                && Objects.equals(source.subjectId(), request.subjectId())
+                && Objects.equals(source.datasetCode(), request.datasetCode())
+                && Objects.equals(source.canonicalInputHash(), inputHash);
     }
 
     private Result baseFailure(DatasetExecutionResult result) {
@@ -349,8 +377,7 @@ public class ProjectPeriodContextService {
             DatasetExecutionResult result,
             AuthorizedSubjectCandidate project) {
         Map<?, ?> fact = factMap(result, PROJECT_BASE_FACT);
-        if (fact == null
-                || (!text(fact.get("projectId")) && !text(fact.get("projectCode")))) {
+        if (fact == null || !hasProjectIdentity(fact) || !matchesProject(fact, project)) {
             return null;
         }
         LocalDate start = date(fact.get("projectStartDate"));
@@ -433,6 +460,9 @@ public class ProjectPeriodContextService {
                 if (!employeeNo.equals(recordEmployee)) {
                     continue;
                 }
+                if (!hasProjectIdentity(record)) {
+                    return null;
+                }
                 if (!matchesProject(record, project)) {
                     continue;
                 }
@@ -451,9 +481,6 @@ public class ProjectPeriodContextService {
             AuthorizedSubjectCandidate project) {
         String recordId = string(record.get("projectId"));
         String recordCode = string(record.get("projectCode"));
-        if (recordId == null && recordCode == null) {
-            throw new IllegalArgumentException("项目成员记录缺少项目标识");
-        }
         if (recordId != null && !project.rawSubjectId().equals(recordId)) {
             return false;
         }
@@ -463,6 +490,10 @@ public class ProjectPeriodContextService {
             return false;
         }
         return true;
+    }
+
+    private boolean hasProjectIdentity(Map<?, ?> fact) {
+        return text(fact.get("projectId")) || text(fact.get("projectCode"));
     }
 
     private Map<?, ?> factMap(DatasetExecutionResult result, String factCode) {
