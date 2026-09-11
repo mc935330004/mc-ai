@@ -309,7 +309,8 @@ class BusinessAssistantAcceptanceTest {
                                 PersonBusinessQueryService.ModuleStatus.FAILED,
                                 false, null, null
                         )
-                )
+                ),
+                List.of()
         ));
 
         ArgumentCaptor<CompositeReportTaskService.CreateCommand> command =

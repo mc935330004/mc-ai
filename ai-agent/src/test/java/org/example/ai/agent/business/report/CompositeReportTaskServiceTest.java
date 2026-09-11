@@ -9,6 +9,7 @@ import org.example.ai.agent.business.report.BusinessReportPlanService.ResolvedSe
 import org.example.ai.agent.business.report.BusinessReportPlanService.SectionResolutionStatus;
 import org.example.ai.agent.business.report.BusinessReportPlanService.TemplateDefinition;
 import org.example.ai.agent.business.report.BusinessReportPlanService.TemplateSection;
+import org.example.ai.agent.business.report.entity.CompositeReportSection;
 import org.example.ai.agent.business.report.entity.CompositeReportTask;
 import org.example.ai.agent.business.report.mapper.CompositeReportSectionMapper;
 import org.example.ai.agent.business.report.mapper.CompositeReportTaskMapper;
@@ -286,6 +287,46 @@ class CompositeReportTaskServiceTest {
     }
 
     @Test
+    void personUnavailableNoticeShouldBePersistedAndMarkTaskIncomplete() {
+        CompositeReportTaskMapper taskMapper = mock(CompositeReportTaskMapper.class);
+        CompositeReportSectionMapper sectionMapper = mock(CompositeReportSectionMapper.class);
+        ArgumentCaptor<CompositeReportSection> section =
+                ArgumentCaptor.forClass(CompositeReportSection.class);
+        when(taskMapper.selectByRequestKey(any())).thenReturn(null);
+        when(taskMapper.insertTask(any())).thenReturn(1);
+        when(sectionMapper.insertSection(any())).thenReturn(1);
+        CompositeReportTaskService service = taskService(taskMapper, sectionMapper);
+
+        CompositeReportTask created = service.create(personDisclosureCommand(
+                "报销数据源尚未配置，本次未纳入统计"
+        ));
+
+        assertThat(created.getDataComplete()).isFalse();
+        verify(sectionMapper).insertSection(section.capture());
+        assertThat(section.getValue().getSafeMessage())
+                .isEqualTo("报销数据源尚未配置，本次未纳入统计");
+    }
+
+    @Test
+    void requestKeyShouldDistinguishUnavailablePersonSemantics() {
+        CompositeReportTaskMapper taskMapper = mock(CompositeReportTaskMapper.class);
+        CompositeReportSectionMapper sectionMapper = mock(CompositeReportSectionMapper.class);
+        ArgumentCaptor<CompositeReportTask> task =
+                ArgumentCaptor.forClass(CompositeReportTask.class);
+        when(taskMapper.selectByRequestKey(any())).thenReturn(null);
+        when(taskMapper.insertTask(any())).thenReturn(1);
+        when(sectionMapper.insertSection(any())).thenReturn(1);
+        CompositeReportTaskService service = taskService(taskMapper, sectionMapper);
+
+        service.create(personDisclosureCommand("出差数据源尚未配置，本次未纳入统计"));
+        service.create(personDisclosureCommand("报销数据源尚未配置，本次未纳入统计"));
+
+        verify(taskMapper, times(2)).insertTask(task.capture());
+        assertThat(task.getAllValues()).extracting(CompositeReportTask::getRequestKey)
+                .doesNotHaveDuplicates();
+    }
+
+    @Test
     void createShouldRejectUnsafeSectionMessageEvenWhenPlanIsConstructedDirectly() {
         CompositeReportTaskMapper taskMapper = mock(CompositeReportTaskMapper.class);
         CompositeReportSectionMapper sectionMapper = mock(CompositeReportSectionMapper.class);
@@ -296,6 +337,31 @@ class CompositeReportTaskServiceTest {
                         "cost", null, SHA, "FAILED", "SQL timeout: token=secret"
                 )),
                 true
+        );
+        CompositeReportTaskService.CreateCommand command =
+                new CompositeReportTaskService.CreateCommand(
+                        "user-1", "session-1", null, new PlannedReport(unsafe, SHA),
+                        Map.of("year", 2026),
+                        LocalDateTime.of(2026, 9, 9, 10, 0), 3
+                );
+
+        assertThatThrownBy(() -> service.create(command))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("安全说明");
+        verify(taskMapper, never()).insertTask(any());
+    }
+
+    @Test
+    void createShouldRejectArbitraryMessageOnResolvedSection() {
+        CompositeReportTaskMapper taskMapper = mock(CompositeReportTaskMapper.class);
+        CompositeReportSectionMapper sectionMapper = mock(CompositeReportSectionMapper.class);
+        CompositeReportTaskService service = taskService(taskMapper, sectionMapper);
+        LogicalReportPlan unsafe = new LogicalReportPlan(
+                "PERSON_STANDARD", BusinessSubjectType.PERSON, "employee-1", "PDF",
+                List.of(new LogicalReportSection(
+                        "travel", "snapshot-1", SHA, "REUSED", "raw timeout: token=secret"
+                )),
+                false
         );
         CompositeReportTaskService.CreateCommand command =
                 new CompositeReportTaskService.CreateCommand(
@@ -350,6 +416,24 @@ class CompositeReportTaskServiceTest {
         return new CompositeReportTaskService.CreateCommand(
                 "user-1", "session-1", authorization,
                 new PlannedReport(plan, templateChecksum), query,
+                LocalDateTime.of(2026, 9, 9, 10, 0), 3
+        );
+    }
+
+    private CompositeReportTaskService.CreateCommand personDisclosureCommand(String safeMessage) {
+        LogicalReportPlan plan = new LogicalReportPlan(
+                "PERSON_STANDARD",
+                BusinessSubjectType.PERSON,
+                "employee-1",
+                "PDF",
+                List.of(new LogicalReportSection(
+                        "travel", "snapshot-1", SHA, "REUSED", safeMessage
+                )),
+                false
+        );
+        return new CompositeReportTaskService.CreateCommand(
+                "user-1", "session-1", "Bearer secret",
+                new PlannedReport(plan, SHA), Map.of("year", 2026),
                 LocalDateTime.of(2026, 9, 9, 10, 0), 3
         );
     }

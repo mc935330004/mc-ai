@@ -1,6 +1,7 @@
 package org.example.ai.agent.business.report;
 
 import org.example.ai.agent.business.dataset.ReportDatasetValidator;
+import org.example.ai.agent.business.model.BusinessSubjectType;
 import org.example.ai.agent.business.report.BusinessReportPlanService.LogicalReportPlan;
 import org.example.ai.agent.business.report.BusinessReportPlanService.LogicalReportSection;
 import org.example.ai.agent.business.report.BusinessReportPlanService.PlannedReport;
@@ -195,7 +196,7 @@ public class CompositeReportTaskService {
                 || plan.sections().size() > MAX_SECTIONS) {
             throw new IllegalArgumentException("报告章节数量不合法");
         }
-        validateSections(plan.sections());
+        validateSections(plan.subjectType(), plan.sections());
         boolean structurallyComplete = plan.sections().stream()
                 .allMatch(section -> Set.of("REUSED", "QUERIED", "EMPTY")
                         .contains(section.status()));
@@ -222,9 +223,13 @@ public class CompositeReportTaskService {
         );
     }
 
-    private void validateSections(List<LogicalReportSection> sections) {
+    private void validateSections(
+            BusinessSubjectType subjectType,
+            List<LogicalReportSection> sections) {
         Set<String> datasets = new java.util.HashSet<>();
-        for (LogicalReportSection section : sections) {
+        int firstResolvedIndex = -1;
+        for (int index = 0; index < sections.size(); index++) {
+            LogicalReportSection section = sections.get(index);
             if (section == null) {
                 throw new IllegalArgumentException("报告章节不能为空");
             }
@@ -236,6 +241,9 @@ public class CompositeReportTaskService {
             }
             boolean resolved = Set.of("REUSED", "QUERIED", "EMPTY")
                     .contains(section.status());
+            if (resolved && firstResolvedIndex < 0) {
+                firstResolvedIndex = index;
+            }
             if (resolved != StringUtils.hasText(section.snapshotId())) {
                 throw new IllegalArgumentException("报告章节状态与快照引用不一致");
             }
@@ -244,7 +252,11 @@ public class CompositeReportTaskService {
                 case "FAILED" -> BusinessReportPlanService.FAILED_MESSAGE;
                 default -> null;
             };
-            if (!Objects.equals(expectedMessage, section.safeMessage())) {
+            boolean safePersonDisclosure = resolved
+                    && subjectType == BusinessSubjectType.PERSON
+                    && index == firstResolvedIndex
+                    && BusinessAssistantReportService.isPersonUnavailableMessage(section.safeMessage());
+            if (!Objects.equals(expectedMessage, section.safeMessage()) && !safePersonDisclosure) {
                 throw new IllegalArgumentException("章节状态与安全说明不一致");
             }
         }
@@ -267,7 +279,8 @@ public class CompositeReportTaskService {
                 .map(section -> Map.of(
                         "datasetCode", section.datasetCode(),
                         "snapshotId", Objects.toString(section.snapshotId(), ""),
-                        "fieldPolicyChecksum", section.fieldPolicyChecksum()
+                        "fieldPolicyChecksum", section.fieldPolicyChecksum(),
+                        "safeMessage", Objects.toString(section.safeMessage(), "")
                 ))
                 .toList());
         return material;

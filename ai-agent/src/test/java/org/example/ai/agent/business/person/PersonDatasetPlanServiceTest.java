@@ -5,6 +5,9 @@ import org.example.ai.agent.business.dataset.entity.ReportDataset;
 import org.example.ai.agent.business.person.PersonBusinessQueryService.DatasetPlan;
 import org.example.ai.agent.business.person.PersonBusinessQueryService.DatasetType;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullAndEmptySource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.util.List;
 import java.util.Map;
@@ -133,6 +136,23 @@ class PersonDatasetPlanServiceTest {
                 Map.of()
         )).isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("TRAVEL");
+    }
+
+    @ParameterizedTest
+    @NullAndEmptySource
+    @ValueSource(strings = {" ", "not-json", "{}", "[1]"})
+    void invalidSubjectTypesShouldFailClosed(String subjectTypesJson) {
+        ReportDataset dataset = dataset(DatasetType.TRAVEL, "CFG_TRAVEL");
+        dataset.setSubjectTypesJson(subjectTypesJson);
+
+        PersonDatasetPlanService.PlanResult result = service.plan(
+                selectionService.select(List.of("TRAVEL")),
+                List.of(dataset),
+                Map.of()
+        );
+
+        assertThat(result.plans()).isEmpty();
+        assertThat(result.unavailableSemanticCodes()).containsExactly("TRAVEL");
     }
 
     private ReportDataset dataset(DatasetType type, String datasetCode) {

@@ -18,12 +18,16 @@ import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.function.Function;
+import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 /**
@@ -35,6 +39,17 @@ import java.util.stream.IntStream;
 public class BusinessAssistantReportService {
 
     private static final String PERSON_TEMPLATE_CODE = "PERSON_STANDARD";
+    private static final String TRAVEL_UNAVAILABLE_MESSAGE = "出差数据源尚未配置，本次未纳入统计";
+    private static final String ATTENDANCE_UNAVAILABLE_MESSAGE = "考勤数据源尚未配置，本次未纳入统计";
+    private static final String REIMBURSEMENT_UNAVAILABLE_MESSAGE = "报销数据源尚未配置，本次未纳入统计";
+    private static final Set<String> PERSON_UNAVAILABLE_MESSAGES = Set.of(
+            TRAVEL_UNAVAILABLE_MESSAGE,
+            ATTENDANCE_UNAVAILABLE_MESSAGE,
+            REIMBURSEMENT_UNAVAILABLE_MESSAGE
+    );
+    private static final Set<String> RESOLVED_SECTION_STATUSES = Set.of(
+            "REUSED", "QUERIED", "EMPTY"
+    );
 
     private final SubjectSelectionTokenService selectionTokenService;
     private final ReportDatasetService reportDatasetService;
@@ -96,6 +111,72 @@ public class BusinessAssistantReportService {
         );
     }
 
+    /** 将缺失业务转为固定提示，附加到首个有效章节并标记报告数据不完整。 */
+    private BusinessReportPlanService.PlannedReport withUnavailablePersonDisclosure(
+            BusinessReportPlanService.PlannedReport planned,
+            List<String> unavailableSemanticCodes) {
+        String message = unavailablePersonMessage(unavailableSemanticCodes);
+        if (!StringUtils.hasText(message)) {
+            return planned;
+        }
+        BusinessReportPlanService.LogicalReportPlan source = planned.plan();
+        List<BusinessReportPlanService.LogicalReportSection> sections =
+                new ArrayList<>(source.sections());
+        for (int index = 0; index < sections.size(); index++) {
+            BusinessReportPlanService.LogicalReportSection section = sections.get(index);
+            if (!RESOLVED_SECTION_STATUSES.contains(section.status())) {
+                continue;
+            }
+            sections.set(index, new BusinessReportPlanService.LogicalReportSection(
+                    section.datasetCode(), section.snapshotId(), section.fieldPolicyChecksum(),
+                    section.status(), message
+            ));
+            BusinessReportPlanService.LogicalReportPlan disclosed =
+                    new BusinessReportPlanService.LogicalReportPlan(
+                            source.templateCode(), source.subjectType(), source.subjectId(),
+                            source.format(), List.copyOf(sections), false
+                    );
+            return new BusinessReportPlanService.PlannedReport(
+                    disclosed, planned.templateChecksum()
+            );
+        }
+        throw new IllegalStateException("人员报告没有可用于披露缺失数据的有效章节");
+    }
+
+    private String unavailablePersonMessage(List<String> semanticCodes) {
+        if (semanticCodes == null || semanticCodes.isEmpty()) {
+            return null;
+        }
+        return semanticCodes.stream()
+                .distinct()
+                .map(this::unavailablePersonMessage)
+                .collect(Collectors.joining("；"));
+    }
+
+    private String unavailablePersonMessage(String semanticCode) {
+        return switch (Objects.toString(semanticCode, "")) {
+            case "TRAVEL" -> TRAVEL_UNAVAILABLE_MESSAGE;
+            case "ATTENDANCE" -> ATTENDANCE_UNAVAILABLE_MESSAGE;
+            case "REIMBURSEMENT" -> REIMBURSEMENT_UNAVAILABLE_MESSAGE;
+            default -> throw new IllegalArgumentException("人员报告存在未知的不可用业务语义");
+        };
+    }
+
+    /** 只允许由固定人员业务提示组成的安全说明，禁止写入原始错误文本。 */
+    static boolean isPersonUnavailableMessage(String message) {
+        if (!StringUtils.hasText(message)) {
+            return false;
+        }
+        String[] parts = message.split("；", -1);
+        Set<String> unique = new HashSet<>();
+        for (String part : parts) {
+            if (!PERSON_UNAVAILABLE_MESSAGES.contains(part) || !unique.add(part)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     /** 使用人员查询返回的安全模块引用创建报告，失败章节保持失败关闭。 */
     public ArtifactBlock createPersonReport(PersonReportCommand command) {
         Objects.requireNonNull(command, "人员报告命令不能为空");
@@ -130,7 +211,9 @@ public class BusinessAssistantReportService {
                 null, command.format(), command.canonicalQuery(),
                 command.refreshRequested()
         );
-        BusinessReportPlanService.PlannedReport planned = planService.plan(planCommand);
+        BusinessReportPlanService.PlannedReport planned = withUnavailablePersonDisclosure(
+                planService.plan(planCommand), command.unavailableSemanticCodes()
+        );
         return createArtifact(
                 command.identity(), command.format(), command.canonicalQuery(), planned
         );
@@ -404,11 +487,14 @@ public class BusinessAssistantReportService {
             String format,
             Map<String, Object> canonicalQuery,
             boolean refreshRequested,
-            List<PersonBusinessQueryService.ModuleResult> modules) {
+            List<PersonBusinessQueryService.ModuleResult> modules,
+            List<String> unavailableSemanticCodes) {
 
         public PersonReportCommand {
             canonicalQuery = safeMap(canonicalQuery);
             modules = modules == null ? List.of() : List.copyOf(modules);
+            unavailableSemanticCodes = unavailableSemanticCodes == null
+                    ? List.of() : List.copyOf(unavailableSemanticCodes);
         }
 
         /** 日志只输出报告路由摘要。 */
@@ -417,7 +503,8 @@ public class BusinessAssistantReportService {
             return "PersonReportCommand[format=" + format
                     + ", refreshRequested=" + refreshRequested
                     + ", canonicalQuerySize=" + canonicalQuery.size()
-                    + ", moduleCount=" + modules.size() + ']';
+                    + ", moduleCount=" + modules.size()
+                    + ", unavailableSemanticCount=" + unavailableSemanticCodes.size() + ']';
         }
     }
 

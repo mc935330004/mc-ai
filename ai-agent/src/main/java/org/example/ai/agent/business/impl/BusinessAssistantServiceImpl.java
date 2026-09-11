@@ -322,7 +322,8 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
                 artifact = reportService.createPersonReport(
                         new BusinessAssistantReportService.PersonReportCommand(
                                 reportIdentity(request, runId, subject), intent.exportFormat(),
-                                canonicalQuery(intent), intent.refresh(), result.modules()
+                                canonicalQuery(intent), intent.refresh(), result.modules(),
+                                planResult.unavailableSemanticCodes()
                         )
                 );
             } catch (RuntimeException exception) {

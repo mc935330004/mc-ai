@@ -323,13 +323,42 @@ class BusinessAssistantServiceTest {
                         false, List.of(personModule(
                         PersonBusinessQueryService.DatasetType.TRAVEL,
                         PersonBusinessQueryService.ModuleStatus.REUSED
-                ))
+                )), List.of()
                 );
 
         assertThat(identity.toString())
                 .doesNotContain("secret-token", "secret-role", "secret-selection-token");
         assertThat(command.toString())
                 .doesNotContain("secret-token", "secret-role", "secret-selection-token", "raw-employee-no");
+    }
+
+    @Test
+    void personReportShouldRejectUnknownUnavailableSemantic() {
+        Fixture fixture = new Fixture();
+        when(fixture.selectionTokenService.resolve(
+                "selection-token", "user-1", "conversation-1", BusinessSubjectType.PERSON
+        )).thenReturn(java.util.Optional.of("employee-raw-1"));
+        when(fixture.reportDatasetService.list()).thenReturn(List.of(
+                personDataset(PersonBusinessQueryService.DatasetType.TRAVEL, "CFG_TRAVEL")
+        ));
+        BusinessAssistantReportService.PersonReportCommand command =
+                new BusinessAssistantReportService.PersonReportCommand(
+                        new BusinessAssistantReportService.ReportIdentity(
+                                "run-1", "user-1", "conversation-1", "Bearer current-user",
+                                Map.of(), "selection-token"
+                        ),
+                        "PDF", Map.of(), false,
+                        List.of(personModule(
+                                PersonBusinessQueryService.DatasetType.TRAVEL,
+                                PersonBusinessQueryService.ModuleStatus.REUSED
+                        )),
+                        List.of("UNKNOWN")
+                );
+
+        assertThatThrownBy(() -> fixture.reportService.createPersonReport(command))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("人员报告存在未知的不可用业务语义");
+        verify(fixture.reportTaskService, never()).create(any());
     }
 
     @Test
@@ -1162,6 +1191,40 @@ class BusinessAssistantServiceTest {
                     assertThat(dataset.safeMessage()).isEqualTo("数据源尚未配置，本次未纳入统计");
                 }
         );
+    }
+
+    @Test
+    void partialPersonExportShouldDiscloseUnavailableSemanticInReportPlan() throws Exception {
+        Fixture fixture = new Fixture();
+        when(fixture.intentResolver.resolve(any(), any()))
+                .thenReturn(personIntent(List.of("TRAVEL", "REIMBURSEMENT"), "PDF"));
+        when(fixture.subjectResolutionService.resolve(any())).thenReturn(resolvedPerson());
+        when(fixture.reportDatasetService.list()).thenReturn(List.of(
+                personDataset(PersonBusinessQueryService.DatasetType.TRAVEL, "CFG_TRAVEL")
+        ));
+        when(fixture.personBusinessQueryService.query(any())).thenReturn(personResult(
+                List.of(PersonBusinessQueryService.DatasetType.TRAVEL), Set.of()
+        ));
+        allowPersonReport(fixture);
+
+        fixture.service.handle(request("查询出差和报销并导出 PDF"), fixture.stream, "run-1");
+
+        ArgumentCaptor<BusinessAssistantReportService.PersonReportCommand> report =
+                ArgumentCaptor.forClass(BusinessAssistantReportService.PersonReportCommand.class);
+        verify(fixture.reportService).createPersonReport(report.capture());
+        assertThat(report.getValue().unavailableSemanticCodes())
+                .containsExactly("REIMBURSEMENT");
+
+        ArgumentCaptor<CompositeReportTaskService.CreateCommand> task =
+                ArgumentCaptor.forClass(CompositeReportTaskService.CreateCommand.class);
+        verify(fixture.reportTaskService).create(task.capture());
+        assertThat(task.getValue().plannedReport().plan().dataComplete()).isFalse();
+        assertThat(task.getValue().plannedReport().plan().sections()).singleElement()
+                .satisfies(section -> {
+                    assertThat(section.datasetCode()).isEqualTo("CFG_TRAVEL");
+                    assertThat(section.safeMessage())
+                            .isEqualTo("报销数据源尚未配置，本次未纳入统计");
+                });
     }
 
     @Test
