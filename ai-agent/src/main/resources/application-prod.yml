@@ -108,3 +108,9 @@ management:
           include: readinessState,db,redis,externalServices
         liveness:
           include: livenessState
+
+ai:
+  business:
+    composite-report:
+      # 生产环境 PDF 字体路径必须由部署环境注入，不硬编码本机路径；为空时不嵌入自定义字体。
+      pdf-font-path: ${AI_BUSINESS_REPORT_PDF_FONT_PATH:}

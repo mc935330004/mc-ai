@@ -208,6 +208,10 @@ agent:
 #    pm-ai-assistant-url: http://192.168.8.251:8081/pm-web/
 
 ai:
+  business:
+    composite-report:
+      # PDF 字体路径由环境变量提供，不硬编码本机路径；为空时不嵌入自定义字体。
+      pdf-font-path: ${AI_BUSINESS_REPORT_PDF_FONT_PATH:}
   graph:
     runtime:
       # DAG普通节点线程数
