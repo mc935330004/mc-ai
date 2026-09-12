@@ -11,6 +11,7 @@ import java.time.DateTimeException;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
+import java.time.OffsetDateTime;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
@@ -49,13 +50,21 @@ public final class PersonBusinessFactAggregator {
             default -> null;
         };
         Object value = field == null ? null : record.get(field);
-        if (!(value instanceof String text) || text.length() < 10) {
+        if (!(value instanceof String text)) {
             return null;
         }
         try {
-            return LocalDate.parse(text.substring(0, 10));
-        } catch (DateTimeException exception) {
-            return null;
+            return LocalDate.parse(text);
+        } catch (DateTimeException ignored) {
+            try {
+                return LocalDateTime.parse(text).toLocalDate();
+            } catch (DateTimeException localDateTimeInvalid) {
+                try {
+                    return OffsetDateTime.parse(text).toLocalDate();
+                } catch (DateTimeException offsetDateTimeInvalid) {
+                    return null;
+                }
+            }
         }
     }
 

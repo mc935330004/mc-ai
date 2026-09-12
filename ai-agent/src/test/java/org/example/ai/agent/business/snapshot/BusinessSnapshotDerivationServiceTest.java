@@ -280,6 +280,58 @@ class BusinessSnapshotDerivationServiceTest {
         }
     }
 
+    @Test
+    void shouldBindAuthorizedProjectScopeIntoDerivedQueryIdentity() throws Exception {
+        Map<String, Object> sourceQuery = Map.of(
+                "startDate", "2026-03-01", "endDate", "2026-03-31",
+                "projectCode", "CALLER-SPOOFED"
+        );
+        prepareProjectTravelSource(sourceQuery, List.of(
+                travel("T-1", "PROJECT-A", "2026-03-01T08:00:00", "10.00")
+        ));
+
+        BusinessSnapshot projectA = service.deriveProjectAssociation(
+                projectAssociationCommand(projectContext("PROJECT-A", "P-A"), sourceQuery)
+        ).snapshot();
+        BusinessSnapshot projectB = service.deriveProjectAssociation(
+                projectAssociationCommand(projectContext("PROJECT-B", "P-B"), sourceQuery)
+        ).snapshot();
+
+        assertThat(projectA.getQueryHash()).isNotEqualTo(projectB.getQueryHash());
+        Map<?, ?> savedQuery = objectMapper.readValue(projectA.getQueryJson(), Map.class);
+        assertThat(savedQuery.get("projectCode")).isEqualTo("PROJECT-A");
+        assertThat(savedQuery.get("projectId")).isEqualTo("P-A");
+        assertThat(savedQuery.get("periodStart")).isEqualTo("2026-03-01");
+        assertThat(savedQuery.get("periodEnd")).isEqualTo("2026-03-31");
+        verify(accessService, org.mockito.Mockito.times(2)).reauthorize(
+                org.mockito.ArgumentMatchers.argThat(command ->
+                        "CALLER-SPOOFED".equals(command.canonicalQuery().get("projectCode")))
+        );
+    }
+
+    @Test
+    void invalidOccurrenceDateIsUnknownAndNeverExported() throws Exception {
+        Map<String, Object> sourceQuery = Map.of(
+                "startDate", "2026-03-01", "endDate", "2026-03-31"
+        );
+        prepareProjectTravelSource(sourceQuery, List.of(
+                travel("T-1", null, "2026-03-01-invalid", "10.00")
+        ));
+
+        BusinessSnapshotDerivationService.ProjectAssociationDerivation result =
+                service.deriveProjectAssociation(
+                        projectAssociationCommand(projectContext("PROJECT-A", "P-A"), sourceQuery)
+                );
+
+        assertThat(result.summary())
+                .isEqualTo(new PersonBusinessQueryService.AssociationSummary(0, 0, 1, 0));
+        assertThat(result.directCalculationFacts()
+                .get(PersonBusinessQueryService.TRAVEL_RECORDS)).asList().isEmpty();
+        assertThat(result.labels()).containsExactly(
+                "部分记录的项目关联无法确认，未计入项目直接统计"
+        );
+    }
+
     private DeriveCommand command() {
         return command(Map.of(
                 "startDate", "2026-01-01", "endDate", "2026-03-31", "grain", "QUARTER"
@@ -288,22 +340,57 @@ class BusinessSnapshotDerivationServiceTest {
 
     private BusinessSnapshotDerivationService.ProjectAssociationCommand
             projectAssociationCommand() {
+        return projectAssociationCommand(
+                projectContext("XXXT2674040", "P-1"),
+                Map.of("startDate", "2026-03-01", "endDate", "2026-03-31")
+        );
+    }
+
+    private BusinessSnapshotDerivationService.ProjectAssociationCommand
+            projectAssociationCommand(
+            ProjectAssociationContext context,
+            Map<String, Object> targetQuery) {
         return new BusinessSnapshotDerivationService.ProjectAssociationCommand(
                 "agent-1", "user-1", "session-1", "Bearer current", Map.of(),
                 "PERSON_TRAVEL", "E100", "source-1",
-                Map.of("startDate", "2026-03-01", "endDate", "2026-03-31"),
-                DatasetType.TRAVEL,
-                new ProjectAssociationContext(
-                        "XXXT2674040", "P-1",
-                        java.time.LocalDate.of(2026, 3, 1),
-                        java.time.LocalDate.of(2026, 3, 31),
-                        List.of(new ProjectPeriodContextService.MembershipPeriod(
-                                java.time.LocalDate.of(2026, 3, 1),
-                                java.time.LocalDate.of(2026, 3, 31)
-                        )),
-                        true
-                )
+                targetQuery, DatasetType.TRAVEL, context
         );
+    }
+
+    private ProjectAssociationContext projectContext(String projectCode, String projectId) {
+        return new ProjectAssociationContext(
+                projectCode, projectId,
+                java.time.LocalDate.of(2026, 3, 1),
+                java.time.LocalDate.of(2026, 3, 31),
+                List.of(new ProjectPeriodContextService.MembershipPeriod(
+                        java.time.LocalDate.of(2026, 3, 1),
+                        java.time.LocalDate.of(2026, 3, 31)
+                )),
+                true
+        );
+    }
+
+    private void prepareProjectTravelSource(
+            Map<String, Object> sourceQuery,
+            List<Map<String, Object>> records) throws Exception {
+        ReportDatasetField travelField = field();
+        travelField.setFactCode(PersonBusinessQueryService.TRAVEL_RECORDS);
+        when(fieldMapper.selectList(any())).thenReturn(List.of(travelField));
+        BusinessSnapshot source = sourceSnapshot();
+        source.setDatasetCode("PERSON_TRAVEL");
+        source.setQueryJson(objectMapper.writeValueAsString(sourceQuery));
+        source.setFactsJson(objectMapper.writeValueAsString(Map.of(
+                "person", Map.of(
+                        "calculation", Map.of(PersonBusinessQueryService.TRAVEL_RECORDS, records),
+                        "display", Map.of(PersonBusinessQueryService.TRAVEL_RECORDS, List.of()),
+                        "export", Map.of(PersonBusinessQueryService.TRAVEL_RECORDS, List.of()),
+                        "model", Map.of(PersonBusinessQueryService.TRAVEL_RECORDS, List.of())
+                )
+        )));
+        BusinessSnapshotItem item = sourceItem();
+        item.setItemKey("person");
+        when(snapshotMapper.selectOne(any())).thenReturn(source);
+        when(itemMapper.selectList(any())).thenReturn(List.of(item));
     }
 
     private DeriveCommand command(Map<String, Object> target, String grain) {

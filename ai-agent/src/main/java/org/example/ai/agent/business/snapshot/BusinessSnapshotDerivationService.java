@@ -413,6 +413,11 @@ public class BusinessSnapshotDerivationService {
             ProjectAssociationCommand command,
             String factsJson,
             LocalDateTime now) {
+        Map<String, Object> query = projectAssociationQuery(command);
+        String queryJson = writeJson(query, "项目关联派生查询条件");
+        if (queryJson.getBytes(StandardCharsets.UTF_8).length > MAX_QUERY_BYTES) {
+            throw unavailable();
+        }
         BusinessSnapshot child = new BusinessSnapshot();
         child.setSnapshotId(UUID.randomUUID().toString().replace("-", ""));
         child.setUserId(command.userId());
@@ -420,9 +425,9 @@ public class BusinessSnapshotDerivationService {
         child.setSubjectType(BusinessSubjectType.PERSON.name());
         child.setSubjectId(command.subjectId());
         child.setDatasetCode(command.datasetCode());
-        child.setQueryJson(writeJson(command.targetQuery(), "目标查询条件"));
+        child.setQueryJson(queryJson);
         child.setQueryHash(ContentHashUtils.sha256(
-                ReportDatasetValidator.canonicalSafeValue(command.targetQuery())
+                ReportDatasetValidator.canonicalSafeValue(query)
         ));
         child.setStatus(source.getStatus());
         child.setDataComplete(source.getDataComplete());
@@ -434,6 +439,24 @@ public class BusinessSnapshotDerivationService {
         child.setCreatedAt(now);
         child.setCompletedAt(now);
         return child;
+    }
+
+    private Map<String, Object> projectAssociationQuery(ProjectAssociationCommand command) {
+        Map<String, Object> query = new LinkedHashMap<>(command.targetQuery());
+        ProjectAssociationContext context = command.projectContext();
+        putOrRemove(query, "projectCode", context.projectCode());
+        putOrRemove(query, "projectId", context.projectId());
+        query.put("periodStart", context.periodStart().toString());
+        query.put("periodEnd", context.periodEnd().toString());
+        return query;
+    }
+
+    private void putOrRemove(Map<String, Object> query, String key, String value) {
+        if (StringUtils.hasText(value)) {
+            query.put(key, value.trim());
+        } else {
+            query.remove(key);
+        }
     }
 
     private void insertAssociationItem(

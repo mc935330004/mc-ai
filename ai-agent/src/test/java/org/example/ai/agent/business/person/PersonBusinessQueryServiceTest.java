@@ -306,7 +306,13 @@ class PersonBusinessQueryServiceTest {
                 DatasetType.REIMBURSEMENT, Map.of("occurredAt", "2026-03-01T08:00:00")
         )).isEqualTo(date);
         assertThat(PersonBusinessFactAggregator.occurredOn(
+                DatasetType.PUNCH, Map.of("time", "2026-03-01T08:00:00+08:00")
+        )).isEqualTo(date);
+        assertThat(PersonBusinessFactAggregator.occurredOn(
                 DatasetType.TRAVEL, Map.of("occurredAt", "2026-03-01T08:00:00")
+        )).isNull();
+        assertThat(PersonBusinessFactAggregator.occurredOn(
+                DatasetType.TRAVEL, Map.of("startAt", "2026-03-01-invalid")
         )).isNull();
     }
 
