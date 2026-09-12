@@ -30,6 +30,7 @@ import org.example.ai.agent.business.person.PersonDatasetPlanService;
 import org.example.ai.agent.business.person.PersonDatasetPlanService.PlanResult;
 import org.example.ai.agent.business.person.PersonDatasetSelectionService;
 import org.example.ai.agent.business.person.PersonDatasetSelectionService.Selection;
+import org.example.ai.agent.business.person.ProjectPeriodContextService;
 import org.example.ai.agent.business.person.model.AttendanceDayResult;
 import org.example.ai.agent.business.person.model.MultiPersonSummary.PersonQueryStatus;
 import org.example.ai.agent.business.report.BusinessAssistantReportService;
@@ -90,6 +91,7 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
     private final PersonBusinessQueryService personBusinessQueryService;
     private final PersonDatasetSelectionService personDatasetSelectionService;
     private final PersonDatasetPlanService personDatasetPlanService;
+    private final ProjectPeriodContextService projectPeriodContextService;
     private final DepartmentBusinessQueryService departmentBusinessQueryService;
     private final ReportDatasetService reportDatasetService;
     private final DeterministicBusinessAnswerComposer answerComposer;
@@ -106,6 +108,7 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
             PersonBusinessQueryService personBusinessQueryService,
             PersonDatasetSelectionService personDatasetSelectionService,
             PersonDatasetPlanService personDatasetPlanService,
+            ProjectPeriodContextService projectPeriodContextService,
             DepartmentBusinessQueryService departmentBusinessQueryService,
             ReportDatasetService reportDatasetService,
             DeterministicBusinessAnswerComposer answerComposer,
@@ -131,6 +134,9 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
         );
         this.personDatasetPlanService = Objects.requireNonNull(
                 personDatasetPlanService, "personDatasetPlanService不能为空"
+        );
+        this.projectPeriodContextService = Objects.requireNonNull(
+                projectPeriodContextService, "projectPeriodContextService不能为空"
         );
         this.departmentBusinessQueryService = Objects.requireNonNull(
                 departmentBusinessQueryService, "departmentBusinessQueryService不能为空"
@@ -280,10 +286,16 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
                 request, stream, runId, context, panorama.allModulesComplete(), datasets,
                 metricDefinitions(datasets), tableDefinitions(datasets), panorama.issues(), artifact, true
         );
-        saveState(request, runId, subject, intent, panorama.aggregateSnapshotId(), List.of());
+        saveState(request, runId, subject, intent, panorama.aggregateSnapshotId(), List.of(), null);
         finish(request, stream, composed, true, startedBlocks);
     }
 
+    /**
+     * 人员分支先独立复核项目权限并取得项目期间，再执行人员业务数据集。
+     *
+     * 项目期间只在用户明确要求时使用，并且始终以 PROJECT_BASE 安全事实为准，
+     * 不允许模型生成日期，也不允许用人员权限代替项目权限。
+     */
     private void handlePerson(
             AgentRequest request,
             AgentStreamSession stream,
@@ -294,7 +306,15 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
             ResponseContext context) throws Exception {
         Set<String> startedBlocks = new HashSet<>();
         StatusProgress progress = new StatusProgress(stream, datasetNames());
-        PlanResult planResult = personPlanResult(intent, selection);
+        ProjectPeriodScope projectScope = resolveProjectPeriod(
+                request, stream, runId, intent, selection, subject, context
+        );
+        if (projectScope == null) {
+            // 项目期间不可用时已经完成本轮收尾，不再执行人员工作流和报告。
+            return;
+        }
+        BusinessQueryIntent effectiveIntent = projectScope.effectiveIntent();
+        PlanResult planResult = personPlanResult(effectiveIntent, selection);
         List<DatasetPlan> plans = planResult.plans();
         if (plans.isEmpty()) {
             List<DatasetAnswerInput> datasets = unavailablePersonDatasets(
@@ -304,27 +324,28 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
                     request, stream, runId, context, false, datasets,
                     List.of(), List.of(), List.of(), null, false
             );
-            saveState(request, runId, subject, intent, null, selection.semanticCodes());
+            saveState(request, runId, subject, effectiveIntent, null,
+                    selection.semanticCodes(), projectScope);
             finish(request, stream, composed, false, startedBlocks);
             return;
         }
         PersonBusinessQueryService.Result result = personBusinessQueryService.query(
                 new PersonBusinessQueryService.Command(
                         runId, request.getUserId(), request.getConversationId(),
-                        request.getAuthorization(), Map.of(), subject.selectionToken(), intent.refresh(), plans,
-                        null
+                        request.getAuthorization(), Map.of(), subject.selectionToken(),
+                        effectiveIntent.refresh(), plans, projectScope.associationContext()
                 )
         );
         List<DatasetAnswerInput> datasets = new ArrayList<>(personDatasets(plans, result));
         datasets.addAll(unavailablePersonDatasets(planResult.unavailableSemanticCodes()));
         ArtifactBlock artifact = null;
-        if (StringUtils.hasText(intent.exportFormat())) {
+        if (StringUtils.hasText(effectiveIntent.exportFormat())) {
             try {
                 artifact = reportService.createPersonReport(
                         new BusinessAssistantReportService.PersonReportCommand(
-                                reportIdentity(request, runId, subject), intent.exportFormat(),
-                                canonicalQuery(intent), intent.refresh(), result.modules(),
-                                planResult.unavailableSemanticCodes()
+                                reportIdentity(request, runId, subject), effectiveIntent.exportFormat(),
+                                canonicalQuery(effectiveIntent), effectiveIntent.refresh(), result.modules(),
+                                planResult.unavailableSemanticCodes(), projectScope.associationContext()
                         )
                 );
             } catch (RuntimeException exception) {
@@ -335,13 +356,123 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
             }
         }
         boolean complete = datasets.stream().allMatch(DatasetAnswerInput::dataComplete)
-                && (artifact != null || !StringUtils.hasText(intent.exportFormat()));
+                && (artifact != null || !StringUtils.hasText(effectiveIntent.exportFormat()));
         AiResponse composed = response(
                 request, stream, runId, context, complete, datasets,
                 personMetrics(plans), personTables(plans), List.of(), artifact, false
         );
-        saveState(request, runId, subject, intent, null, selection.semanticCodes());
+        saveState(request, runId, subject, effectiveIntent, null,
+                selection.semanticCodes(), projectScope);
         finish(request, stream, composed, false, startedBlocks);
+    }
+
+    /**
+     * 解析项目期间上下文。
+     *
+     * 返回 null 表示本轮已经以安全提示结束，调用方必须停止后续业务查询。
+     */
+    private ProjectPeriodScope resolveProjectPeriod(
+            AgentRequest request,
+            AgentStreamSession stream,
+            String runId,
+            BusinessQueryIntent intent,
+            Selection selection,
+            SubjectCandidate subject,
+            ResponseContext context) throws Exception {
+        if (!intent.projectPeriodRequested()) {
+            return new ProjectPeriodScope(intent, null, null);
+        }
+        // 项目和人员分别定位、分别授权，人员定位条件不携带项目编码。
+        SubjectResolutionResult projectSubject = subjectResolutionService.resolve(
+                projectSubjectRequest(request, intent, runId)
+        );
+        if (projectSubject.state() != SubjectResolutionState.RESOLVED) {
+            // 未明确到唯一项目时不执行人员业务数据集，也不取得项目期间。
+            handleUnresolved(
+                    request, stream, runId,
+                    withSubjectType(intent, BusinessSubjectType.PROJECT), selection, projectSubject
+            );
+            return null;
+        }
+        SubjectCandidate project = projectSubject.resolvedSubject();
+        ProjectPeriodContextService.Result period = projectPeriodContextService.resolve(
+                new ProjectPeriodContextService.Command(
+                        runId, request.getUserId(), request.getConversationId(),
+                        request.getAuthorization(), Map.of(),
+                        subject.selectionToken(), project.selectionToken(), intent.projectYear()
+                )
+        );
+        if (!period.ready()) {
+            finishWithProjectPeriodFailure(request, stream, runId, context, period);
+            return null;
+        }
+        ProjectPeriodContextService.Context projectPeriod = period.context();
+        return new ProjectPeriodScope(
+                withPeriod(intent, projectPeriod.periodStart(), projectPeriod.periodEnd()),
+                associationContext(projectPeriod),
+                project.selectionToken()
+        );
+    }
+
+    /**
+     * 项目期间不可用时只返回安全提示，不执行人员数据集，也不创建报告。
+     */
+    private void finishWithProjectPeriodFailure(
+            AgentRequest request,
+            AgentStreamSession stream,
+            String runId,
+            ResponseContext context,
+            ProjectPeriodContextService.Result period) throws Exception {
+        DatasetExecutionStatus status = period.status() == ProjectPeriodContextService.Status.DENIED
+                ? DatasetExecutionStatus.DENIED
+                : DatasetExecutionStatus.FAILED;
+        DatasetAnswerInput terminal = new DatasetAnswerInput(
+                "PROJECT_PERIOD", "项目期间", status, false,
+                Map.of(), Map.of(),
+                StringUtils.hasText(period.safeMessage())
+                        ? period.safeMessage()
+                        : "项目期间暂时不可用，请补充日期范围后重试"
+        );
+        AiResponse composed = response(
+                request, stream, runId, context, false,
+                List.of(terminal), List.of(), List.of(), List.of(), null, false
+        );
+        finish(request, stream, composed, false);
+    }
+
+    /** 项目期间生效后覆盖用户未明确指定的查询日期。 */
+    private BusinessQueryIntent withPeriod(
+            BusinessQueryIntent intent,
+            java.time.LocalDate periodStart,
+            java.time.LocalDate periodEnd) {
+        return new BusinessQueryIntent(
+                intent.subjectType(), intent.projectCode(), intent.personName(), intent.employeeNo(),
+                intent.projectYear(), periodStart, periodEnd, intent.datasetCodes(),
+                intent.refresh(), intent.exportFormat(), intent.anomalyPeopleRequested(),
+                intent.projectPeriodRequested()
+        );
+    }
+
+    /** 只把已复权的项目标识和有效期传给人员查询，不携带令牌和认证信息。 */
+    private PersonBusinessQueryService.ProjectAssociationContext associationContext(
+            ProjectPeriodContextService.Context context) {
+        return new PersonBusinessQueryService.ProjectAssociationContext(
+                context.projectCode(), context.projectId(),
+                context.periodStart(), context.periodEnd(),
+                context.membershipPeriods(), context.membershipAvailable()
+        );
+    }
+
+    /**
+     * 项目期间上下文。
+     *
+     * associationContext 为空表示本次不是项目期间查询，
+     * projectSelectionToken 只在项目期间查询成功时存在，用于下一轮追问继承。
+     */
+    private record ProjectPeriodScope(
+            BusinessQueryIntent effectiveIntent,
+            PersonBusinessQueryService.ProjectAssociationContext associationContext,
+            String projectSelectionToken) {
     }
 
     /** 部门回答仅发布安全汇总，不向模型提供人员事实。 */
@@ -368,7 +499,7 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
                     request, stream, runId, context, false, datasets,
                     List.of(), List.of(), List.of(), null, false
             );
-            saveState(request, runId, subject, intent, null, selection.semanticCodes());
+            saveState(request, runId, subject, intent, null, selection.semanticCodes(), null);
             finish(request, stream, composed, false);
             return;
         }
@@ -442,7 +573,7 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
         }
         AiResponse composed = response(request, stream, runId, context, complete, datasets,
                 metrics, tables, List.of(), null, false);
-        saveState(request, runId, subject, intent, null, selection.semanticCodes());
+        saveState(request, runId, subject, intent, null, selection.semanticCodes(), null);
         finish(request, stream, composed, false);
     }
 
@@ -787,13 +918,20 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
         }
     }
 
+    /**
+     * 保存上一轮业务状态。
+     *
+     * 人员和项目分别保存各自的选择令牌，避免下一轮追问把两个主体相互覆盖；
+     * 人员分支不再写入通用 selectionToken。
+     */
     private void saveState(
             AgentRequest request,
             String runId,
             SubjectCandidate subject,
             BusinessQueryIntent intent,
             String panoramaSnapshotId,
-            List<String> semanticCodes) {
+            List<String> semanticCodes,
+            ProjectPeriodScope projectScope) {
         BusinessConversationState state = new BusinessConversationState();
         state.setRouteType("BUSINESS_ASSISTANT");
         state.setBusinessTopic(request.getUserQuestion());
@@ -801,11 +939,28 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
         state.setActiveObjectIds(List.of(subjectId(subject)));
         state.setLastRunId(runId);
         Map<String, Object> input = new LinkedHashMap<>(canonicalQuery(intent));
-        input.put("selectionToken", subject.selectionToken());
+        if (subject.type() == BusinessSubjectType.PERSON) {
+            input.put("personSelectionToken", subject.selectionToken());
+        } else {
+            input.put("selectionToken", subject.selectionToken());
+        }
         input.put("subjectType", subject.type().name());
         if (subject.type() == BusinessSubjectType.PERSON
                 || subject.type() == BusinessSubjectType.DEPARTMENT) {
             input.put("datasetCodes", List.copyOf(semanticCodes));
+        }
+        if (projectScope != null && projectScope.associationContext() != null) {
+            PersonBusinessQueryService.ProjectAssociationContext projectContext =
+                    projectScope.associationContext();
+            if (StringUtils.hasText(projectScope.projectSelectionToken())) {
+                input.put("projectSelectionToken", projectScope.projectSelectionToken());
+            }
+            if (StringUtils.hasText(projectContext.projectCode())) {
+                input.put("projectCode", projectContext.projectCode());
+            }
+        }
+        if (intent.projectPeriodRequested()) {
+            input.put("projectPeriodRequested", true);
         }
         if (StringUtils.hasText(panoramaSnapshotId)) {
             input.put("panoramaSnapshotId", panoramaSnapshotId);
@@ -886,6 +1041,28 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
         );
     }
 
+    /**
+     * 项目主体定位请求。
+     *
+     * 项目期间查询必须独立定位和授权项目，不复用人员定位结果，
+     * 也不把项目编码当作人员定位条件。
+     */
+    private SubjectResolutionRequest projectSubjectRequest(
+            AgentRequest request,
+            BusinessQueryIntent intent,
+            String runId) {
+        String selectionToken = projectSelectionToken(request, intent);
+        boolean selected = StringUtils.hasText(selectionToken);
+        boolean projectCodeSearch = !selected && StringUtils.hasText(intent.projectCode());
+        return new SubjectResolutionRequest(
+                runId, request.getUserId(), request.getConversationId(), request.getAuthorization(), Map.of(),
+                BusinessSubjectType.PROJECT, selectionToken,
+                projectCodeSearch ? intent.projectCode() : null, null, null,
+                !selected ? intent.projectYear() : null, false, null,
+                pageNumber(request), pageSize(request)
+        );
+    }
+
     private int pageNumber(AgentRequest request) {
         return boundedNumber(request.getExtra(), "pageNumber", 1, 1, Integer.MAX_VALUE);
     }
@@ -908,17 +1085,59 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
         return candidate < minimum || candidate > maximum ? defaultValue : (int) candidate;
     }
 
+    /**
+     * 按主体类型解析选择令牌。
+     *
+     * 人员和项目使用各自独立的令牌键，避免追问时相互覆盖；
+     * 通用 selectionToken 只作为旧会话状态的兼容回退，优先级最低。
+     */
     private String selectionToken(AgentRequest request, BusinessQueryIntent intent) {
-        Object selected = request.getExtra() == null ? null : request.getExtra().get("selectionToken");
-        if (selected instanceof String text && StringUtils.hasText(text)) {
-            return text.trim();
+        if (intent.subjectType() == BusinessSubjectType.PROJECT) {
+            return projectSelectionToken(request, intent);
         }
-        // 显式项目编码代表新查询，禁止旧会话选择令牌把主体重新指回上一个项目。
-        if (intent.subjectType() == BusinessSubjectType.PROJECT
-                && StringUtils.hasText(intent.projectCode())) {
+        String extra = firstText(
+                extraText(request, "personSelectionToken"),
+                extraText(request, "selectionToken")
+        );
+        if (extra != null) {
+            return extra;
+        }
+        return firstText(
+                trustedInheritedText(request, "personSelectionToken"),
+                trustedInheritedText(request, "selectionToken")
+        );
+    }
+
+    /**
+     * 项目选择令牌。
+     *
+     * 显式项目编码代表新查询，必须忽略继承的项目令牌，
+     * 避免旧会话把主体重新指回上一个项目。
+     */
+    private String projectSelectionToken(AgentRequest request, BusinessQueryIntent intent) {
+        String extra = firstText(
+                extraText(request, "projectSelectionToken"),
+                extraText(request, "selectionToken")
+        );
+        if (extra != null) {
+            return extra;
+        }
+        if (StringUtils.hasText(intent.projectCode())) {
             return null;
         }
-        return trustedInheritedText(request, "selectionToken");
+        return firstText(
+                trustedInheritedText(request, "projectSelectionToken"),
+                trustedInheritedText(request, "selectionToken")
+        );
+    }
+
+    private String extraText(AgentRequest request, String key) {
+        Object value = request.getExtra() == null ? null : request.getExtra().get(key);
+        return value instanceof String text && StringUtils.hasText(text) ? text.trim() : null;
+    }
+
+    private String firstText(String first, String second) {
+        return first != null ? first : second;
     }
 
     private String trustedInheritedText(AgentRequest request, String key) {

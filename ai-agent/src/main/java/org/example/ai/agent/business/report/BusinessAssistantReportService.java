@@ -482,13 +482,20 @@ public class BusinessAssistantReportService {
         }
     }
 
+    /**
+     * 人员报告命令。
+     *
+     * projectContext 只记录本次查询已复权的项目标识和有效期，
+     * 供报告任务登记当次查询范围；它不进入模型上下文，也不包含任何令牌。
+     */
     public record PersonReportCommand(
             ReportIdentity identity,
             String format,
             Map<String, Object> canonicalQuery,
             boolean refreshRequested,
             List<PersonBusinessQueryService.ModuleResult> modules,
-            List<String> unavailableSemanticCodes) {
+            List<String> unavailableSemanticCodes,
+            PersonBusinessQueryService.ProjectAssociationContext projectContext) {
 
         public PersonReportCommand {
             canonicalQuery = safeMap(canonicalQuery);
@@ -504,7 +511,8 @@ public class BusinessAssistantReportService {
                     + ", refreshRequested=" + refreshRequested
                     + ", canonicalQuerySize=" + canonicalQuery.size()
                     + ", moduleCount=" + modules.size()
-                    + ", unavailableSemanticCount=" + unavailableSemanticCodes.size() + ']';
+                    + ", unavailableSemanticCount=" + unavailableSemanticCodes.size()
+                    + ", projectContextPresent=" + (projectContext != null) + ']';
         }
     }
 

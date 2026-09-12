@@ -22,6 +22,7 @@ import org.example.ai.agent.business.panorama.model.ProjectPanoramaResult;
 import org.example.ai.agent.business.person.PersonBusinessQueryService;
 import org.example.ai.agent.business.person.PersonDatasetPlanService;
 import org.example.ai.agent.business.person.PersonDatasetSelectionService;
+import org.example.ai.agent.business.person.ProjectPeriodContextService;
 import org.example.ai.agent.business.report.BusinessAssistantReportService;
 import org.example.ai.agent.business.report.entity.CompositeReportTask;
 import org.example.ai.agent.business.report.CompositeReportTaskService;
@@ -45,6 +46,7 @@ import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.time.LocalDate;
 
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
@@ -323,7 +325,7 @@ class BusinessAssistantServiceTest {
                         false, List.of(personModule(
                         PersonBusinessQueryService.DatasetType.TRAVEL,
                         PersonBusinessQueryService.ModuleStatus.REUSED
-                )), List.of()
+                )), List.of(), null
                 );
 
         assertThat(identity.toString())
@@ -352,7 +354,7 @@ class BusinessAssistantServiceTest {
                                 PersonBusinessQueryService.DatasetType.TRAVEL,
                                 PersonBusinessQueryService.ModuleStatus.REUSED
                         )),
-                        List.of("UNKNOWN")
+                        List.of("UNKNOWN"), null
                 );
 
         assertThatThrownBy(() -> fixture.reportService.createPersonReport(command))
@@ -767,14 +769,19 @@ class BusinessAssistantServiceTest {
     }
 
     @Test
-    void personProjectContextKeepsProjectCodeForDatasetsAndPdfReport() throws Exception {
+    void personProjectPeriodUsesIndependentSubjectsAndEffectiveDates() throws Exception {
         Fixture fixture = new Fixture();
         when(fixture.intentResolver.resolve(any(), any())).thenReturn(new BusinessQueryIntent(
                 BusinessSubjectType.PERSON, "P-1001", "张三", null,
                 null, java.time.LocalDate.of(2026, 8, 1), java.time.LocalDate.of(2026, 8, 31),
                 List.of("TRAVEL"), false, "PDF", false, true
         ));
-        when(fixture.subjectResolutionService.resolve(any())).thenReturn(resolvedPerson());
+        when(fixture.subjectResolutionService.resolve(any())).thenAnswer(invocation -> {
+            SubjectResolutionRequest command = invocation.getArgument(0);
+            return command.subjectType() == BusinessSubjectType.PERSON
+                    ? resolvedPerson() : resolvedProject();
+        });
+        when(fixture.projectPeriodContextService.resolve(any())).thenReturn(projectPeriodReady());
         when(fixture.reportDatasetService.list()).thenReturn(personDatasets());
         when(fixture.personBusinessQueryService.query(any())).thenReturn(personReportResult());
         when(fixture.selectionTokenService.resolve(
@@ -786,13 +793,112 @@ class BusinessAssistantServiceTest {
                 request("查询张三在 P-1001 项目期间的出差并生成 PDF"), fixture.stream, "run-1"
         );
 
-        assertThat(capturedPersonCommand(fixture).plans()).allSatisfy(plan ->
-                assertThat(plan.canonicalInput()).containsEntry("projectCode", "P-1001")
-        );
+        PersonBusinessQueryService.Command business = capturedPersonCommand(fixture);
+        assertThat(business.plans()).allSatisfy(plan -> assertThat(plan.canonicalInput())
+                .containsEntry("projectCode", "P-1001")
+                .containsEntry("startDate", "2026-01-01")
+                .containsEntry("endDate", "2026-12-31"));
+        assertThat(business.projectContext()).isNotNull();
+        assertThat(business.projectContext().projectId()).isEqualTo("project-raw-1");
+        ArgumentCaptor<SubjectResolutionRequest> resolutions =
+                ArgumentCaptor.forClass(SubjectResolutionRequest.class);
+        verify(fixture.subjectResolutionService, org.mockito.Mockito.times(2)).resolve(resolutions.capture());
+        assertThat(resolutions.getAllValues()).extracting(SubjectResolutionRequest::subjectType)
+                .containsExactly(BusinessSubjectType.PERSON, BusinessSubjectType.PROJECT);
+        assertThat(resolutions.getAllValues().get(0).projectCode()).isNull();
         ArgumentCaptor<BusinessAssistantReportService.PersonReportCommand> report =
                 ArgumentCaptor.forClass(BusinessAssistantReportService.PersonReportCommand.class);
         verify(fixture.reportService).createPersonReport(report.capture());
-        assertThat(report.getValue().canonicalQuery()).containsEntry("projectCode", "P-1001");
+        assertThat(report.getValue().projectContext()).isEqualTo(business.projectContext());
+        ArgumentCaptor<org.example.ai.agent.chat.memory.model.BusinessConversationState> state =
+                ArgumentCaptor.forClass(org.example.ai.agent.chat.memory.model.BusinessConversationState.class);
+        verify(fixture.conversationStateService).saveState(any(), any(), state.capture());
+        assertThat(state.getValue().getLastInput())
+                .containsEntry("personSelectionToken", "selection-token")
+                .containsEntry("projectSelectionToken", "project-token")
+                .containsEntry("projectCode", "P-1001")
+                .containsEntry("startDate", "2026-01-01")
+                .containsEntry("endDate", "2026-12-31")
+                .containsEntry("projectPeriodRequested", true)
+                .doesNotContainKey("selectionToken");
+    }
+
+    @Test
+    void ambiguousProjectStopsBeforePeriodAndPersonBusinessQueries() throws Exception {
+        Fixture fixture = new Fixture();
+        when(fixture.intentResolver.resolve(any(), any())).thenReturn(new BusinessQueryIntent(
+                BusinessSubjectType.PERSON, "P-1001", "张三", null,
+                null, null, null, List.of("TRAVEL"), false, null, false, true
+        ));
+        SubjectCandidate candidate = new SubjectCandidate(
+                BusinessSubjectType.PROJECT, "project-choice", "候选项目",
+                null, null, "P-1001", "DELIVERY"
+        );
+        when(fixture.subjectResolutionService.resolve(any())).thenReturn(
+                resolvedPerson(),
+                new SubjectResolutionResult(
+                        SubjectResolutionState.CANDIDATES, null, List.of(candidate),
+                        1, 20, 1, false, "请选择项目"
+                )
+        );
+
+        fixture.service.handle(request("查询张三在 P-1001 项目期间的出差"), fixture.stream, "run-1");
+
+        verify(fixture.projectPeriodContextService, never()).resolve(any());
+        verify(fixture.personBusinessQueryService, never()).query(any());
+        verify(fixture.reportService, never()).createPersonReport(any());
+    }
+
+    @Test
+    void projectPeriodDenialStopsBeforePersonBusinessAndReport() throws Exception {
+        Fixture fixture = new Fixture();
+        when(fixture.intentResolver.resolve(any(), any())).thenReturn(new BusinessQueryIntent(
+                BusinessSubjectType.PERSON, "P-1001", "张三", null,
+                null, null, null, List.of("TRAVEL"), false, "PDF", false, true
+        ));
+        when(fixture.subjectResolutionService.resolve(any())).thenReturn(resolvedPerson(), resolvedProject());
+        when(fixture.projectPeriodContextService.resolve(any())).thenReturn(new ProjectPeriodContextService.Result(
+                ProjectPeriodContextService.Status.DENIED, null, "无法确认主体权限，暂时不能按项目期间查询"
+        ));
+
+        fixture.service.handle(request("查询张三在 P-1001 项目期间的出差"), fixture.stream, "run-1");
+
+        verify(fixture.personBusinessQueryService, never()).query(any());
+        verify(fixture.reportService, never()).createPersonReport(any());
+    }
+
+    @Test
+    void personProjectFollowUpInheritsBothTokensAndNewProjectClearsOnlyProjectToken() throws Exception {
+        Fixture fixture = new Fixture();
+        when(fixture.intentResolver.resolve(any(), any())).thenReturn(new BusinessQueryIntent(
+                BusinessSubjectType.PERSON, "P-2002", null, null,
+                null, null, null, List.of("TRAVEL"), false, null, false, true
+        ));
+        when(fixture.subjectResolutionService.resolve(any())).thenReturn(resolvedPerson(), resolvedProject());
+        when(fixture.projectPeriodContextService.resolve(any())).thenReturn(new ProjectPeriodContextService.Result(
+                ProjectPeriodContextService.Status.DENIED, null, "无法确认主体权限，暂时不能按项目期间查询"
+        ));
+        AgentRequest request = request("改查 P-2002 项目期间");
+        request.setInheritedInput(Map.of(
+                "subjectType", "PERSON",
+                "personSelectionToken", "person-old",
+                "projectSelectionToken", "project-old",
+                "projectCode", "P-1001",
+                "projectPeriodRequested", true
+        ));
+
+        fixture.service.handle(request, fixture.stream, "run-1");
+
+        ArgumentCaptor<SubjectResolutionRequest> resolutions =
+                ArgumentCaptor.forClass(SubjectResolutionRequest.class);
+        verify(fixture.subjectResolutionService, org.mockito.Mockito.times(2)).resolve(resolutions.capture());
+        assertThat(resolutions.getAllValues().get(0).selectionToken()).isEqualTo("person-old");
+        assertThat(resolutions.getAllValues().get(1).selectionToken()).isNull();
+        ArgumentCaptor<ProjectPeriodContextService.Command> period =
+                ArgumentCaptor.forClass(ProjectPeriodContextService.Command.class);
+        verify(fixture.projectPeriodContextService).resolve(period.capture());
+        assertThat(period.getValue().personSelectionToken()).isEqualTo("selection-token");
+        assertThat(period.getValue().projectSelectionToken()).isEqualTo("project-token");
     }
 
     @Test
@@ -1394,6 +1500,20 @@ class BusinessAssistantServiceTest {
         );
     }
 
+    private ProjectPeriodContextService.Result projectPeriodReady() {
+        return new ProjectPeriodContextService.Result(
+                ProjectPeriodContextService.Status.READY,
+                new ProjectPeriodContextService.Context(
+                        "P-1001", "project-raw-1",
+                        LocalDate.of(2026, 1, 1), LocalDate.of(2026, 12, 31),
+                        List.of(new ProjectPeriodContextService.MembershipPeriod(
+                                LocalDate.of(2026, 2, 1), LocalDate.of(2026, 10, 31)
+                        )), true
+                ),
+                "项目期间已确认"
+        );
+    }
+
     private BusinessQueryIntent projectIntent(boolean refresh, String projectCode) {
         return new BusinessQueryIntent(
                 BusinessSubjectType.PROJECT, projectCode, null, null,
@@ -1602,6 +1722,8 @@ class BusinessAssistantServiceTest {
         private final ProjectPanoramaSnapshotReuseService panoramaSnapshotReuseService =
                 mock(ProjectPanoramaSnapshotReuseService.class);
         private final PersonBusinessQueryService personBusinessQueryService = mock(PersonBusinessQueryService.class);
+        private final ProjectPeriodContextService projectPeriodContextService =
+                mock(ProjectPeriodContextService.class);
         private final ObjectMapper objectMapper = new ObjectMapper().findAndRegisterModules();
         private final PersonDatasetSelectionService personDatasetSelectionService =
                 spy(new PersonDatasetSelectionService());
@@ -1650,6 +1772,7 @@ class BusinessAssistantServiceTest {
                     panoramaSnapshotReuseService,
                     personBusinessQueryService, personDatasetSelectionService,
                     personDatasetPlanService,
+                    projectPeriodContextService,
                     departmentBusinessQueryService, reportDatasetService, composer,
                     reportService, conversationStateService, chatSessionService, objectMapper
             );

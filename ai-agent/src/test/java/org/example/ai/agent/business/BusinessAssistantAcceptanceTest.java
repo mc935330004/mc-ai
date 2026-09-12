@@ -3,8 +3,10 @@ package org.example.ai.agent.business;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.ai.agent.business.answer.BusinessAnswerModelService;
 import org.example.ai.agent.business.answer.DeterministicBusinessAnswerComposer;
+import org.example.ai.agent.business.dataset.DatasetExecutionProofVerifier;
 import org.example.ai.agent.business.dataset.ReportDatasetExecutionService;
 import org.example.ai.agent.business.dataset.ReportDatasetService;
+import org.example.ai.agent.business.dataset.ReportDatasetValidator;
 import org.example.ai.agent.business.dataset.entity.ReportDataset;
 import org.example.ai.agent.business.dataset.model.DatasetExecutionRequest;
 import org.example.ai.agent.business.dataset.model.DatasetExecutionResult;
@@ -55,6 +57,7 @@ import org.example.ai.agent.chat.stream.ChatResponseAccumulator;
 import org.example.ai.agent.chat.stream.ResponseStreamContext;
 import org.example.ai.agent.chat.stream.ResponseStreamEventFactory;
 import org.example.ai.agent.chat.support.AgentStreamSession;
+import org.example.ai.agent.chat.support.ContentHashUtils;
 import org.example.ai.agent.common.modelusage.TrackedChatClientService;
 import org.example.ai.agent.common.enums.protocol.BlockStatus;
 import org.junit.jupiter.api.Test;
@@ -67,6 +70,7 @@ import org.springframework.ai.chat.prompt.ChatOptions;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
@@ -76,6 +80,9 @@ import java.util.Set;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.example.ai.agent.business.BusinessAssistantAcceptanceFixture.EMPLOYEE_NO;
 import static org.example.ai.agent.business.BusinessAssistantAcceptanceFixture.PROJECT_CODE;
+import static org.example.ai.agent.business.BusinessAssistantAcceptanceFixture.PROJECT_PERIOD_END;
+import static org.example.ai.agent.business.BusinessAssistantAcceptanceFixture.PROJECT_PERIOD_START;
+import static org.example.ai.agent.business.BusinessAssistantAcceptanceFixture.PROJECT_RAW_ID;
 import static org.example.ai.agent.business.BusinessAssistantAcceptanceFixture.SESSION_ID;
 import static org.example.ai.agent.business.BusinessAssistantAcceptanceFixture.USER_ID;
 import static org.mockito.ArgumentMatchers.any;
@@ -312,7 +319,7 @@ class BusinessAssistantAcceptanceTest {
                                 false, null, null
                         )
                 ),
-                List.of()
+                List.of(), null
         ));
 
         ArgumentCaptor<CompositeReportTaskService.CreateCommand> command =
@@ -337,10 +344,7 @@ class BusinessAssistantAcceptanceTest {
                 mock(PersonBusinessQueryService.class), reports
         );
         facade.intents(personIntent(false, "PDF"));
-        when(facade.people.search(any())).thenReturn(new SubjectDirectoryPage(
-                true, List.of(person()), 1, 20, 1, false
-        ));
-        when(facade.datasets.list()).thenReturn(personDatasets());
+        facade.projectPeriod();
         when(facade.personQuery.query(any())).thenReturn(incomplete);
 
         facade.handle("查询张三在项目期间的出差、打卡和报销并生成 PDF");
@@ -352,9 +356,19 @@ class BusinessAssistantAcceptanceTest {
         ArgumentCaptor<PersonBusinessQueryService.Command> personCommand =
                 ArgumentCaptor.forClass(PersonBusinessQueryService.Command.class);
         verify(facade.personQuery).query(personCommand.capture());
+        // 项目期间来自 PROJECT_BASE 安全事实，覆盖用户未明确指定的日期范围。
         assertThat(personCommand.getValue().plans()).allSatisfy(plan ->
-                assertThat(plan.canonicalInput()).containsEntry("projectCode", PROJECT_CODE)
+                assertThat(plan.canonicalInput())
+                        .containsEntry("projectCode", PROJECT_CODE)
+                        .containsEntry("startDate", PROJECT_PERIOD_START)
+                        .containsEntry("endDate", PROJECT_PERIOD_END)
         );
+        assertThat(personCommand.getValue().projectContext()).isNotNull();
+        assertThat(personCommand.getValue().projectContext().projectId()).isEqualTo(PROJECT_RAW_ID);
+        assertThat(personCommand.getValue().projectContext().periodStart())
+                .isEqualTo(LocalDate.parse(PROJECT_PERIOD_START));
+        assertThat(personCommand.getValue().projectContext().periodEnd())
+                .isEqualTo(LocalDate.parse(PROJECT_PERIOD_END));
         verify(tasks, org.mockito.Mockito.times(2)).create(any());
     }
 
@@ -526,6 +540,36 @@ class BusinessAssistantAcceptanceTest {
         );
     }
 
+    /**
+     * 项目期间数据集只发布 calculation 安全事实。
+     *
+     * 来源必须与本次请求完全一致：主体、编码和入参哈希都要对得上，
+     * 否则项目期间服务会按不可信结果失败关闭。
+     */
+    private DatasetExecutionResult trustedProjectBaseExecution(
+            DatasetExecutionRequest request) {
+        String inputHash = ContentHashUtils.sha256(
+                ReportDatasetValidator.canonicalSafeValue(request.canonicalInput())
+        );
+        return new DatasetExecutionResult(
+                new DatasetExecutionSource(
+                        request.userId(), request.sessionId(), request.subjectType(), request.subjectId(),
+                        request.datasetCode(), inputHash, "query-" + request.datasetCode(), 1L,
+                        "c".repeat(64), POLICY_CHECKSUM
+                ),
+                DatasetExecutionStatus.SUCCESS, true,
+                Map.of("calculation", Map.of(
+                        "project_base", Map.of(
+                                "projectId", PROJECT_RAW_ID,
+                                "projectCode", PROJECT_CODE,
+                                "projectStartDate", PROJECT_PERIOD_START,
+                                "projectEndDate", PROJECT_PERIOD_END
+                        )
+                )),
+                "workflow-run-1", null, null, "完成", "d".repeat(64)
+        );
+    }
+
     private Map<String, Object> channels(String key, Object value) {
         return Map.of(
                 "calculation", Map.of(), "display", Map.of(key, value),
@@ -603,6 +647,11 @@ class BusinessAssistantAcceptanceTest {
         private final ProjectPanoramaSnapshotReuseService panoramaReuse =
                 mock(ProjectPanoramaSnapshotReuseService.class);
         private final PersonBusinessQueryService personQuery;
+        private final ReportDatasetExecutionService periodExecution =
+                mock(ReportDatasetExecutionService.class);
+        private final DatasetExecutionProofVerifier periodProofVerifier =
+                mock(DatasetExecutionProofVerifier.class);
+        private final org.example.ai.agent.business.person.ProjectPeriodContextService projectPeriod;
         private final DepartmentBusinessQueryService departmentQuery = mock(DepartmentBusinessQueryService.class);
         private final ReportDatasetService datasets = mock(ReportDatasetService.class);
         private final BusinessAssistantReportService reportService;
@@ -632,6 +681,10 @@ class BusinessAssistantAcceptanceTest {
             this.panoramaExecution = panoramaExecution;
             this.personQuery = personQuery;
             this.reportService = reportService;
+            when(periodProofVerifier.verify(any())).thenReturn(true);
+            this.projectPeriod = new org.example.ai.agent.business.person.ProjectPeriodContextService(
+                    tokens, people, projects, datasets, periodExecution, periodProofVerifier
+            );
             BusinessQueryIntentResolver intents = new BusinessQueryIntentResolver(
                     intentModel, objectMapper, new BusinessIntentValidator()
             );
@@ -658,7 +711,8 @@ class BusinessAssistantAcceptanceTest {
             service = new org.example.ai.agent.business.impl.BusinessAssistantServiceImpl(
                     intents, subjects, panoramaExecution, panoramaReuse,
                     personQuery, new PersonDatasetSelectionService(),
-                    new PersonDatasetPlanService(objectMapper), departmentQuery,
+                    new PersonDatasetPlanService(objectMapper), projectPeriod,
+                    departmentQuery,
                     datasets, new DeterministicBusinessAnswerComposer(answerModel), reportService,
                     conversationState, chatSession, objectMapper
             );
@@ -677,6 +731,26 @@ class BusinessAssistantAcceptanceTest {
             when(intentModel.call(
                     any(), anyString(), anyString(), any(ChatOptions.Builder.class)
             )).thenReturn(intentResponse);
+        }
+
+        /**
+         * 配置项目期间链路：人员和项目各自可定位，PROJECT_BASE 只发布项目起止日期。
+         *
+         * 项目成员数据集故意不配置，用于验证“仅能判断项目直接关联记录”的披露行为。
+         */
+        private void projectPeriod() {
+            when(people.search(any())).thenReturn(new SubjectDirectoryPage(
+                    true, List.of(person()), 1, 20, 1, false
+            ));
+            when(projects.search(any())).thenReturn(new SubjectDirectoryPage(
+                    true, List.of(project(PROJECT_RAW_ID, PROJECT_CODE)), 1, 20, 1, false
+            ));
+            List<ReportDataset> all = new ArrayList<>(personDatasets());
+            all.add(dataset("PROJECT_BASE"));
+            when(datasets.list()).thenReturn(List.copyOf(all));
+            when(periodExecution.execute(any())).thenAnswer(invocation ->
+                    trustedProjectBaseExecution(invocation.getArgument(0))
+            );
         }
 
         private void handle(String question) {
