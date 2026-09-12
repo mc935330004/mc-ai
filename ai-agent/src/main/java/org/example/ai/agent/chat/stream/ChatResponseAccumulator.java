@@ -3,7 +3,7 @@ package org.example.ai.agent.chat.stream;
 import org.example.ai.agent.chat.protocol.block.ResponseBlock;
 import org.example.ai.agent.chat.protocol.block.TextBlock;
 import org.example.ai.agent.chat.protocol.response.AiResponse;
-import org.example.ai.agent.chat.protocol.response.ResponseDocument;
+import org.example.ai.agent.chat.protocol.response.ResponseContext;
 import org.example.ai.agent.chat.protocol.response.ResponseMeta;
 import org.example.ai.agent.chat.protocol.response.ResponseReference;
 import org.example.ai.agent.chat.protocol.stream.BlockDeltaPayload;
@@ -47,6 +47,7 @@ public class ChatResponseAccumulator {
     private final Map<String, StringBuilder> streamingTextContents = new LinkedHashMap<>();
 
     private List<ResponseReference> references = List.of();
+    private ResponseContext responseContext;
     private ResponseMeta meta = ResponseMeta.empty();
     private ResponseStatus status = ResponseStatus.RUNNING;
     private boolean dataComplete;
@@ -172,6 +173,13 @@ public class ChatResponseAccumulator {
     }
 
     /**
+     * 更新回答对象和时间范围等通用上下文。
+     */
+    public synchronized void setContext(ResponseContext responseContext) {
+        this.responseContext = responseContext;
+    }
+
+    /**
      * 更新知识库引用。
      */
     public synchronized void setReferences(List<ResponseReference> references) {
@@ -193,13 +201,14 @@ public class ChatResponseAccumulator {
      */
     public synchronized AiResponse snapshot() {
         return new AiResponse(
-                ResponseDocument.CURRENT_SCHEMA_VERSION,
+                AiResponse.CURRENT_SCHEMA_VERSION,
                 context.responseId(),
                 context.runId(),
                 context.conversationId(),
                 PresentationMode.CHAT,
                 status,
                 dataComplete,
+                responseContext,
                 currentBlocks(),
                 references,
                 meta

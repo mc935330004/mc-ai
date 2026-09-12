@@ -27,7 +27,9 @@ import com.fasterxml.jackson.annotation.JsonProperty;
         @JsonSubTypes.Type(value = GroupTableBlock.class, name = "GROUP_TABLE"),
         @JsonSubTypes.Type(value = CalloutBlock.class, name = "CALLOUT"),
         @JsonSubTypes.Type(value = StatusBlock.class, name = "STATUS"),
-        @JsonSubTypes.Type(value = WarningsBlock.class, name = "WARNINGS")
+        @JsonSubTypes.Type(value = StatusListBlock.class, name = "STATUS_LIST"),
+        @JsonSubTypes.Type(value = WarningsBlock.class, name = "WARNINGS"),
+        @JsonSubTypes.Type(value = ArtifactBlock.class, name = "ARTIFACT")
 })
 public sealed interface ResponseBlock permits
         TextBlock,
@@ -38,7 +40,9 @@ public sealed interface ResponseBlock permits
         GroupTableBlock,
         CalloutBlock,
         StatusBlock,
-        WarningsBlock {
+        StatusListBlock,
+        WarningsBlock,
+        ArtifactBlock {
 
     /**
      * 区块唯一标识。

@@ -37,6 +37,8 @@
         <mybatis-jsqlparser.version>3.5.16</mybatis-jsqlparser.version>
         <hutool.version>5.8.44</hutool.version>
         <swagger-parser.version>2.1.40</swagger-parser.version>
+        <poi.version>5.5.1</poi.version>
+        <pdfbox.version>3.0.8</pdfbox.version>
     </properties>
 
     <dependencyManagement>

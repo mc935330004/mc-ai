@@ -1,0 +1,752 @@
+package org.example.ai.agent.business.person;
+
+import org.example.ai.agent.business.dataset.ReportDatasetExecutionService;
+import org.example.ai.agent.business.dataset.ReportDatasetValidator;
+import org.example.ai.agent.business.dataset.model.DatasetExecutionRequest;
+import org.example.ai.agent.business.dataset.model.DatasetExecutionResult;
+import org.example.ai.agent.business.model.AssociationType;
+import org.example.ai.agent.business.model.BusinessSubjectType;
+import org.example.ai.agent.business.model.DatasetExecutionStatus;
+import org.example.ai.agent.business.person.model.AttendanceDayResult;
+import org.example.ai.agent.business.snapshot.BusinessSnapshotMatcher;
+import org.example.ai.agent.business.snapshot.BusinessSnapshotDerivationService;
+import org.example.ai.agent.business.snapshot.BusinessSnapshotService;
+import org.example.ai.agent.business.snapshot.SnapshotFactChannel;
+import org.example.ai.agent.business.snapshot.entity.BusinessSnapshot;
+import org.example.ai.agent.business.subject.AuthorizedPersonDirectoryService;
+import org.example.ai.agent.business.subject.SubjectDirectoryQuery;
+import org.example.ai.agent.business.subject.SubjectSelectionTokenService;
+import org.example.ai.agent.business.subject.model.AuthorizedSubjectCandidate;
+import org.example.ai.agent.business.subject.model.SubjectDirectoryPage;
+import org.example.ai.agent.business.subject.model.SubjectSearchMode;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Service;
+import org.springframework.util.StringUtils;
+
+import java.math.BigDecimal;
+import java.time.DateTimeException;
+import java.time.LocalDate;
+import java.util.ArrayList;
+import java.util.EnumMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.regex.Pattern;
+
+/**
+ * 单人业务安全查询编排。
+ *
+ * 本服务只消费字段策略产出的 calculation 事实；来源原始响应既不读取，也不进入返回对象。
+ */
+@Service
+public class PersonBusinessQueryService {
+
+    private static final Logger LOGGER = LoggerFactory.getLogger(PersonBusinessQueryService.class);
+    private static final Pattern DATASET_CODE = Pattern.compile("^[A-Z][A-Z0-9_]{1,127}$");
+    private static final Pattern SHA256 = Pattern.compile("[0-9a-fA-F]{64}");
+    public static final String TRAVEL_RECORDS = "person_travel_records";
+    public static final String PUNCH_RECORDS = "person_punch_records";
+    public static final String LEAVE_RECORDS = "person_leave_records";
+    public static final String SCHEDULE_RECORDS = "person_schedule_records";
+    public static final String CALENDAR_RECORDS = "person_calendar_records";
+    public static final String REIMBURSEMENT_RECORDS = "person_reimbursement_records";
+
+    private static final String SNAPSHOT_ITEM_KEY = "person";
+    private static final Set<DatasetType> ATTENDANCE_DATASETS = Set.of(
+            DatasetType.CALENDAR,
+            DatasetType.SCHEDULE,
+            DatasetType.PUNCH,
+            DatasetType.LEAVE,
+            DatasetType.TRAVEL
+    );
+    private final SubjectSelectionTokenService selectionTokenService;
+    private final AuthorizedPersonDirectoryService personDirectoryService;
+    private final PersonSnapshotReuseService snapshotReuseService;
+    private final ReportDatasetExecutionService executionService;
+    private final BusinessSnapshotService snapshotService;
+    private final BusinessSnapshotDerivationService snapshotDerivationService;
+    private final PersonBusinessFactAggregator factAggregator;
+
+    public PersonBusinessQueryService(
+            SubjectSelectionTokenService selectionTokenService,
+            AuthorizedPersonDirectoryService personDirectoryService,
+            PersonSnapshotReuseService snapshotReuseService,
+            ReportDatasetExecutionService executionService,
+            BusinessSnapshotService snapshotService,
+            BusinessSnapshotDerivationService snapshotDerivationService,
+            AttendanceReconciliationService attendanceService) {
+        this.selectionTokenService = Objects.requireNonNull(
+                selectionTokenService, "selectionTokenService不能为空"
+        );
+        this.personDirectoryService = Objects.requireNonNull(
+                personDirectoryService, "personDirectoryService不能为空"
+        );
+        this.snapshotReuseService = Objects.requireNonNull(
+                snapshotReuseService, "snapshotReuseService不能为空"
+        );
+        this.executionService = Objects.requireNonNull(executionService, "executionService不能为空");
+        this.snapshotService = Objects.requireNonNull(snapshotService, "snapshotService不能为空");
+        this.snapshotDerivationService = Objects.requireNonNull(
+                snapshotDerivationService, "snapshotDerivationService不能为空"
+        );
+        this.factAggregator = new PersonBusinessFactAggregator(attendanceService);
+    }
+
+    public Result query(Command command) {
+        ValidatedCommand validated = validate(command);
+        String selectedSubjectId = selectionTokenService.resolve(
+                validated.selectionToken(),
+                validated.userId(),
+                validated.sessionId(),
+                BusinessSubjectType.PERSON
+        ).orElseThrow(() -> new IllegalArgumentException("人员主体选择已失效"));
+        AuthorizedSubjectCandidate person = reauthorizePerson(validated, selectedSubjectId);
+
+        EnumMap<DatasetType, PersonBusinessFactAggregator.SafeFacts> safeFacts =
+                new EnumMap<>(DatasetType.class);
+        List<ModuleResult> modules = new ArrayList<>(validated.plans().size());
+        AssociationSummary associationSummary = AssociationSummary.empty();
+        Set<String> associationLabels = new LinkedHashSet<>();
+        for (DatasetType type : DatasetType.values()) {
+            DatasetPlan plan = validated.plans().get(type);
+            if (plan == null) {
+                continue;
+            }
+            ModuleData module = loadModule(validated, person.rawSubjectId(), plan);
+            if (validated.projectContext() != null
+                    && isRequestRoot(type)
+                    && module.successful()) {
+                ProjectModule projectModule = deriveProjectModule(
+                        validated, person.rawSubjectId(), plan, module
+                );
+                module = projectModule.module();
+                associationSummary = associationSummary.plus(projectModule.summary());
+                associationLabels.addAll(projectModule.labels());
+            }
+            safeFacts.put(type, new PersonBusinessFactAggregator.SafeFacts(
+                    module.complete(), module.calculation()
+            ));
+            modules.add(new ModuleResult(
+                    type, plan.datasetCode(), module.status(), module.complete(),
+                    module.snapshotId(), module.fieldPolicyChecksum()
+            ));
+        }
+
+        List<AttendanceDayResult> attendance = List.of();
+        if (validated.plans().containsKey(DatasetType.PUNCH)) {
+            attendance = factAggregator.attendance(
+                    safeFacts,
+                    validated.plans().get(DatasetType.CALENDAR).canonicalInput()
+            );
+        }
+        return new Result(
+                factAggregator.travelSummary(safeFacts.get(DatasetType.TRAVEL)),
+                factAggregator.reimbursementSummary(safeFacts.get(DatasetType.REIMBURSEMENT)),
+                attendance,
+                modules,
+                associationSummary,
+                List.copyOf(associationLabels)
+        );
+    }
+
+    private ProjectModule deriveProjectModule(
+            ValidatedCommand command,
+            String subjectId,
+            DatasetPlan plan,
+            ModuleData source) {
+        try {
+            Map<String, Object> targetQuery = authorizedInput(plan.canonicalInput(), subjectId);
+            BusinessSnapshotDerivationService.ProjectAssociationDerivation derived =
+                    snapshotDerivationService.deriveProjectAssociation(
+                            new BusinessSnapshotDerivationService.ProjectAssociationCommand(
+                                    command.agentRunId(), command.userId(), command.sessionId(),
+                                    command.authorization(), command.secureContext(), plan.datasetCode(),
+                                    subjectId, source.snapshotId(), targetQuery,
+                                    plan.type(), command.projectContext()
+                            )
+                    );
+            BusinessSnapshot snapshot = derived == null ? null : derived.snapshot();
+            if (snapshot == null
+                    || !StringUtils.hasText(snapshot.getSnapshotId())
+                    || !StringUtils.hasText(snapshot.getFieldPolicyChecksum())
+                    || derived.summary() == null) {
+                return ProjectModule.failed();
+            }
+            return new ProjectModule(
+                    new ModuleData(
+                            source.status(), source.complete(), derived.directCalculationFacts(),
+                            snapshot.getSnapshotId(), snapshot.getFieldPolicyChecksum()
+                    ),
+                    derived.summary(), derived.labels()
+            );
+        } catch (RuntimeException exception) {
+            warnModuleFailure("PROJECT_ASSOCIATION", plan.datasetCode(), exception);
+            return ProjectModule.failed();
+        }
+    }
+
+    private ValidatedCommand validate(Command command) {
+        if (command == null
+                || !StringUtils.hasText(command.agentRunId())
+                || !StringUtils.hasText(command.userId())
+                || !StringUtils.hasText(command.sessionId())
+                || !StringUtils.hasText(command.authorization())
+                || !StringUtils.hasText(command.selectionToken())) {
+            throw new IllegalArgumentException("人员业务查询命令不完整");
+        }
+        if (command.plans().isEmpty()
+                || command.plans().size() > DatasetType.values().length) {
+            throw new IllegalArgumentException("人员业务查询数据集计划不完整");
+        }
+        EnumMap<DatasetType, DatasetPlan> plans = new EnumMap<>(DatasetType.class);
+        Set<String> datasetCodes = new HashSet<>();
+        for (DatasetPlan plan : command.plans()) {
+            if (plan == null || plan.type() == null
+                    || !StringUtils.hasText(plan.datasetCode())
+                    || plans.putIfAbsent(plan.type(), plan) != null
+                    || !datasetCodes.add(plan.datasetCode())) {
+                throw new IllegalArgumentException("数据集逻辑类型和编码必须唯一");
+            }
+            if (!plan.requiredFactCodes().equals(Set.of(factCode(plan.type())))) {
+                throw new IllegalArgumentException("数据集稳定事实绑定不完整");
+            }
+        }
+        if (plans.values().stream().noneMatch(DatasetPlan::userRequested)) {
+            throw new IllegalArgumentException("人员业务查询缺少用户请求数据集");
+        }
+        // 非用户请求的计划只允许作为考勤核算依赖，防止入口夹带无关数据查询。
+        boolean punchRequested = plans.containsKey(DatasetType.PUNCH)
+                && plans.get(DatasetType.PUNCH).userRequested();
+        for (DatasetPlan plan : plans.values()) {
+            if (plan.userRequested() && !isRequestRoot(plan.type())) {
+                throw new IllegalArgumentException("人员业务查询根数据集不合法");
+            }
+            if (!plan.userRequested()
+                    && (!punchRequested || !ATTENDANCE_DATASETS.contains(plan.type()))) {
+                throw new IllegalArgumentException("人员业务查询包含无关内部依赖");
+            }
+        }
+        if (plans.containsKey(DatasetType.PUNCH)
+                && !plans.keySet().containsAll(ATTENDANCE_DATASETS)) {
+            throw new IllegalArgumentException("考勤查询缺少依赖数据集");
+        }
+        if (plans.containsKey(DatasetType.PUNCH)) {
+            validateAttendancePlanConsistency(plans);
+        }
+        return new ValidatedCommand(
+                command.agentRunId(), command.userId(), command.sessionId(),
+                command.authorization(), command.secureContext(), command.selectionToken(),
+                command.refreshRequested(), plans, command.projectContext()
+        );
+    }
+
+    private boolean isRequestRoot(DatasetType type) {
+        return type == DatasetType.TRAVEL
+                || type == DatasetType.PUNCH
+                || type == DatasetType.REIMBURSEMENT;
+    }
+
+    private void validateAttendancePlanConsistency(
+            EnumMap<DatasetType, DatasetPlan> plans) {
+        Set<DateRange> ranges = new HashSet<>();
+        Set<String> grains = new HashSet<>();
+        int plansWithRange = 0;
+        for (DatasetType type : ATTENDANCE_DATASETS) {
+            DatasetPlan plan = plans.get(type);
+            Map<String, Object> input = plan.canonicalInput();
+            boolean hasStart = input.containsKey("startDate");
+            boolean hasEnd = input.containsKey("endDate");
+            if (hasStart != hasEnd) {
+                throw new IllegalArgumentException("考勤数据集时间范围不完整");
+            }
+            if (hasStart) {
+                plansWithRange++;
+                Object startValue = input.get("startDate");
+                Object endValue = input.get("endDate");
+                if (!(startValue instanceof String start)
+                        || !(endValue instanceof String end)) {
+                    throw new IllegalArgumentException("考勤数据集时间范围不合法");
+                }
+                try {
+                    DateRange range = new DateRange(LocalDate.parse(start), LocalDate.parse(end));
+                    if (range.start().isAfter(range.end())) {
+                        throw new IllegalArgumentException("考勤数据集时间范围不合法");
+                    }
+                    ranges.add(range);
+                } catch (DateTimeException exception) {
+                    throw new IllegalArgumentException("考勤数据集时间范围不合法");
+                }
+            }
+            String grain = normalizeGrain(plan.requestedGrain());
+            grains.add(grain == null ? "<NONE>" : grain);
+        }
+        if ((plansWithRange != 0 && plansWithRange != ATTENDANCE_DATASETS.size())
+                || ranges.size() > 1) {
+            throw new IllegalArgumentException("考勤数据集时间范围必须一致");
+        }
+        if (grains.size() > 1) {
+            throw new IllegalArgumentException("考勤数据集请求粒度必须一致");
+        }
+    }
+
+    private String normalizeGrain(String grain) {
+        return StringUtils.hasText(grain)
+                ? grain.trim().toUpperCase(Locale.ROOT)
+                : null;
+    }
+
+    private AuthorizedSubjectCandidate reauthorizePerson(
+            ValidatedCommand command,
+            String selectedSubjectId) {
+        SubjectDirectoryPage page = personDirectoryService.search(new SubjectDirectoryQuery(
+                command.agentRunId(), command.userId(), command.sessionId(),
+                command.authorization(), command.secureContext(), BusinessSubjectType.PERSON,
+                SubjectSearchMode.SELECTED_SUBJECT, selectedSubjectId,
+                null, null, null, null, selectedSubjectId, 1, 2
+        ));
+        boolean unique = page != null
+                && page.accessible()
+                && page.candidates().size() == 1
+                && page.totalCount() == 1
+                && !page.hasNext();
+        if (!unique) {
+            throw new IllegalArgumentException("人员主体当前不可查询");
+        }
+        AuthorizedSubjectCandidate person = page.candidates().get(0);
+        if (person == null
+                || person.type() != BusinessSubjectType.PERSON
+                || !Objects.equals(person.rawSubjectId(), selectedSubjectId)) {
+            throw new IllegalArgumentException("人员主体当前不可查询");
+        }
+        return person;
+    }
+
+    private ModuleData loadModule(
+            ValidatedCommand command,
+            String subjectId,
+            DatasetPlan plan) {
+        Map<String, Object> canonicalInput = authorizedInput(plan.canonicalInput(), subjectId);
+        if (command.refreshRequested()) {
+            return executeModule(command, subjectId, plan, canonicalInput);
+        }
+        PersonSnapshotReuseService.ReuseResult reused = snapshotReuseService.reuse(
+                new BusinessSnapshotMatcher.MatchCommand(
+                command.agentRunId(), command.userId(), command.sessionId(),
+                command.authorization(), command.secureContext(), BusinessSubjectType.PERSON,
+                subjectId, plan.datasetCode(), canonicalInput, AssociationType.DIRECT,
+                plan.requestedGrain(), plan.requiredFactCodes(),
+                Set.of(SnapshotFactChannel.CALCULATION), command.refreshRequested()
+        )).orElse(null);
+        if (reused != null) {
+            return new ModuleData(
+                    ModuleStatus.REUSED, reused.dataComplete(), reused.calculation(),
+                    reused.snapshotId(), reused.fieldPolicyChecksum()
+            );
+        }
+        /* DERIVE 本阶段按 REQUERY 收口，避免在人员敏感事实上引入未经证明的裁剪逻辑。 */
+        return executeModule(command, subjectId, plan, canonicalInput);
+    }
+
+    private ModuleData executeModule(
+            ValidatedCommand command,
+            String subjectId,
+            DatasetPlan plan,
+            Map<String, Object> canonicalInput) {
+        DatasetExecutionResult result;
+        try {
+            result = executionService.execute(new DatasetExecutionRequest(
+                    command.agentRunId(), command.userId(), command.sessionId(),
+                    command.authorization(), command.secureContext(), plan.datasetCode(),
+                    BusinessSubjectType.PERSON, subjectId, canonicalInput
+            ));
+        } catch (RuntimeException exception) {
+            warnModuleFailure("EXECUTION", plan.datasetCode(), exception);
+            return ModuleData.failed(ModuleStatus.FAILED);
+        }
+        if (result == null) {
+            LOGGER.warn(
+                    "人员数据集模块失败 category={} datasetCode={} exceptionType={}",
+                    "EXECUTION",
+                    plan.datasetCode(),
+                    "NullResult"
+            );
+            return ModuleData.failed(ModuleStatus.FAILED);
+        }
+        ModuleStatus status = moduleStatus(result.status());
+        if (result.status() != DatasetExecutionStatus.SUCCESS
+                && result.status() != DatasetExecutionStatus.EMPTY) {
+            return ModuleData.failed(status);
+        }
+        BusinessSnapshot snapshot;
+        try {
+            snapshot = snapshotService.create(new BusinessSnapshotService.CreateCommand(
+                    command.userId(), command.sessionId(), BusinessSubjectType.PERSON,
+                    subjectId, plan.datasetCode(), canonicalInput, null,
+                    List.of(new BusinessSnapshotService.ItemCommand(
+                            SNAPSHOT_ITEM_KEY, AssociationType.DIRECT, result,
+                            result.status() == DatasetExecutionStatus.EMPTY ? 0 : 1,
+                            result.status() == DatasetExecutionStatus.EMPTY ? 0 : 1,
+                            0
+                    ))
+            ));
+        } catch (RuntimeException exception) {
+            warnModuleFailure("SNAPSHOT_CREATE", plan.datasetCode(), exception);
+            return ModuleData.failed(ModuleStatus.FAILED);
+        }
+        if (snapshot == null
+                || !StringUtils.hasText(snapshot.getSnapshotId())
+                || !StringUtils.hasText(snapshot.getFieldPolicyChecksum())) {
+            LOGGER.warn(
+                    "人员数据集模块失败 category={} datasetCode={} exceptionType={}",
+                    "SNAPSHOT_CREATE",
+                    plan.datasetCode(),
+                    "InvalidSnapshotReference"
+            );
+            return ModuleData.failed(ModuleStatus.FAILED);
+        }
+        Map<String, Object> calculation = factAggregator.calculation(
+                result.safeFacts(), plan.requiredFactCodes()
+        );
+        if (calculation == null) {
+            return ModuleData.failed(ModuleStatus.FAILED);
+        }
+        return new ModuleData(
+                status, result.dataComplete(), calculation,
+                snapshot.getSnapshotId(), snapshot.getFieldPolicyChecksum()
+        );
+    }
+
+    @SuppressWarnings("unchecked")
+    private Map<String, Object> authorizedInput(
+            Map<String, Object> canonicalInput,
+            String employeeNo) {
+        Map<String, Object> authorized = new LinkedHashMap<>(canonicalInput);
+        // 工号只采用刚刚通过来源目录复核的内部标识，覆盖任何调用方同名值。
+        authorized.put("employeeNo", employeeNo);
+        return (Map<String, Object>) ReportDatasetValidator.freezeSafeValue(authorized);
+    }
+
+    private void warnModuleFailure(
+            String category,
+            String datasetCode,
+            RuntimeException exception) {
+        LOGGER.warn(
+                "人员数据集模块失败 category={} datasetCode={} exceptionType={}",
+                category,
+                datasetCode,
+                exception.getClass().getSimpleName()
+        );
+    }
+
+    private ModuleStatus moduleStatus(DatasetExecutionStatus status) {
+        if (status == null) {
+            return ModuleStatus.FAILED;
+        }
+        return switch (status) {
+            case SUCCESS -> ModuleStatus.SUCCESS;
+            case EMPTY -> ModuleStatus.EMPTY;
+            case DENIED -> ModuleStatus.DENIED;
+            case TIMEOUT -> ModuleStatus.TIMEOUT;
+            default -> ModuleStatus.FAILED;
+        };
+    }
+
+    private static String factCode(DatasetType type) {
+        return switch (type) {
+            case TRAVEL -> TRAVEL_RECORDS;
+            case PUNCH -> PUNCH_RECORDS;
+            case LEAVE -> LEAVE_RECORDS;
+            case SCHEDULE -> SCHEDULE_RECORDS;
+            case CALENDAR -> CALENDAR_RECORDS;
+            case REIMBURSEMENT -> REIMBURSEMENT_RECORDS;
+        };
+    }
+
+    public enum DatasetType {
+        TRAVEL,
+        PUNCH,
+        LEAVE,
+        SCHEDULE,
+        CALENDAR,
+        REIMBURSEMENT
+    }
+
+    public enum ModuleStatus {
+        REUSED,
+        SUCCESS,
+        EMPTY,
+        DENIED,
+        FAILED,
+        TIMEOUT
+    }
+
+    public record DatasetPlan(
+            DatasetType type,
+            String datasetCode,
+            Map<String, Object> canonicalInput,
+            String requestedGrain,
+            Set<String> requiredFactCodes,
+            boolean userRequested) {
+
+        @SuppressWarnings("unchecked")
+        public DatasetPlan {
+            canonicalInput = (Map<String, Object>) ReportDatasetValidator.freezeSafeValue(
+                    canonicalInput == null ? Map.of() : canonicalInput
+            );
+            requiredFactCodes = requiredFactCodes == null
+                    ? Set.of()
+                    : Set.copyOf(requiredFactCodes);
+        }
+
+        @Override
+        public String toString() {
+            return "DatasetPlan[type=" + type
+                    + ", datasetCode=" + datasetCode
+                    + ", canonicalInputSize=" + canonicalInput.size()
+                    + ", requiredFactCodeCount=" + requiredFactCodes.size()
+                    + ", userRequested=" + userRequested + ']';
+        }
+    }
+
+    public record Command(
+            String agentRunId,
+            String userId,
+            String sessionId,
+            String authorization,
+            Map<String, Object> secureContext,
+            String selectionToken,
+            boolean refreshRequested,
+            List<DatasetPlan> plans,
+            ProjectAssociationContext projectContext) {
+
+        @SuppressWarnings("unchecked")
+        public Command {
+            secureContext = (Map<String, Object>) ReportDatasetValidator.freezeSafeValue(
+                    secureContext == null ? Map.of() : secureContext
+            );
+            plans = plans == null ? List.of() : List.copyOf(plans);
+        }
+
+        @Override
+        public String toString() {
+            return "Command[userId=" + userId
+                    + ", sessionId=" + sessionId
+                    + ", authorizationPresent=" + StringUtils.hasText(authorization)
+                    + ", secureContextSize=" + secureContext.size()
+                    + ", selectionTokenPresent=" + StringUtils.hasText(selectionToken)
+                    + ", refreshRequested=" + refreshRequested
+                    + ", planCount=" + plans.size() + ']';
+        }
+    }
+
+    public record Metric<T>(boolean complete, T value) {
+
+        public Metric {
+            if (complete != (value != null)) {
+                throw new IllegalArgumentException("完整指标必须有值，不完整指标不得伪造值");
+            }
+        }
+
+        public static <T> Metric<T> complete(T value) {
+            return new Metric<>(true, Objects.requireNonNull(value, "value不能为空"));
+        }
+
+        public static <T> Metric<T> incomplete() {
+            return new Metric<>(false, null);
+        }
+
+        @Override
+        public String toString() {
+            return "Metric[complete=" + complete + ']';
+        }
+    }
+
+    public record TravelSummary(
+            Metric<Integer> tripCount,
+            Metric<BigDecimal> totalAmount) {
+    }
+
+    public record ReimbursementSummary(
+            Metric<BigDecimal> requestedAmount,
+            Metric<BigDecimal> approvedAmount,
+            Metric<BigDecimal> paidAmount) {
+    }
+
+    /** 返回对象不携带内部工号、认证上下文或字段策略前的事实。 */
+    public record Result(
+            TravelSummary travelSummary,
+            ReimbursementSummary reimbursementSummary,
+            List<AttendanceDayResult> attendance,
+            List<ModuleResult> modules,
+            AssociationSummary associationSummary,
+            List<String> associationLabels) {
+
+        public Result {
+            attendance = attendance == null ? List.of() : List.copyOf(attendance);
+            modules = modules == null ? List.of() : List.copyOf(modules);
+            associationSummary = associationSummary == null
+                    ? AssociationSummary.empty()
+                    : associationSummary;
+            associationLabels = associationLabels == null
+                    ? List.of()
+                    : List.copyOf(associationLabels);
+        }
+    }
+
+    /** 项目关联上下文仅包含已复权的项目标识和有效期。 */
+    public record ProjectAssociationContext(
+            String projectCode,
+            String projectId,
+            LocalDate periodStart,
+            LocalDate periodEnd,
+            List<ProjectPeriodContextService.MembershipPeriod> membershipPeriods,
+            boolean membershipAvailable) {
+
+        public ProjectAssociationContext {
+            membershipPeriods = membershipPeriods == null
+                    ? List.of()
+                    : List.copyOf(membershipPeriods);
+            if ((!StringUtils.hasText(projectCode) && !StringUtils.hasText(projectId))
+                    || periodStart == null || periodEnd == null || periodStart.isAfter(periodEnd)) {
+                throw new IllegalArgumentException("项目关联上下文不完整");
+            }
+        }
+    }
+
+    /** 仅记录四类关联数量，不携带人员记录。 */
+    public record AssociationSummary(
+            int directCount,
+            int contextCount,
+            int unknownCount,
+            int unrelatedCount) {
+
+        public AssociationSummary {
+            if (directCount < 0 || contextCount < 0 || unknownCount < 0 || unrelatedCount < 0) {
+                throw new IllegalArgumentException("项目关联数量不能小于零");
+            }
+        }
+
+        public static AssociationSummary empty() {
+            return new AssociationSummary(0, 0, 0, 0);
+        }
+
+        private AssociationSummary plus(AssociationSummary other) {
+            return other == null ? this : new AssociationSummary(
+                    directCount + other.directCount,
+                    contextCount + other.contextCount,
+                    unknownCount + other.unknownCount,
+                    unrelatedCount + other.unrelatedCount
+            );
+        }
+    }
+
+    /**
+     * 模块结果只携带报告组装所需的不透明快照引用，不携带人员标识或事实值。
+     */
+    public record ModuleResult(
+            DatasetType type,
+            String datasetCode,
+            ModuleStatus status,
+            boolean complete,
+            String snapshotId,
+            String fieldPolicyChecksum) {
+
+        public ModuleResult {
+            if (type == null || status == null
+                    || !StringUtils.hasText(datasetCode)
+                    || !DATASET_CODE.matcher(datasetCode).matches()) {
+                throw new IllegalArgumentException("人员模块标识不完整");
+            }
+            boolean successful = status == ModuleStatus.SUCCESS
+                    || status == ModuleStatus.EMPTY
+                    || status == ModuleStatus.REUSED;
+            if (successful && (!StringUtils.hasText(snapshotId)
+                    || !StringUtils.hasText(fieldPolicyChecksum)
+                    || !SHA256.matcher(fieldPolicyChecksum).matches())) {
+                throw new IllegalArgumentException("成功人员模块必须携带有效快照引用");
+            }
+            if (!successful && (snapshotId != null || fieldPolicyChecksum != null)) {
+                throw new IllegalArgumentException("失败人员模块不得携带快照引用");
+            }
+        }
+
+        @Override
+        public String toString() {
+            return "ModuleResult[type=" + type
+                    + ", datasetCode=" + datasetCode
+                    + ", status=" + status
+                    + ", complete=" + complete
+                    + ", snapshotPresent=" + StringUtils.hasText(snapshotId)
+                    + ", fieldPolicyPresent=" + StringUtils.hasText(fieldPolicyChecksum) + ']';
+        }
+    }
+
+    private record ValidatedCommand(
+            String agentRunId,
+            String userId,
+            String sessionId,
+            String authorization,
+            Map<String, Object> secureContext,
+            String selectionToken,
+            boolean refreshRequested,
+            EnumMap<DatasetType, DatasetPlan> plans,
+            ProjectAssociationContext projectContext) {
+
+        @Override
+        public String toString() {
+            return "ValidatedCommand[userId=" + userId
+                    + ", sessionId=" + sessionId
+                    + ", authorizationPresent=" + StringUtils.hasText(authorization)
+                    + ", secureContextSize=" + secureContext.size()
+                    + ", selectionTokenPresent=" + StringUtils.hasText(selectionToken)
+                    + ", refreshRequested=" + refreshRequested
+                    + ", planCount=" + plans.size() + ']';
+        }
+    }
+
+    private record ModuleData(
+            ModuleStatus status,
+            boolean complete,
+            Map<String, Object> calculation,
+            String snapshotId,
+            String fieldPolicyChecksum) {
+
+        private static ModuleData failed(ModuleStatus status) {
+            return new ModuleData(status, false, Map.of(), null, null);
+        }
+
+        private boolean successful() {
+            return status == ModuleStatus.SUCCESS
+                    || status == ModuleStatus.EMPTY
+                    || status == ModuleStatus.REUSED;
+        }
+
+        @Override
+        public String toString() {
+            return "ModuleData[status=" + status
+                    + ", complete=" + complete
+                    + ", calculationFactCount=" + calculation.size() + ']';
+        }
+    }
+
+    private record ProjectModule(
+            ModuleData module,
+            AssociationSummary summary,
+            List<String> labels) {
+
+        private static ProjectModule failed() {
+            return new ProjectModule(
+                    ModuleData.failed(ModuleStatus.FAILED), AssociationSummary.empty(), List.of()
+            );
+        }
+    }
+
+    private record DateRange(LocalDate start, LocalDate end) {
+    }
+}

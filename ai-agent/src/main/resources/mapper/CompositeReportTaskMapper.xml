@@ -1,0 +1,258 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="org.example.ai.agent.business.report.mapper.CompositeReportTaskMapper">
+
+    <resultMap id="taskResult" type="org.example.ai.agent.business.report.entity.CompositeReportTask">
+        <id property="taskId" column="task_id"/>
+        <result property="requestKey" column="request_key"/>
+        <result property="requestFingerprint" column="request_fingerprint"/>
+        <result property="sessionId" column="session_id"/>
+        <result property="userId" column="user_id"/>
+        <result property="subjectType" column="subject_type"/>
+        <result property="subjectId" column="subject_id"/>
+        <result property="templateCode" column="template_code"/>
+        <result property="templateChecksum" column="template_checksum"/>
+        <result property="format" column="format"/>
+        <result property="status" column="status"/>
+        <result property="dataComplete" column="data_complete"/>
+        <result property="workerId" column="worker_id"/>
+        <result property="leaseUntil" column="lease_until"/>
+        <result property="attemptCount" column="attempt_count"/>
+        <result property="maxAttempts" column="max_attempts"/>
+        <result property="nextRetryAt" column="next_retry_at"/>
+        <result property="storagePath" column="storage_path"/>
+        <result property="fileName" column="file_name"/>
+        <result property="mimeType" column="mime_type"/>
+        <result property="fileSize" column="file_size"/>
+        <result property="checksum" column="checksum"/>
+        <result property="safeErrorCode" column="safe_error_code"/>
+        <result property="safeErrorMessage" column="safe_error_message"/>
+        <result property="expiresAt" column="expires_at"/>
+        <result property="createdAt" column="created_at"/>
+        <result property="updatedAt" column="updated_at"/>
+        <result property="completedAt" column="completed_at"/>
+    </resultMap>
+
+    <select id="selectByRequestKey" resultMap="taskResult">
+        SELECT *
+        FROM ai_composite_report_task
+        WHERE request_key = #{requestKey}
+        LIMIT 1
+        FOR UPDATE
+    </select>
+
+    <select id="selectByTaskId" resultMap="taskResult">
+        SELECT *
+        FROM ai_composite_report_task
+        WHERE task_id = #{taskId}
+        LIMIT 1
+    </select>
+
+    <insert id="insertTask">
+        INSERT INTO ai_composite_report_task (
+            task_id, request_key, request_fingerprint, session_id, user_id,
+            subject_type, subject_id, template_code, template_checksum, format,
+            status, data_complete, attempt_count, max_attempts, expires_at,
+            created_at, updated_at
+        ) VALUES (
+            #{task.taskId}, #{task.requestKey}, #{task.requestFingerprint},
+            #{task.sessionId}, #{task.userId}, #{task.subjectType}, #{task.subjectId},
+            #{task.templateCode}, #{task.templateChecksum}, #{task.format},
+            #{task.status}, #{task.dataComplete}, #{task.attemptCount},
+            #{task.maxAttempts}, #{task.expiresAt}, #{task.createdAt}, #{task.updatedAt}
+        )
+    </insert>
+
+    <!-- 崩溃恢复必须先于普通领取，且活动租约和终态永不进入恢复集合。 -->
+    <update id="recoverExpiredLeases">
+        UPDATE ai_composite_report_task
+        SET status = CASE
+                WHEN attempt_count &lt; max_attempts THEN 'RETRY'
+                ELSE 'FAILED'
+            END,
+            worker_id = NULL,
+            lease_until = NULL,
+            next_retry_at = CASE
+                WHEN attempt_count &lt; max_attempts THEN CURRENT_TIMESTAMP(3)
+                ELSE NULL
+            END,
+            safe_error_code = CASE
+                WHEN attempt_count &lt; max_attempts THEN 'LEASE_EXPIRED'
+                ELSE 'MAX_ATTEMPTS_EXHAUSTED'
+            END,
+            safe_error_message = CASE
+                WHEN attempt_count &lt; max_attempts THEN '任务执行租约已过期，等待安全重试'
+                ELSE '任务已达到最大尝试次数'
+            END,
+            completed_at = CASE
+                WHEN attempt_count &gt;= max_attempts THEN CURRENT_TIMESTAMP(3)
+                ELSE NULL
+            END,
+            updated_at = CURRENT_TIMESTAMP(3)
+        WHERE status IN ('RUNNING', 'COLLECTING', 'RENDERING')
+          AND lease_until &lt;= CURRENT_TIMESTAMP(3)
+    </update>
+
+    <select id="selectClaimCandidateIds" resultType="java.lang.String">
+        SELECT task_id
+        FROM ai_composite_report_task
+        WHERE status IN ('PENDING', 'RETRY')
+          AND attempt_count &lt; max_attempts
+          AND expires_at &gt; CURRENT_TIMESTAMP(3)
+          AND (next_retry_at IS NULL OR next_retry_at &lt;= CURRENT_TIMESTAMP(3))
+          AND (lease_until IS NULL OR lease_until &lt;= CURRENT_TIMESTAMP(3))
+        ORDER BY created_at, task_id
+        LIMIT #{limit}
+    </select>
+
+    <!-- update=1是唯一领取成功判据，候选查询本身不授予执行权。 -->
+    <update id="tryClaim">
+        UPDATE ai_composite_report_task
+        SET status = 'RUNNING',
+            worker_id = #{workerId},
+            lease_until = TIMESTAMPADD(SECOND, #{leaseSeconds}, CURRENT_TIMESTAMP(3)),
+            attempt_count = attempt_count + 1,
+            next_retry_at = NULL,
+            safe_error_code = NULL,
+            safe_error_message = NULL,
+            updated_at = CURRENT_TIMESTAMP(3)
+        WHERE task_id = #{taskId}
+          AND status IN ('PENDING', 'RETRY')
+          AND attempt_count &lt; max_attempts
+          AND expires_at &gt; CURRENT_TIMESTAMP(3)
+          AND (next_retry_at IS NULL OR next_retry_at &lt;= CURRENT_TIMESTAMP(3))
+          AND (lease_until IS NULL OR lease_until &lt;= CURRENT_TIMESTAMP(3))
+    </update>
+
+    <update id="renewLease">
+        UPDATE ai_composite_report_task
+        SET lease_until = TIMESTAMPADD(SECOND, #{leaseSeconds}, CURRENT_TIMESTAMP(3)),
+            updated_at = CURRENT_TIMESTAMP(3)
+        WHERE task_id = #{taskId}
+          AND worker_id = #{workerId}
+          AND status IN ('RUNNING', 'COLLECTING', 'RENDERING')
+          AND lease_until &gt; CURRENT_TIMESTAMP(3)
+          AND expires_at &gt; CURRENT_TIMESTAMP(3)
+    </update>
+
+    <update id="completeWithArtifact">
+        UPDATE ai_composite_report_task
+        SET status =
+            <choose>
+                <when test="dataComplete">'SUCCESS'</when>
+                <otherwise>'PARTIAL_SUCCESS'</otherwise>
+            </choose>,
+            data_complete = #{dataComplete},
+            storage_path = #{storagePath},
+            file_name = #{fileName},
+            mime_type = #{mimeType},
+            file_size = #{fileSize},
+            checksum = #{checksum},
+            worker_id = NULL,
+            lease_until = NULL,
+            next_retry_at = NULL,
+            safe_error_code = NULL,
+            safe_error_message = NULL,
+            completed_at = CURRENT_TIMESTAMP(3),
+            updated_at = CURRENT_TIMESTAMP(3)
+        WHERE task_id = #{taskId}
+          AND worker_id = #{workerId}
+          AND status IN ('RUNNING', 'COLLECTING', 'RENDERING')
+          AND lease_until &gt; CURRENT_TIMESTAMP(3)
+          AND expires_at &gt; CURRENT_TIMESTAMP(3)
+    </update>
+
+    <update id="markRetry">
+        UPDATE ai_composite_report_task
+        SET status = CASE
+                WHEN attempt_count &lt; max_attempts THEN 'RETRY'
+                ELSE 'FAILED'
+            END,
+            worker_id = NULL,
+            lease_until = NULL,
+            next_retry_at = CASE
+                WHEN attempt_count &lt; max_attempts
+                    THEN TIMESTAMPADD(SECOND, #{retryDelaySeconds}, CURRENT_TIMESTAMP(3))
+                ELSE NULL
+            END,
+            safe_error_code = #{safeErrorCode},
+            safe_error_message = #{safeErrorMessage},
+            completed_at = CASE
+                WHEN attempt_count &gt;= max_attempts THEN CURRENT_TIMESTAMP(3)
+                ELSE NULL
+            END,
+            updated_at = CURRENT_TIMESTAMP(3)
+        WHERE task_id = #{taskId}
+          AND worker_id = #{workerId}
+          AND status IN ('RUNNING', 'COLLECTING', 'RENDERING')
+          AND lease_until &gt; CURRENT_TIMESTAMP(3)
+          AND expires_at &gt; CURRENT_TIMESTAMP(3)
+    </update>
+
+    <!-- 字段策略等安全前置条件变化时立即失败关闭，终态不再回收。 -->
+    <update id="markFailed">
+        UPDATE ai_composite_report_task
+        SET status = 'FAILED',
+            worker_id = NULL,
+            lease_until = NULL,
+            next_retry_at = NULL,
+            safe_error_code = #{safeErrorCode},
+            safe_error_message = #{safeErrorMessage},
+            completed_at = CURRENT_TIMESTAMP(3),
+            updated_at = CURRENT_TIMESTAMP(3)
+        WHERE task_id = #{taskId}
+          AND worker_id = #{workerId}
+          AND status IN ('RUNNING', 'COLLECTING', 'RENDERING')
+          AND lease_until &gt; CURRENT_TIMESTAMP(3)
+          AND expires_at &gt; CURRENT_TIMESTAMP(3)
+    </update>
+
+    <!-- 取消必须同时匹配所有者和可取消状态，避免读取后竞态覆盖终态。 -->
+    <update id="cancelIfCancellable">
+        UPDATE ai_composite_report_task
+        SET status = 'CANCELLED',
+            worker_id = NULL,
+            lease_until = NULL,
+            next_retry_at = NULL,
+            completed_at = CURRENT_TIMESTAMP(3),
+            updated_at = CURRENT_TIMESTAMP(3)
+        WHERE task_id = #{taskId}
+          AND user_id = #{userId}
+          AND status IN ('PENDING', 'RETRY', 'RUNNING', 'COLLECTING', 'RENDERING')
+    </update>
+
+    <select id="selectExpiredArtifactCandidates" resultMap="taskResult">
+        SELECT *
+        FROM ai_composite_report_task
+        WHERE expires_at &lt;= CURRENT_TIMESTAMP(3)
+          AND (
+              storage_path IS NOT NULL
+              OR EXISTS (
+                  SELECT 1
+                  FROM ai_composite_report_section section_row
+                  WHERE section_row.task_id = ai_composite_report_task.task_id
+                    AND section_row.snapshot_id IS NOT NULL
+              )
+          )
+        ORDER BY expires_at, task_id
+        LIMIT #{limit}
+    </select>
+
+    <!-- 仅在仍过期且制品元数据未被其他流程清除时更新，物理删除必须先在服务层完成。 -->
+    <update id="markExpiredAndClearArtifact">
+        UPDATE ai_composite_report_task
+        SET status = 'EXPIRED',
+            storage_path = NULL,
+            file_name = NULL,
+            mime_type = NULL,
+            file_size = NULL,
+            checksum = NULL,
+            worker_id = NULL,
+            lease_until = NULL,
+            next_retry_at = NULL,
+            updated_at = CURRENT_TIMESTAMP(3)
+        WHERE task_id = #{taskId}
+          AND expires_at &lt;= CURRENT_TIMESTAMP(3)
+          AND storage_path &lt;=&gt; #{storagePath}
+    </update>
+</mapper>

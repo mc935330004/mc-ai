@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="org.example.ai.agent.business.snapshot.mapper.BusinessSnapshotMapper">
+
+    <!-- 锁定没有活动引用的过期快照，调用方在同一事务中按顺序清理。 -->
+    <select id="selectExpiredUnreferencedIdsForUpdate" resultType="java.lang.String">
+        SELECT snapshot.snapshot_id
+        FROM ai_business_snapshot snapshot
+        WHERE snapshot.expires_at &lt;= CURRENT_TIMESTAMP
+          AND NOT EXISTS (
+              SELECT 1
+              FROM ai_business_snapshot child
+              WHERE child.source_snapshot_id = snapshot.snapshot_id
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM ai_composite_report_section section
+              WHERE section.snapshot_id = snapshot.snapshot_id
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM ai_project_panorama_snapshot_module panorama_module
+              JOIN ai_project_panorama_snapshot panorama
+                ON panorama.panorama_snapshot_id = panorama_module.panorama_snapshot_id
+              WHERE panorama_module.snapshot_id = snapshot.snapshot_id
+                AND panorama.expires_at &gt; CURRENT_TIMESTAMP
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM ai_business_snapshot_item artifact_item
+              JOIN ai_result_artifact artifact
+                ON artifact.id = artifact_item.result_artifact_id
+              WHERE artifact_item.snapshot_id = snapshot.snapshot_id
+                AND artifact.expires_at &gt; CURRENT_TIMESTAMP
+          )
+        ORDER BY snapshot.expires_at
+        LIMIT #{batchSize}
+        FOR UPDATE
+    </select>
+
+    <!-- 删除前重新检查子快照、报告、全景和有效制品引用。 -->
+    <delete id="deleteExpiredUnreferencedById">
+        DELETE FROM ai_business_snapshot
+        WHERE snapshot_id = #{snapshotId}
+          AND expires_at &lt;= CURRENT_TIMESTAMP
+          AND NOT EXISTS (
+              SELECT 1
+              FROM ai_business_snapshot_item item
+              WHERE item.snapshot_id = #{snapshotId}
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM ai_business_snapshot child
+              WHERE child.source_snapshot_id = #{snapshotId}
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM ai_composite_report_section section
+              WHERE section.snapshot_id = #{snapshotId}
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM ai_project_panorama_snapshot_module panorama_module
+              JOIN ai_project_panorama_snapshot panorama
+                ON panorama.panorama_snapshot_id = panorama_module.panorama_snapshot_id
+              WHERE panorama_module.snapshot_id = #{snapshotId}
+                AND panorama.expires_at &gt; CURRENT_TIMESTAMP
+          )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM ai_business_snapshot_item artifact_item
+              JOIN ai_result_artifact artifact
+                ON artifact.id = artifact_item.result_artifact_id
+              WHERE artifact_item.snapshot_id = #{snapshotId}
+                AND artifact.expires_at &gt; CURRENT_TIMESTAMP
+          )
+    </delete>
+
+    <select id="selectByIdsForUpdate"
+            resultType="org.example.ai.agent.business.snapshot.entity.BusinessSnapshot">
+        SELECT *
+        FROM ai_business_snapshot
+        WHERE snapshot_id IN
+        <foreach collection="snapshotIds" item="snapshotId" open="(" separator="," close=")">
+            #{snapshotId}
+        </foreach>
+        ORDER BY snapshot_id
+        FOR UPDATE
+    </select>
+</mapper>

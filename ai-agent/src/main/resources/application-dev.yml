@@ -61,3 +61,9 @@ agent:
   pending-action:
     # 写操作预览的确认有效期
     confirm-timeout-minutes: 10
+
+ai:
+  business:
+    composite-report:
+      # 开发环境 PDF 字体路径可选；为空时使用渲染器默认行为，不硬编码本机路径。
+      pdf-font-path: ${AI_BUSINESS_REPORT_PDF_FONT_PATH:}
