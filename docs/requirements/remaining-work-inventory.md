@@ -49,8 +49,12 @@
 - [ ] `docs/runbooks/business-assistant.md` 未创建（后端工作树与主工作区均无 `docs/runbooks/`）。
 - [ ] `docs/prompts/business-assistant-system-prompt.md` 未创建，附带的 prompt 契约测试（拒绝含工作流编码、编造金额、越权事实的模型输出）未写。
 - [ ] `CONTEXT.md` 位于主工作区 `D:\IdeaProjects\mc-ai`，需确认是否已按最终实现补齐 TASK20 新增术语，并将"待管理员配置"项如实标注。
-- [ ] 前端 E2E 缺失：`e2e/business-assistant.spec.js`、`e2e/business-assistant-config.spec.js` 均不存在（当前前端工作树只有 `e2e/chat-report.spec.js`）。
-- [ ] **三个前端延期基线测试问题未修** —— Task19 §12/§13 约定"全部任务最终收尾时必须提醒并修复"，目前仍挂着。
+- [x] **三个前端延期基线测试问题已修复**（2026-09-12，提交 `6dcb1a4 fix(ui): resolve three deferred frontend baseline tests`）：
+  1. `test/reportMetricCalculation.test.js`：`createMetricCalculation` 已改为单 term 起点（有意设计），测试断言同步改为 1 个 term。
+  2. `test/reportAuditStatus.test.js`：孤儿测试，源文件 `reportAuditStatus.js` 已在 `f351b39` 删除，测试文件一并删除。
+  3. `src/api/knowledgeQuery.test.js`：`@` 别名 + `agentSession.js` 顶层 `window` 副作用导致 node 无法解析；把纯 sessionStorage 存取抽到新模块 `src/utils/agentSessionStorage.js`，`knowledgeQuery.js` 改引用该轻量模块并显式加 `.js` 扩展名，测试补 `sessionStorage` mock。
+  验证：前端 `node --test` 从 3 失败 → **48 pass / 0 fail**；`vite build` EXIT=0。
+- [ ] 前端 E2E 说明：`e2e/business-assistant.spec.js` 与 `e2e/business-assistant-config.spec.js` 是**旧版计划（2026-09-02）的遗留文件名**。最终落地的 Task18/19 计划（2026-09-10）验收方式已改为 `node --test` 单测 + `npm run build`，且 `business-assistant-config.spec.js` 对应的「业务助手配置管理页」在 Task19 §11 明确延期不做。当前 `e2e/chat-report.spec.js` 已覆盖业务助手主链路（提交业务查询→展示结构化报告）。本环境未安装 playwright 浏览器，E2E 运行验证留待 CI。
 - [ ] 主计划 Task20 的完整验证门禁未执行：Flyway 干净库与现有库双重验证、200+ 可访问项目与最大人数的有界压测、`mvn -pl ai-agent -am test` + `mvn test` + `npm run check` + `npm run test:e2e`。
 - [ ] 多个阶段注明"按约定未运行测试或编译/构建"，缺少 Maven 编译与测试、前端构建的运行证据（见 `docs/requirements/pm-agent-ai-report-refactor-plan.md` 第 6 节、`production-safety-quality-closure.md` 第 3 节）。
 - [ ] `docs/superpowers/specs/2026-08-19-workflow-answer-presentation-risk-rule-design.md` 对应的 `WorkflowAnswerPolicy` 与 `workflow/answer/risk` 已落地，但未找到对应的收口记录，建议补一条闭环说明。
