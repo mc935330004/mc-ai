@@ -2,15 +2,14 @@
 
 ## 0. 结论
 
-- **⚠️ 当前 git 处于不可提交状态**：`D:\IdeaProjects\mc-ai\.git\worktrees\business-assistant` 被环境删除，分支引用 `codex/business-assistant` 随后丢失（提交对象完好）。本轮代码改动已落盘但**无法提交**，详见第 9 节。
+- **TASK20 全部完成**：10 个 Task（1–10）已全部收口并提交，聚焦测试 73/73 全绿。提交链：`74ad75a`(Task9) → `cd20b3d`(Task8) → `d2d13e4`(Task6) → `3bc0199`(Task5 原 tip)。
 - 后端与前端都还在**隔离功能分支**上，尚未合入主项目。
-- 在建主线是 **TASK20 可配置数据契约与项目期间关联**：10 个 Task 已完成 7 个（1、2、3、4、5、6、7），Task 8 有实现前提阻塞，Task 9、10 未开始。
-- 另有 **8 项收尾工作**、**6 项明确延期功能**、**5 项生产运行验收**、**3 项未开始阶段**。
+- 仍有 **8 项收尾工作**、**6 项明确延期功能**、**5 项生产运行验收**、**3 项未开始阶段**。
 - 明文密钥轮换、HTTPS 部署两项按约定排除，由用户自行处理。
 
 ---
 
-## 1. 主线：TASK20 可配置数据契约（已完成 7 个，Task 8 阻塞，Task 9 / 10 未开始）
+## 1. 主线：TASK20 可配置数据契约（已全部完成 ✅）
 
 来源：`docs/superpowers/plans/2026-09-11-business-assistant-configurable-data-contract.md`
 
@@ -27,41 +26,21 @@
       实际实现于 `BusinessAssistantReportService.withUnavailablePersonDisclosure` 与 `CompositeReportTaskService`，命名与计划中的 `safeNotices` 不同。
       注意 Task 7 的完成顺序早于 Task 3，核对进度需按提交内容而非 Task 编号顺序。
 
-- [x] **Task 6 双主体会话与项目期间编排 —— 代码完成且测试通过（尚未提交，原因见第 9 节）**
-      实现内容：
-      - `BusinessAssistantServiceImpl` 新增 `ProjectPeriodContextService` 依赖；新增 `resolveProjectPeriod`
-        （人员先定位 → 项目独立定位 → 取得项目期间；项目未唯一或期间不可用时安全收尾，并阻断后续人员查询与报告）、
-        `finishWithProjectPeriodFailure`、`withPeriod`、`associationContext`、`projectSubjectRequest`。
-      - `selectionToken` 改为按主体类型分派：人员用 `personSelectionToken`，项目用 `projectSelectionToken`
-        （显式项目编码清空继承令牌），通用 `selectionToken` 仅作最低优先级兼容。
-      - `saveState` 分别写入 `personSelectionToken` / `projectSelectionToken` / `projectCode` / `projectPeriodRequested`；
-        人员分支不再写通用 `selectionToken`（项目与部门保持兼容）。
-      - `BusinessAssistantReportService.PersonReportCommand` 新增 `projectContext` 组件。
-      验证证据：`mvn -pl ai-agent -am test` → `BusinessAssistantServiceTest` **49/49** 通过、
-      `BusinessAssistantAcceptanceTest` **5/5** 通过（聚焦合计 54 tests，0 failures / 0 errors，BUILD SUCCESS）。
-      同时把 `personProjectPeriodPdfKeepsProjectContextAndDisclosesIncompleteSection` 从"mock 掉项目期间"
-      改为**真实链路**（真实 `ProjectPeriodContextService` + `PROJECT_BASE` 安全事实 + 项目目录桩），
-      并新增项目期间日期与 `projectContext` 断言。
+- [x] **Task 6 双主体会话与项目期间编排 —— `d2d13e4 feat(agent): orchestrate person project period queries`**
+      `BusinessAssistantServiceImpl` 接入 `ProjectPeriodContextService`，人员/项目双主体令牌，项目期间覆盖查询日期，友好结束规则。
+      验收测试 `personProjectPeriodPdfKeepsProjectContextAndDisclosesIncompleteSection` 改为真实链路。
 
-阻塞中：
+- [x] **Task 8 生产报告文件处理器 —— `cd20b3d feat(agent): generate business report artifacts`**
+      `BusinessReportFileHandler`（`@Component` 实现 `CompositeReportWorker.ReportFileHandler`）+ `BusinessReportFileHandlerTest`（7/7）。
+      只消费快照 export 通道；披露文本走 `associationLabels`（受控自由文本）；映射口径 = export 标量→指标、记录列表→表格、列按 displayOrder。
+      补 `ai.business.composite-report.pdf-font-path` 配置（application.yml / dev / prod 三个文件）。
 
-- [ ] **Task 8 生产报告文件处理器 —— 两个实现前提待确认（已核代码，非猜测）**
-      1. 计划要求的断言 `statusSections()` 含"报销数据源尚未配置，本次未纳入统计"，**当前报告协议无法表达**：
-         `LogicalReportDocument.StatusSection(title, state)` 的 `safeMessage()` 只由 `SectionState` 枚举派生，没有自由文本位。
-         两条可行路径：扩展 `StatusSection`（连带改 `XlsxReportRenderer` / `DocxReportRenderer` / `PdfReportRenderer` 及各自测试），
-         或把披露文本放进 `associationLabels`（已是受控自由文本，3 个渲染器都已渲染该字段）。
-      2. 章节 → metrics / tables 的映射在代码库中**没有先例**：`LogicalReportAssembler` 目前只有测试调用、
-         没有生产调用方，字段 `grain` 也没有既有用法可依。需要先确认"哪些事实进指标、哪些进表格、单位与列如何取"。
-      其余部分已明确可实现：读取任务与章节快照、只消费 `DIRECT` 项的 export 通道、把 `PROJECT_PERSON_PERIOD` / `UNKNOWN`
-      转成固定关联标签、`safe_message` 只接受服务端固定文案、复用三个渲染器与 `SafeArtifactStorageService.store`、
-      JSON 结构不合法时失败关闭；另需补 `ai.business.composite-report.pdf-font-path` 配置项。
+- [x] **Task 9 端到端验收、文档与最终门禁 —— `74ad75a test(agent): verify configurable business assistant flow`**
+      `BusinessAssistantAcceptanceFixture` / `BusinessAssistantAcceptanceTest` 扩展；新建 `docs/runbooks/business-assistant.md`、
+      `docs/prompts/business-assistant-system-prompt.md`、隔离工作树 `CONTEXT.md`。
 
-未开始：
-
-- [ ] **Task 9 端到端验收、文档与最终门禁**
-  含 `BusinessAssistantAcceptanceFixture` 扩展、用户故事验收、runbook 与 prompt 文档、完整后端验证。
-- [ ] **Task 10 最终清理与完成提示**
-  变更范围核对、新增 Java 文件中文注释核对、遗留旧逻辑清理、提交。
+- [x] **Task 10 最终清理与完成提示**
+      变更范围 36 文件（无 pom.xml / Flyway / ai-common / ai-rag）；新增 6 个 Java 文件中文注释齐全；`ProjectTotals` 与旧「配置缺失抛异常」文案已清除；聚焦 73 tests 全绿。
 
 ---
 
