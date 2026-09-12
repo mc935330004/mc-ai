@@ -3,7 +3,8 @@
 ## 0. 结论
 
 - **TASK20 全部完成**：10 个 Task（1–10）已全部收口并提交，聚焦测试 73/73 全绿。提交链：`74ad75a`(Task9) → `cd20b3d`(Task8) → `d2d13e4`(Task6) → `3bc0199`(Task5 原 tip)。
-- 后端与前端都还在**隔离功能分支**上，尚未合入主项目。
+- **已合入主项目**：后端 `codex/business-assistant` 已 merge 进 main（merge commit `14043be`）；前端 `codex/business-assistant-ui` 已 fast-forward 进 main（`6dcb1a4`）。
+- **⚠️ 合并事故遗留（数据丢失）**：主工作区未跟踪文件在合并中被误删，其中 **34 篇 ADR（`docs/adr/0002`~`0035`）无法恢复**；另丢失 `docs/requirements/agent-assistant-refactor-spec-v2.0.md`、`docs/requirements/terminology-mapping.md`、`docs/superpowers/plans/2026-09-02-business-assistant-implementation.md` 及 `.workbuddy/memory/`。已恢复：`CONTEXT.md`、`docs/adr/0001`、`.workbuddy/skills/ponytail/SKILL.md` 及所有已提交代码。
 - 仍有 **8 项收尾工作**、**6 项明确延期功能**、**5 项生产运行验收**、**3 项未开始阶段**。
 - 明文密钥轮换、HTTPS 部署两项按约定排除，由用户自行处理。
 
