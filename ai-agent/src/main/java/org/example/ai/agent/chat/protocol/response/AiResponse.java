@@ -27,9 +27,9 @@ public record AiResponse(
         implements ResponseDocument {
 
     /**
-     * CHAT回答当前协议版本。
+     * CHAT回答唯一协议版本。
      *
-     * REPORT协议继续使用ResponseDocument中的版本1。
+     * REPORT是独立展示协议，继续使用版本1。
      */
     public static final int CURRENT_SCHEMA_VERSION = 2;
 
@@ -37,7 +37,12 @@ public record AiResponse(
         schemaVersion = schemaVersion <= 0
                 ? CURRENT_SCHEMA_VERSION
                 : schemaVersion;
-
+        // 项目尚未上线，CHAT不保留旧版本协议兼容。
+        if (schemaVersion != CURRENT_SCHEMA_VERSION) {
+            throw new IllegalArgumentException(
+                    "CHAT回答协议版本必须是" + CURRENT_SCHEMA_VERSION
+            );
+        }
         responseId = ResponseSupport.requireText(
                 responseId,
                 "回答responseId不能为空"
@@ -71,34 +76,5 @@ public record AiResponse(
         meta = meta == null
                 ? ResponseMeta.empty()
                 : meta;
-    }
-
-    /**
-     * 兼容尚未携带context的旧调用方和历史数据。
-     */
-    public AiResponse(
-            int schemaVersion,
-            String responseId,
-            String runId,
-            String conversationId,
-            PresentationMode mode,
-            ResponseStatus status,
-            boolean dataComplete,
-            List<ResponseBlock> blocks,
-            List<ResponseReference> references,
-            ResponseMeta meta) {
-        this(
-                schemaVersion,
-                responseId,
-                runId,
-                conversationId,
-                mode,
-                status,
-                dataComplete,
-                null,
-                blocks,
-                references,
-                meta
-        );
     }
 }

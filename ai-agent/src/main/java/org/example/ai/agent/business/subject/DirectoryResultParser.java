@@ -10,6 +10,7 @@ import org.example.ai.agent.business.subject.model.AuthorizedSubjectCandidate;
 import org.example.ai.agent.business.subject.model.SubjectDirectoryPage;
 import org.example.ai.agent.business.subject.model.SubjectSearchMode;
 import org.example.ai.agent.chat.support.ContentHashUtils;
+import org.example.ai.agent.common.model.ProjectRelationship;
 import org.springframework.util.StringUtils;
 
 import java.nio.charset.StandardCharsets;
@@ -45,34 +46,60 @@ final class DirectoryResultParser {
     private static final int MAX_TEXT_BYTES = 512;
 
     private final DatasetExecutionProofVerifier proofVerifier;
-
+    private static final Set<String> PROJECT_CANDIDATE_FIELDS = Set.of(
+            "subjectRef",
+            "displayName",
+            "projectCode",
+            "projectType",
+            "projectRelationship",
+            "projectStatus"
+    );
     DirectoryResultParser(DatasetExecutionProofVerifier proofVerifier) {
         this.proofVerifier = Objects.requireNonNull(proofVerifier, "proofVerifier不能为空");
     }
 
+    /**
+     * 解析普通主体目录结果。
+     */
     SubjectDirectoryPage parse(
             SubjectDirectoryQuery query,
-            DirectoryDatasetContractValidator.DirectoryDatasetContract contract,
+            DirectoryDatasetContractValidator
+                    .DirectoryDatasetContract contract,
             Map<String, Object> canonicalInput,
-            DatasetExecutionResult result) {
+            DatasetExecutionResult result
+    ) {
         return parse(
                 query.userId(),
                 query.sessionId(),
                 query.subjectType(),
                 query.pageNumber(),
                 query.pageSize(),
-                candidate -> validateExactLocator(query, candidate),
+                candidate ->
+                        validateExactLocator(
+                                query,
+                                candidate
+                        ),
+                candidate ->
+                        validateProjectCandidate(
+                                query,
+                                candidate
+                        ),
                 contract,
                 canonicalInput,
                 result
         );
     }
 
+    /**
+     * 解析部门成员目录结果。
+     */
     SubjectDirectoryPage parse(
             DepartmentMemberDirectoryQuery query,
-            DirectoryDatasetContractValidator.DirectoryDatasetContract contract,
+            DirectoryDatasetContractValidator
+                    .DirectoryDatasetContract contract,
             Map<String, Object> canonicalInput,
-            DatasetExecutionResult result) {
+            DatasetExecutionResult result
+    ) {
         return parse(
                 query.userId(),
                 query.sessionId(),
@@ -81,67 +108,119 @@ final class DirectoryResultParser {
                 query.pageSize(),
                 candidate -> {
                 },
+                candidate -> {
+                },
                 contract,
                 canonicalInput,
                 result
         );
     }
 
+    /**
+     * 解析并校验目录安全事实。
+     */
     private SubjectDirectoryPage parse(
             String userId,
             String sessionId,
             BusinessSubjectType candidateType,
             int pageNumber,
             int pageSize,
-            Consumer<AuthorizedSubjectCandidate> exactLocatorValidator,
-            DirectoryDatasetContractValidator.DirectoryDatasetContract contract,
+            Consumer<AuthorizedSubjectCandidate>
+                    exactLocatorValidator,
+            Consumer<AuthorizedSubjectCandidate>
+                    candidateValidator,
+            DirectoryDatasetContractValidator
+                    .DirectoryDatasetContract contract,
             Map<String, Object> canonicalInput,
-            DatasetExecutionResult result) {
+            DatasetExecutionResult result
+    ) {
         if (result == null
                 || !proofVerifier.verify(result)
                 || !sourceMatches(
-                        userId,
-                        sessionId,
-                        contract,
-                        canonicalInput,
-                        result.source()
-                )) {
+                userId,
+                sessionId,
+                contract,
+                canonicalInput,
+                result.source()
+        )) {
             return SubjectDirectoryPage.denied();
         }
+
         validateSafeFactChannels(result.safeFacts());
-        if (result.status() == DatasetExecutionStatus.EMPTY) {
+
+        if (result.status()
+                == DatasetExecutionStatus.EMPTY) {
             requireAllChannelsEmpty(result.safeFacts());
-            return SubjectDirectoryPage.empty(pageNumber, pageSize);
+            return SubjectDirectoryPage.empty(
+                    pageNumber,
+                    pageSize
+            );
         }
-        if (result.status() != DatasetExecutionStatus.SUCCESS || !result.dataComplete()) {
+
+        if (result.status()
+                != DatasetExecutionStatus.SUCCESS
+                || !result.dataComplete()) {
             return SubjectDirectoryPage.denied();
         }
-        Map<?, ?> display = requireMap(result.safeFacts().get(DISPLAY_CHANNEL));
-        requireExactKeys(display, DIRECTORY_FACTS, "display");
-        List<?> rawCandidates = requireList(display.get(CANDIDATES_FACT));
-        if (rawCandidates.size() > pageSize) {
-            throw new IllegalArgumentException("主体候选数量超过当前页上限");
-        }
-        List<AuthorizedSubjectCandidate> candidates = parseCandidates(
-                candidateType,
-                exactLocatorValidator,
-                rawCandidates
+
+        Map<?, ?> display = requireMap(
+                result.safeFacts().get(DISPLAY_CHANNEL)
         );
-        long totalCount = requireNonNegativeLong(display.get(TOTAL_COUNT_FACT));
-        boolean hasNext = requireBoolean(display.get(HAS_NEXT_FACT));
+
+        requireExactKeys(
+                display,
+                DIRECTORY_FACTS,
+                "display"
+        );
+
+        List<?> rawCandidates = requireList(
+                display.get(CANDIDATES_FACT)
+        );
+
+        if (rawCandidates.size() > pageSize) {
+            throw new IllegalArgumentException(
+                    "主体候选数量超过当前页上限"
+            );
+        }
+
+        List<AuthorizedSubjectCandidate> candidates =
+                parseCandidates(
+                        candidateType,
+                        exactLocatorValidator,
+                        candidateValidator,
+                        rawCandidates
+                );
+
+        Object rawTotalCount =
+                display.get(TOTAL_COUNT_FACT);
+
+        boolean totalKnown =
+                rawTotalCount != null;
+
+        long totalCount = totalKnown
+                ? requireNonNegativeLong(rawTotalCount)
+                : 0L;
+
+        boolean hasNext = requireBoolean(
+                display.get(HAS_NEXT_FACT)
+        );
+
         validatePageMetadata(
                 pageNumber,
                 pageSize,
                 candidates.size(),
                 totalCount,
+                totalKnown,
                 hasNext
         );
+
         return new SubjectDirectoryPage(
                 true,
                 candidates,
                 pageNumber,
                 pageSize,
                 totalCount,
+                totalKnown,
                 hasNext
         );
     }
@@ -168,86 +247,174 @@ final class DirectoryResultParser {
 
     private List<AuthorizedSubjectCandidate> parseCandidates(
             BusinessSubjectType candidateType,
-            Consumer<AuthorizedSubjectCandidate> exactLocatorValidator,
-            List<?> rawCandidates) {
+            Consumer<AuthorizedSubjectCandidate>
+                    exactLocatorValidator,
+            Consumer<AuthorizedSubjectCandidate>
+                    candidateValidator,
+            List<?> rawCandidates
+    ) {
         List<AuthorizedSubjectCandidate> candidates = new ArrayList<>(rawCandidates.size());
+
         Set<String> subjectRefs = new HashSet<>();
         Set<String> projectCodes = new HashSet<>();
+
         for (Object rawCandidate : rawCandidates) {
-            AuthorizedSubjectCandidate candidate = parseCandidate(
-                    candidateType,
-                    requireMap(rawCandidate)
-            );
-            if (!subjectRefs.add(candidate.rawSubjectId())) {
-                throw new IllegalArgumentException("主体目录内部标识重复");
+            AuthorizedSubjectCandidate candidate =
+                    parseCandidate(
+                            candidateType,
+                            requireMap(rawCandidate)
+                    );
+
+            if (!subjectRefs.add(
+                    candidate.rawSubjectId()
+            )) {
+                throw new IllegalArgumentException(
+                        "主体目录内部标识重复"
+                );
             }
+
             if (candidate.projectCode() != null
-                    && !projectCodes.add(candidate.projectCode().toUpperCase(Locale.ROOT))) {
-                throw new IllegalArgumentException("主体目录项目编码重复");
+                    && !projectCodes.add(
+                    candidate.projectCode()
+                            .toUpperCase(Locale.ROOT)
+            )) {
+                throw new IllegalArgumentException(
+                        "主体目录项目编码重复"
+                );
             }
+
             exactLocatorValidator.accept(candidate);
+            candidateValidator.accept(candidate);
             candidates.add(candidate);
         }
+
         return List.copyOf(candidates);
     }
 
+    /**
+     * 按主体类型解析候选项。
+     */
     private AuthorizedSubjectCandidate parseCandidate(
             BusinessSubjectType type,
-            Map<?, ?> values) {
+            Map<?, ?> values
+    ) {
         validateCandidateKeys(type, values);
-        String subjectId = requireText(values.get("subjectRef"), "subjectRef");
-        String displayName = requireText(values.get("displayName"), "displayName");
+
+        String subjectId = requireText(
+                values.get("subjectRef"),
+                "subjectRef"
+        );
+
+        String displayName = requireText(
+                values.get("displayName"),
+                "displayName"
+        );
+
         return switch (type) {
-            case PROJECT -> new AuthorizedSubjectCandidate(
-                    type,
-                    subjectId,
-                    displayName,
-                    null,
-                    null,
-                    requireText(values.get("projectCode"), "projectCode"),
-                    optionalText(values.get("projectType"))
-            );
-            case PERSON -> new AuthorizedSubjectCandidate(
-                    type,
-                    subjectId,
-                    displayName,
-                    requireMaskedEmployeeNo(values.get("maskedEmployeeNo"), subjectId),
-                    optionalText(values.get("departmentPath")),
-                    null,
-                    null
-            );
-            case DEPARTMENT -> new AuthorizedSubjectCandidate(
-                    type,
-                    subjectId,
-                    displayName,
-                    null,
-                    optionalText(values.get("departmentPath")),
-                    null,
-                    null
-            );
+            case PROJECT ->
+                    new AuthorizedSubjectCandidate(
+                            type,
+                            subjectId,
+                            displayName,
+                            null,
+                            null,
+                            requireText(
+                                    values.get("projectCode"),
+                                    "projectCode"
+                            ),
+                            optionalText(
+                                    values.get("projectType")
+                            ),
+                            optionalProjectRelationship(
+                                    values.get(
+                                            "projectRelationship"
+                                    )
+                            ),
+                            optionalText(
+                                    values.get("projectStatus")
+                            )
+                    );
+
+            case PERSON ->
+                    new AuthorizedSubjectCandidate(
+                            type,
+                            subjectId,
+                            displayName,
+                            requireMaskedEmployeeNo(
+                                    values.get(
+                                            "maskedEmployeeNo"
+                                    ),
+                                    subjectId
+                            ),
+                            optionalText(
+                                    values.get("departmentPath")
+                            ),
+                            null,
+                            null,
+                            null,
+                            null
+                    );
+
+            case DEPARTMENT ->
+                    new AuthorizedSubjectCandidate(
+                            type,
+                            subjectId,
+                            displayName,
+                            null,
+                            optionalText(
+                                    values.get("departmentPath")
+                            ),
+                            null,
+                            null,
+                            null,
+                            null
+                    );
         };
     }
 
+    /**
+     * 严格限制不同主体类型可以返回的字段。
+     */
     private void validateCandidateKeys(BusinessSubjectType type, Map<?, ?> values) {
         Set<String> allowed = switch (type) {
-            case PROJECT -> Set.of(
-                    "subjectRef", "displayName", "projectCode", "projectType"
-            );
+            case PROJECT -> PROJECT_CANDIDATE_FIELDS;
             case PERSON -> Set.of(
-                    "subjectRef", "displayName", "maskedEmployeeNo", "departmentPath"
+                    "subjectRef",
+                    "displayName",
+                    "maskedEmployeeNo",
+                    "departmentPath"
             );
+
             case DEPARTMENT -> Set.of(
-                    "subjectRef", "displayName", "departmentPath"
+                    "subjectRef",
+                    "displayName",
+                    "departmentPath"
             );
         };
+
         Set<String> required = switch (type) {
-            case PROJECT -> Set.of("subjectRef", "displayName", "projectCode");
-            case PERSON -> Set.of("subjectRef", "displayName", "maskedEmployeeNo");
-            case DEPARTMENT -> Set.of("subjectRef", "displayName");
+            case PROJECT -> Set.of(
+                    "subjectRef",
+                    "displayName",
+                    "projectCode"
+            );
+
+            case PERSON -> Set.of(
+                    "subjectRef",
+                    "displayName",
+                    "maskedEmployeeNo"
+            );
+
+            case DEPARTMENT -> Set.of(
+                    "subjectRef",
+                    "displayName"
+            );
         };
         Set<String> actual = stringKeys(values, "candidate");
         if (!allowed.containsAll(actual) || !actual.containsAll(required)) {
-            throw new IllegalArgumentException("主体候选字段不符合协议");
+            throw new IllegalArgumentException(
+                    "主体候选字段不符合协议"
+            );
         }
     }
 
@@ -288,20 +455,38 @@ final class DirectoryResultParser {
         }
     }
 
-    private void validatePageMetadata(
-            int pageNumber,
-            int pageSize,
-            int candidateCount,
-            long totalCount,
-            boolean hasNext) {
+    /**
+     * 校验目录分页信息。
+     */
+    private void validatePageMetadata(int pageNumber, int pageSize, int candidateCount,
+                                      long totalCount, boolean totalKnown, boolean hasNext) {
+        if (candidateCount > pageSize) {
+            throw new IllegalArgumentException(
+                    "目录返回候选数量超过 pageSize"
+            );
+        }
+        // 来源未提供可靠总数时，只依赖 hasNext。
+        if (!totalKnown) {
+            if (candidateCount == 0 && hasNext) {
+                throw new IllegalArgumentException(
+                        "候选列表为空时 hasNext 不能为 true"
+                );
+            }
+            return;
+        }
         long offset = Math.multiplyExact((long) pageNumber - 1, pageSize);
         long remaining = Math.max(0, totalCount - Math.min(offset, totalCount));
         long expectedCount = Math.min(pageSize, remaining);
         if (candidateCount != expectedCount) {
-            throw new IllegalArgumentException("主体目录当前页数量与总数不一致");
+            throw new IllegalArgumentException(
+                    "主体目录当前页数量与总数不一致"
+            );
         }
-        if (hasNext != (Math.addExact(offset, candidateCount) < totalCount)) {
-            throw new IllegalArgumentException("主体目录翻页标志与总数不一致");
+        boolean expectedHasNext = Math.addExact(offset, candidateCount) < totalCount;
+        if (hasNext != expectedHasNext) {
+            throw new IllegalArgumentException(
+                    "主体目录翻页标志与总数不一致"
+            );
         }
     }
 
@@ -381,5 +566,60 @@ final class DirectoryResultParser {
             throw new IllegalArgumentException("主体目录文本字段超过容量上限");
         }
         return normalized;
+    }
+    /**
+     * 解析项目与当前用户的关系。
+     */
+    private ProjectRelationship optionalProjectRelationship(Object value) {
+        if (value == null) {
+            return null;
+        }
+        String relationship = requireText(value, "projectRelationship");
+        try {
+            return ProjectRelationship.valueOf(relationship.toUpperCase(Locale.ROOT));
+        } catch (IllegalArgumentException exception) {
+            throw new IllegalArgumentException(
+                    "projectRelationship 不是受支持的项目关系",
+                    exception
+            );
+        }
+    }
+    /**
+     * 校验项目列表候选与请求范围一致。
+     */
+    private void validateProjectCandidate(
+            SubjectDirectoryQuery query,
+            AuthorizedSubjectCandidate candidate) {
+        if (!isProjectListMode(query.searchMode())) {
+            return;
+        }
+        if (candidate.projectRelationship() == null) {
+            throw new IllegalArgumentException(
+                    "项目列表候选缺少 projectRelationship"
+            );
+        }
+        if (!StringUtils.hasText(candidate.projectStatus())) {
+            throw new IllegalArgumentException(
+                    "项目列表候选缺少 projectStatus"
+            );
+        }
+        if (query.searchMode()
+                == SubjectSearchMode.MY_PROJECTS
+                && candidate.projectRelationship()
+                != ProjectRelationship.RESPONSIBLE
+                && candidate.projectRelationship()
+                != ProjectRelationship.PARTICIPATING) {
+            throw new IllegalArgumentException(
+                    "MY_PROJECTS 只允许负责或参与的项目"
+            );
+        }
+    }
+
+    /**
+     * 判断当前查询是否为项目列表查询。
+     */
+    private boolean isProjectListMode(SubjectSearchMode searchMode) {
+        return searchMode == SubjectSearchMode.MY_PROJECTS
+                || searchMode == SubjectSearchMode.VIEWABLE_PROJECTS;
     }
 }

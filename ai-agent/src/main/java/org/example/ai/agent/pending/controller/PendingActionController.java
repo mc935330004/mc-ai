@@ -7,6 +7,7 @@ import org.example.ai.agent.common.exception.BusinessException;
 import org.example.ai.agent.common.result.Result;
 import org.example.ai.agent.pending.entity.PendingAction;
 import org.example.ai.agent.pending.service.PendingActionService;
+import org.example.ai.agent.pending.support.PendingActionPreviewMasker;
 import org.example.ai.agent.security.CurrentUserProvider;
 import org.example.ai.agent.vo.PendingActionVO;
 import org.springframework.util.StringUtils;
@@ -81,7 +82,9 @@ public class PendingActionController {
      */
     private PendingActionVO toVO(PendingAction action) {
         try {
-            Map<String, Object> input = objectMapper.readValue(action.getInputJson(), new TypeReference<>() {});
+            Map<String, Object> input = PendingActionPreviewMasker.mask(
+                    objectMapper.readValue(action.getInputJson(), new TypeReference<>() {})
+            );
             // 尚未执行时 outputJson 为空
             Object output = StringUtils.hasText(action.getOutputJson())
                     ? objectMapper.readValue(action.getOutputJson(), Object.class)
@@ -107,26 +110,48 @@ public class PendingActionController {
     }
 
     /**
-     * 根据真实执行状态和结果生成 Markdown。
+     * 根据真实执行状态和结果生成Markdown。
      */
     private String buildMarkdown(PendingAction action, Object output) throws Exception {
         StringBuilder markdown = new StringBuilder();
-        if ("SUCCESS".equals(action.getStatus())) {
+        String status = action.getStatus();
+
+        if ("SUCCESS".equals(status)) {
             markdown.append("## 操作成功\n\n")
                     .append("**")
                     .append(escapeMarkdown(action.getCapabilityName()))
                     .append("** 已执行完成。\n\n");
             appendOutput(markdown, output);
-        } else if ("FAILED".equals(action.getStatus())) {
-        //  禁止向用户直接展示后台异常和内部状态码。
-        markdown.append("## 操作未完成\n\n")
-                .append("业务操作未完成，请检查提交的信息后重试。");
-        } else {
-                //  未完成状态只展示用户可以理解的结果。
-                markdown.append("## 操作处理中\n\n")
-                        .append("当前操作尚未完成。");
+            return markdown.toString();
         }
-        return markdown.toString();
+
+        if ("UNKNOWN".equals(status)) {
+            return "## 操作结果待确认\n\n"
+                    + "请求可能已经到达业务系统，但当前无法确认最终结果。"
+                    + "请人工查询业务数据，确认前不要重复提交。";
+        }
+
+        if ("REJECTED".equals(status)) {
+            return "## 操作已拒绝\n\n"
+                    + "权限、能力版本或提交参数已经发生变化，业务系统未被调用。"
+                    + "请重新发起操作。";
+        }
+
+        if ("FAILED".equals(status)) {
+            return "## 操作未完成\n\n"
+                    + "业务系统已明确返回失败，本次操作不会自动重试。"
+                    + "请检查信息后重新发起。";
+        }
+
+        if ("CANCELLED".equals(status)) {
+            return "## 操作已取消\n\n本次操作未写入业务系统。";
+        }
+
+        if ("EXPIRED".equals(status)) {
+            return "## 操作已过期\n\n本次确认信息已经失效，请重新发起操作。";
+        }
+
+        return "## 操作处理中\n\n当前操作状态：" + escapeMarkdown(status) + "。";
     }
 
     /**

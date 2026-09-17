@@ -22,8 +22,10 @@ import org.junit.jupiter.api.Test;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.lang.reflect.Method;
+import java.util.concurrent.CancellationException;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class BusinessAssistantStreamIntegrationTest {
 
@@ -33,6 +35,9 @@ class BusinessAssistantStreamIntegrationTest {
         assertThat(cancelled.shouldStopBusinessQuery()).isFalse();
         assertThat(cancelled.requestCancellation()).isTrue();
         assertThat(cancelled.shouldStopBusinessQuery()).isTrue();
+        assertThatThrownBy(() -> cancelled.startTextResponse(
+                "late", "迟到内容", 0, BlockSource.AI
+        )).isInstanceOf(CancellationException.class);
 
         var disconnected = newBusinessStream();
         assertThat(disconnected.shouldStopBusinessQuery()).isFalse();
@@ -64,6 +69,11 @@ class BusinessAssistantStreamIntegrationTest {
                 .build();
 
         assertThat(predicate.invoke(null, valid)).isEqualTo(true);
+
+        // 业务事实与制度证据的混合只读问题也必须进入同一业务助手主链。
+        valid.setRouteType(RouteType.MIXED_QUERY);
+        assertThat(predicate.invoke(null, valid)).isEqualTo(true);
+        valid.setRouteType(RouteType.BUSINESS_QUERY);
 
         read.setSideEffect("WRITE");
         assertThat(predicate.invoke(null, valid)).isEqualTo(false);

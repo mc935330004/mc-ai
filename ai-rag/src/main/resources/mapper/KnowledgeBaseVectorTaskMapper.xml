@@ -15,23 +15,27 @@
     <update id="resetTimeoutTasks">
         UPDATE knowledge_base_vector_task
         SET status = 'PENDING',
-        lock_owner = NULL,
-        locked_at = NULL,
-        started_at = NULL,
-        updated_at = NOW(),
-        error_message = 'task timeout, reset to pending'
+            retry_count = retry_count + 1,
+            lock_owner = NULL,
+            locked_at = NULL,
+            started_at = NULL,
+            updated_at = NOW(),
+            error_message = 'task timeout, reset to pending'
         WHERE status = 'PROCESSING'
-        AND locked_at &lt; DATE_SUB(NOW(), INTERVAL #{timeoutMinutes} MINUTE)
-        AND retry_count &lt; max_retry_count
+          AND locked_at &lt; DATE_SUB(NOW(), INTERVAL #{timeoutMinutes} MINUTE)
+          AND retry_count + 1 &lt; max_retry_count
     </update>
     <update id="failTimeoutTasks">
         UPDATE knowledge_base_vector_task
         SET status = 'FAILED',
-        finished_at = NOW(),
-        updated_at = NOW(),
-        error_message = 'task timeout and max retry reached'
+            retry_count = retry_count + 1,
+            lock_owner = NULL,
+            locked_at = NULL,
+            finished_at = NOW(),
+            updated_at = NOW(),
+            error_message = 'task timeout and max retry reached'
         WHERE status = 'PROCESSING'
-        AND locked_at &lt; DATE_SUB(NOW(), INTERVAL #{timeoutMinutes} MINUTE)
-        AND retry_count &gt;= max_retry_count
+          AND locked_at &lt; DATE_SUB(NOW(), INTERVAL #{timeoutMinutes} MINUTE)
+          AND retry_count + 1 &gt;= max_retry_count
     </update>
 </mapper>

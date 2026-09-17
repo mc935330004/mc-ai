@@ -2,16 +2,7 @@ package org.example.ai.agent.chat.stream;
 
 import org.example.ai.agent.chat.protocol.block.ResponseBlock;
 import org.example.ai.agent.chat.protocol.response.ResponseDocument;
-import org.example.ai.agent.chat.protocol.stream.BlockDeltaPayload;
-import org.example.ai.agent.chat.protocol.stream.BlockDonePayload;
-import org.example.ai.agent.chat.protocol.stream.BlockErrorPayload;
-import org.example.ai.agent.chat.protocol.stream.BlockStartPayload;
-import org.example.ai.agent.chat.protocol.stream.HeartbeatPayload;
-import org.example.ai.agent.chat.protocol.stream.ResponseDonePayload;
-import org.example.ai.agent.chat.protocol.stream.ResponseErrorPayload;
-import org.example.ai.agent.chat.protocol.stream.ResponseSnapshotPayload;
-import org.example.ai.agent.chat.protocol.stream.ResponseStartPayload;
-import org.example.ai.agent.chat.protocol.stream.ResponseStreamEvent;
+import org.example.ai.agent.chat.protocol.stream.*;
 import org.example.ai.agent.common.enums.protocol.PresentationMode;
 import org.example.ai.agent.common.enums.protocol.ResponseStatus;
 import org.example.ai.agent.common.enums.protocol.ResponseStreamEventType;
@@ -19,6 +10,7 @@ import org.example.ai.agent.vo.ActionFormVO;
 import org.example.ai.agent.vo.ActionPreviewVO;
 
 import java.time.Instant;
+import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
@@ -226,7 +218,36 @@ public final class ResponseStreamEventFactory {
                 )
         );
     }
+    /**
+     * 创建工作流执行结果摘要事件。
+     *
+     * 只允许传输已经过滤后的安全摘要，
+     * 不能传输工作流原始执行结果。
+     */
+    public ResponseStreamEvent<AgentEventPayload> workflowResult(
+            String content,
+            Map<String, Object> data) {
 
+        return createResponseEvent(
+                ResponseStreamEventType.WORKFLOW_RESULT,
+                new AgentEventPayload(content, data)
+        );
+    }
+
+    /**
+     * 创建报告完成后的独立追问事件。
+     */
+    public ResponseStreamEvent<AgentEventPayload> reportFollowUp(
+            String content) {
+
+        return createResponseEvent(
+                ResponseStreamEventType.REPORT_FOLLOW_UP,
+                new AgentEventPayload(
+                        content,
+                        Map.of("prompt", content)
+                )
+        );
+    }
     /**
      * 创建完整回答快照事件。
      */

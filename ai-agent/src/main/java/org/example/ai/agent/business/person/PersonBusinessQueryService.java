@@ -19,6 +19,7 @@ import org.example.ai.agent.business.subject.SubjectSelectionTokenService;
 import org.example.ai.agent.business.subject.model.AuthorizedSubjectCandidate;
 import org.example.ai.agent.business.subject.model.SubjectDirectoryPage;
 import org.example.ai.agent.business.subject.model.SubjectSearchMode;
+import org.example.ai.agent.common.enums.SnapshotReadMode;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -342,6 +343,8 @@ public class PersonBusinessQueryService {
                 subjectId, plan.datasetCode(), canonicalInput, AssociationType.DIRECT,
                 plan.requestedGrain(), plan.requiredFactCodes(),
                 Set.of(SnapshotFactChannel.CALCULATION), command.refreshRequested()
+                        ? SnapshotReadMode.FORCE_LIVE
+                        : SnapshotReadMode.REUSE_IF_FRESH
         )).orElse(null);
         if (reused != null) {
             return new ModuleData(

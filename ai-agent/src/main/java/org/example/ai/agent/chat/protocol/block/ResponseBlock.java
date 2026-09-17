@@ -29,7 +29,8 @@ import com.fasterxml.jackson.annotation.JsonProperty;
         @JsonSubTypes.Type(value = StatusBlock.class, name = "STATUS"),
         @JsonSubTypes.Type(value = StatusListBlock.class, name = "STATUS_LIST"),
         @JsonSubTypes.Type(value = WarningsBlock.class, name = "WARNINGS"),
-        @JsonSubTypes.Type(value = ArtifactBlock.class, name = "ARTIFACT")
+        @JsonSubTypes.Type(value = ArtifactBlock.class, name = "ARTIFACT"),
+        @JsonSubTypes.Type(value = SelectionBlock.class, name = "SELECTION"),
 })
 public sealed interface ResponseBlock permits
         TextBlock,
@@ -42,7 +43,8 @@ public sealed interface ResponseBlock permits
         StatusBlock,
         StatusListBlock,
         WarningsBlock,
-        ArtifactBlock {
+        ArtifactBlock,
+        SelectionBlock {
 
     /**
      * 区块唯一标识。

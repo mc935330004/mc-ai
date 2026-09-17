@@ -61,38 +61,53 @@ public class KnowledgeDocumentVersionServiceImpl extends ServiceImpl<KnowledgeDo
     private final TextSplitter textSplitter = TokenTextSplitter.builder().build();
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public void vectorizeVersion(Long versionId) {
-
+    public void vectorizeVersion(Long versionId, String vectorJobId) {
+        if (!StringUtils.hasText(vectorJobId)) {
+            throw new BusinessException(
+                    ErrorCode.BAD_REQUEST,
+                    "向量任务幂等标识不能为空"
+            );
+        }
         KnowledgeDocumentVersion version = getActiveVersion(versionId);
-        KnowledgeDocument document = documentService.lambdaQuery()
-                .eq(KnowledgeDocument::getId,version.getDocumentId())
-                .eq(KnowledgeDocument::getDelFlag,0).one();
+        KnowledgeDocument document = documentService.getOne(
+                Wrappers.<KnowledgeDocument>lambdaQuery()
+                        .eq(KnowledgeDocument::getId, version.getDocumentId())
+                        .eq(KnowledgeDocument::getDelFlag, 0)
+        );
         if (document == null) {
             throw new BusinessException(ErrorCode.NOT_FOUND, "文档不存在");
         }
         try {
-            // 标记为处理中：必须在解析、切片、写向量之前执行。
             markProcessing(version);
-            // 解析文档内容
-            String content = parseVersionContent(version);
-            // 切分文档内容
-            List<Document> splitDocuments = splitContent(content);
-            // 删除当前版本旧切片和旧向量，保证重试、重新向量化时结果干净。
-            deleteOldChunksAndVectors(version.getId());
-            // 保存切片
-            List<KnowledgeChunk> chunks = saveChunks(document, version, splitDocuments);
-            // 写入向量
-            writeVectors(document, version, chunks);
-            // 标记完成
-            markCompleted(version, chunks.size());
-            // 标记处理中
-            log.info("文档版本向量化完成: documentId={}, versionId={}, chunkCount={}",
-                    document.getId(), version.getId(), chunks.size());
-        } catch (Exception e) {
-            markFailed(version, e);
-            throw e;
-        }
 
+            String content = parseVersionContent(version);
+            List<Document> splitDocuments = splitContent(content);
+
+            // 当前事务失败时MySQL切片会回滚，PGVector临时数据通过稳定jobId清理。
+            deleteOldChunksAndVectors(version.getId());
+            List<KnowledgeChunk> chunks = saveChunks(document, version, splitDocuments);
+            writeVectors(document, version, chunks, vectorJobId);
+            markCompleted(version, chunks.size());
+
+            log.info(
+                    "文档版本向量化完成: documentId={}, versionId={}, vectorJobId={}, chunkCount={}",
+                    document.getId(),
+                    version.getId(),
+                    vectorJobId,
+                    chunks.size()
+            );
+        } catch (Exception exception) {
+            // 这里不能保存FAILED状态，否则会随当前事务回滚。
+            log.error(
+                    "文档版本向量化事务失败: documentId={}, versionId={}, vectorJobId={}, error={}",
+                    document.getId(),
+                    version.getId(),
+                    vectorJobId,
+                    exception.getMessage(),
+                    exception
+            );
+            throw exception;
+        }
     }
 
     /**
@@ -115,12 +130,8 @@ public class KnowledgeDocumentVersionServiceImpl extends ServiceImpl<KnowledgeDo
         if (!document.getId().equals(version.getDocumentId())) {
             throw new BusinessException(ErrorCode.BAD_REQUEST, "文档版本不属于当前文档");
         }
-        // 只有解析和向量化都完成的版本，才能进入正式问答范围。
-        if (!"COMPLETED".equals(version.getParseStatus())
-                || !"COMPLETED".equals(version.getVectorStatus())) {
-            throw new BusinessException(ErrorCode.BAD_REQUEST, "只有解析和向量化完成的版本才能发布");
-        }
         LocalDateTime now = LocalDateTime.now();
+        validatePublishable(version, now);
         // 如果已有当前版本，发布新版本时把旧版本标记为废止。
         Long oldCurrentVersionId = document.getCurrentVersionId();
         if (oldCurrentVersionId != null && !oldCurrentVersionId.equals(versionId)) {
@@ -143,6 +154,35 @@ public class KnowledgeDocumentVersionServiceImpl extends ServiceImpl<KnowledgeDo
         documentService.updateById(document);
     }
 
+    /**
+     * 只有完整且当前有效的版本才能切换为当前版本。
+     */
+    private void validatePublishable(KnowledgeDocumentVersion version, LocalDateTime now) {
+        if (!"COMPLETED".equals(version.getParseStatus())
+                || !"COMPLETED".equals(version.getVectorStatus())
+                || version.getChunkCount() == null
+                || version.getChunkCount() <= 0) {
+            throw new BusinessException(
+                    ErrorCode.BAD_REQUEST,
+                    "只有解析和向量化完成的版本才能发布"
+            );
+        }
+        if (version.getEffectiveStartTime() != null
+                && version.getEffectiveStartTime().isAfter(now)) {
+            throw new BusinessException(
+                    ErrorCode.BAD_REQUEST,
+                    "文档版本尚未到生效时间"
+            );
+        }
+        if (version.getEffectiveEndTime() != null
+                && version.getEffectiveEndTime().isBefore(now)) {
+            throw new BusinessException(
+                    ErrorCode.BAD_REQUEST,
+                    "已失效的文档版本不能发布"
+            );
+        }
+    }
+
     @Override
     @Transactional(rollbackFor = Exception.class)
     public void revectorizeVersion(Long documentId, Long versionId) {
@@ -159,6 +199,16 @@ public class KnowledgeDocumentVersionServiceImpl extends ServiceImpl<KnowledgeDo
         if (!document.getId().equals(version.getDocumentId())) {
             throw new BusinessException(ErrorCode.BAD_REQUEST, "文档版本不属于当前文档");
         }
+        /*
+         * 当前生效版本不能原地删除切片和向量。
+         * 需要调整内容或切片策略时上传新版本，成功后再切换。
+         */
+        if (versionId.equals(document.getCurrentVersionId())) {
+            throw new BusinessException(
+                    ErrorCode.BAD_REQUEST,
+                    "当前生效版本不能原地重新向量化，请上传新版本后重新发布"
+            );
+        }
         // 重置版本状态，worker 会重新解析、切片、写向量。
         version.setParseStatus("PENDING");
         version.setVectorStatus("PENDING");
@@ -171,18 +221,23 @@ public class KnowledgeDocumentVersionServiceImpl extends ServiceImpl<KnowledgeDo
     }
 
     /**
-     * 获取有效的文档版本
-     * @param versionId
-     * @return
+     * 获取未删除的文档版本。
      */
     private KnowledgeDocumentVersion getActiveVersion(Long versionId) {
-        if (versionId == null) {
-            throw new BusinessException(ErrorCode.BAD_REQUEST, "文档版本ID不能为空");
+        if (versionId == null || versionId <= 0) {
+            throw new BusinessException(
+                    ErrorCode.BAD_REQUEST,
+                    "文档版本ID必须大于0"
+            );
         }
-        return Optional.of(this.lambdaQuery()
-                .eq(KnowledgeDocumentVersion::getId, versionId)
-                .eq(KnowledgeDocumentVersion::getDelFlag,0)
-                .one()).orElseThrow(()->new BusinessException(ErrorCode.NOT_FOUND, "文档版本不存在"));
+        KnowledgeDocumentVersion version = this.getById(versionId);
+        if (version == null || !Integer.valueOf(0).equals(version.getDelFlag())) {
+            throw new BusinessException(
+                    ErrorCode.NOT_FOUND,
+                    "文档版本不存在"
+            );
+        }
+        return version;
     }
 
     /**
@@ -215,18 +270,25 @@ public class KnowledgeDocumentVersionServiceImpl extends ServiceImpl<KnowledgeDo
      */
     private KnowledgeDocument getManagedDocument(Long documentId) {
         if (documentId == null || documentId <= 0) {
-            throw new BusinessException(ErrorCode.BAD_REQUEST, "文档ID必须大于0");
+            throw new BusinessException(
+                    ErrorCode.BAD_REQUEST,
+                    "文档ID必须大于0"
+            );
         }
-        KnowledgeAccessPrincipal principal =knowledgeAccessContext.getRequiredPrincipal();
-        return Optional.ofNullable(documentService.lambdaQuery()
+
+        KnowledgeAccessPrincipal principal = knowledgeAccessContext.getRequiredPrincipal();
+        KnowledgeDocument document = documentService.getOne(
+                Wrappers.<KnowledgeDocument>lambdaQuery()
                         .eq(KnowledgeDocument::getId, documentId)
                         .eq(KnowledgeDocument::getTenantId, principal.tenantId())
                         .eq(KnowledgeDocument::getDelFlag, 0)
-                        .one()
-        ).orElseThrow(() -> new BusinessException(
+        );
+        if (document != null) return document;
+
+        throw new BusinessException(
                 ErrorCode.NOT_FOUND,
                 "文档不存在"
-        ));
+        );
     }
 
     /**
@@ -297,13 +359,10 @@ public class KnowledgeDocumentVersionServiceImpl extends ServiceImpl<KnowledgeDo
         return chunks;
     }
     /**
-     * 写入向量
-     * @param document
-     * @param version
-     * @param chunks
+     * 使用稳定任务标识写入向量。
      */
-    private void writeVectors( KnowledgeDocument document,KnowledgeDocumentVersion version,
-            List<KnowledgeChunk> chunks ) {
+    private void writeVectors(KnowledgeDocument document, KnowledgeDocumentVersion version,
+                              List<KnowledgeChunk> chunks, String vectorJobId) {
         VectorStore vectorStore = vectorStoreProvider.getIfAvailable();
         if (vectorStore == null) {
             throw new BusinessException(
@@ -311,35 +370,38 @@ public class KnowledgeDocumentVersionServiceImpl extends ServiceImpl<KnowledgeDo
                     "VectorStore 未启用，无法写入向量库"
             );
         }
-        String jobId = UUID.randomUUID().toString();
-        List<Document> vectorDocuments = new ArrayList<>();
+        // 清除同一任务上一次异常中断后可能遗留的向量。
+        vectorRepository.deleteByVectorJobId(vectorJobId);
 
+        List<Document> vectorDocuments = new ArrayList<>();
         for (KnowledgeChunk chunk : chunks) {
             Document vectorDocument = new Document(chunk.getContent());
-
-            // 这些 metadata 是后续检索过滤、引用溯源、删除向量的关键。
             vectorDocument.getMetadata().put("document_id", document.getId().toString());
             vectorDocument.getMetadata().put("version_id", version.getId().toString());
             vectorDocument.getMetadata().put("chunk_id", chunk.getId().toString());
             vectorDocument.getMetadata().put("chunk_index", chunk.getChunkIndex().toString());
-            vectorDocument.getMetadata().put("category_id", document.getCategoryId() == null ? "" : document.getCategoryId().toString());
+            vectorDocument.getMetadata().put(
+                    "category_id",
+                    document.getCategoryId() == null ? "" : document.getCategoryId().toString()
+            );
             vectorDocument.getMetadata().put("document_code", nullToEmpty(document.getDocumentCode()));
             vectorDocument.getMetadata().put("document_title", nullToEmpty(document.getTitle()));
             vectorDocument.getMetadata().put("source", nullToEmpty(version.getOriginalFilename()));
-            vectorDocument.getMetadata().put("kb_vector_job_id", jobId);
+            vectorDocument.getMetadata().put("kb_vector_job_id", vectorJobId);
             vectorDocuments.add(vectorDocument);
         }
+
         try {
             for (int start = 0; start < vectorDocuments.size(); start += MAX_BATCH_SIZE) {
                 int end = Math.min(start + MAX_BATCH_SIZE, vectorDocuments.size());
                 vectorStore.add(vectorDocuments.subList(start, end));
             }
-        } catch (Exception e) {
-            vectorRepository.deleteByVectorJobId(jobId);
+        } catch (Exception exception) {
+            vectorRepository.deleteByVectorJobId(vectorJobId);
             throw new BusinessException(
                     ErrorCode.KNOWLEDGE_BASE_VECTORIZATION_FAILED,
-                    "写入向量库失败: " + e.getMessage(),
-                    e
+                    "写入向量库失败: " + exception.getMessage(),
+                    exception
             );
         }
     }
@@ -356,20 +418,15 @@ public class KnowledgeDocumentVersionServiceImpl extends ServiceImpl<KnowledgeDo
         version.setUpdatedAt(LocalDateTime.now());
         this.updateById(version);
     }
-    /**
-     * 标记失败
-     * @param version
-     * @param e
-     */
-    private void markFailed(KnowledgeDocumentVersion version, Exception e) {
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public void markVectorizeFailed(Long versionId, String errorMessage) {
+        KnowledgeDocumentVersion version = getActiveVersion(versionId);
         version.setParseStatus("FAILED");
         version.setVectorStatus("FAILED");
-        version.setVectorError(truncateError(e.getMessage()));
+        version.setVectorError(truncateError(errorMessage));
         version.setUpdatedAt(LocalDateTime.now());
         this.updateById(version);
-
-        log.error("文档版本向量化失败: versionId={}, error={}",
-                version.getId(), e.getMessage(), e);
     }
 
     /**

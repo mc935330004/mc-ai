@@ -69,14 +69,18 @@ class AgentReportTaskControllerTest {
     void statusAndCancelShouldDelegateWithoutReturningPermanentUrl() {
         ReportDownloadService service = mock(ReportDownloadService.class);
         TaskView view = new TaskView(
-                "task-1", "PENDING", "PDF", false, null, null, null,
-                null, null, null, java.util.List.of()
+                "task-1", "PENDING", "PDF", false,
+                "a".repeat(64), java.time.LocalDateTime.of(2026, 9, 17, 10, 0),
+                null, null, null, null, null, null, java.util.List.of()
         );
         when(service.status("task-1")).thenReturn(view);
         AgentReportTaskController controller = new AgentReportTaskController(service);
 
         ResponseEntity<TaskView> status = controller.status("task-1");
         assertThat(status.getBody()).isSameAs(view);
+        assertThat(status.getBody().contentVersion()).hasSize(64);
+        assertThat(status.getBody().frozenAt())
+                .isEqualTo(java.time.LocalDateTime.of(2026, 9, 17, 10, 0));
         assertThat(status.getHeaders().getCacheControl())
                 .isEqualTo(CacheControl.noStore().getHeaderValue());
         assertThat(controller.cancel("task-1").getStatusCode().value()).isEqualTo(204);

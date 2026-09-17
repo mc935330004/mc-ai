@@ -126,7 +126,7 @@ class ReportDownloadServiceTest {
                 section("summary", SHA), section("cost", SHA)
         ));
         when(fixture.accessService.reauthorize(any())).thenReturn(Optional.of(
-                new BusinessSnapshotAccessService.AccessGrant(1L, "b".repeat(64), SHA)
+                new BusinessSnapshotAccessService.AccessGrant(1L, "b".repeat(64), SHA, 60)
         ));
 
         ReportDownloadService.DownloadArtifact download = fixture.service.download("task-1");
@@ -149,13 +149,13 @@ class ReportDownloadServiceTest {
         ));
         when(fixture.accessService.reauthorize(any()))
                 .thenReturn(Optional.of(new BusinessSnapshotAccessService.AccessGrant(
-                        1L, "b".repeat(64), SHA)))
+                        1L, "b".repeat(64), SHA, 60)))
                 .thenReturn(Optional.empty());
 
         assertGenericDenial(() -> fixture.service.download("task-1"));
 
         when(fixture.accessService.reauthorize(any())).thenReturn(Optional.of(
-                new BusinessSnapshotAccessService.AccessGrant(1L, "b".repeat(64), "c".repeat(64))
+                new BusinessSnapshotAccessService.AccessGrant(1L, "b".repeat(64), "c".repeat(64), 60)
         ));
         assertGenericDenial(() -> fixture.service.download("task-1"));
     }
@@ -182,7 +182,7 @@ class ReportDownloadServiceTest {
         when(fixture.sectionMapper.selectByTaskId("task-1"))
                 .thenReturn(List.of(section("summary", SHA)));
         when(fixture.accessService.reauthorize(any())).thenReturn(Optional.of(
-                new BusinessSnapshotAccessService.AccessGrant(1L, "b".repeat(64), SHA)
+                new BusinessSnapshotAccessService.AccessGrant(1L, "b".repeat(64), SHA, 60)
         ));
         assertGenericDenial(() -> fixture.service.download("task-1"));
     }
@@ -198,7 +198,7 @@ class ReportDownloadServiceTest {
         when(fixture.sectionMapper.selectByTaskId("task-1"))
                 .thenReturn(List.of(section("summary", SHA)));
         when(fixture.accessService.reauthorize(any())).thenReturn(Optional.of(
-                new BusinessSnapshotAccessService.AccessGrant(1L, "b".repeat(64), SHA)
+                new BusinessSnapshotAccessService.AccessGrant(1L, "b".repeat(64), SHA, 60)
         ));
 
         task.setFileName("bad\r\nname.pdf");

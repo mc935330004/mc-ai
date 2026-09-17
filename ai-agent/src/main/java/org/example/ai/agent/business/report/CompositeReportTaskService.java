@@ -2,6 +2,7 @@ package org.example.ai.agent.business.report;
 
 import org.example.ai.agent.business.dataset.ReportDatasetValidator;
 import org.example.ai.agent.business.model.BusinessSubjectType;
+import org.example.ai.agent.business.report.BusinessReportFileHandler.FrozenReport;
 import org.example.ai.agent.business.report.BusinessReportPlanService.LogicalReportPlan;
 import org.example.ai.agent.business.report.BusinessReportPlanService.LogicalReportSection;
 import org.example.ai.agent.business.report.BusinessReportPlanService.PlannedReport;
@@ -18,6 +19,7 @@ import org.springframework.util.StringUtils;
 
 import java.time.Clock;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -43,27 +45,30 @@ public class CompositeReportTaskService {
 
     private final CompositeReportTaskMapper taskMapper;
     private final CompositeReportSectionMapper sectionMapper;
+    private final BusinessReportFileHandler reportFileHandler;
     private final Clock clock;
 
     @Autowired
-    public CompositeReportTaskService(
-            CompositeReportTaskMapper taskMapper,
-            CompositeReportSectionMapper sectionMapper) {
-        this(taskMapper, sectionMapper, Clock.systemDefaultZone());
+    public CompositeReportTaskService(CompositeReportTaskMapper taskMapper,
+                                      CompositeReportSectionMapper sectionMapper,
+                                      BusinessReportFileHandler reportFileHandler) {
+        this(taskMapper, sectionMapper, reportFileHandler, Clock.systemDefaultZone());
     }
 
     /** 测试构造器允许固定任务时间边界。 */
-    CompositeReportTaskService(
-            CompositeReportTaskMapper taskMapper,
-            CompositeReportSectionMapper sectionMapper,
-            Clock clock) {
+    CompositeReportTaskService(CompositeReportTaskMapper taskMapper,
+                               CompositeReportSectionMapper sectionMapper,
+                               BusinessReportFileHandler reportFileHandler,
+                               Clock clock) {
         this.taskMapper = Objects.requireNonNull(taskMapper, "taskMapper不能为空");
         this.sectionMapper = Objects.requireNonNull(sectionMapper, "sectionMapper不能为空");
+        this.reportFileHandler = Objects.requireNonNull(reportFileHandler, "reportFileHandler不能为空");
         this.clock = Objects.requireNonNull(clock, "clock不能为空");
     }
 
     /**
-     * 主任务和全部章节在同一事务中写入；唯一键竞争时只复用fingerprint一致的任务。
+     * 主任务、冻结报告和全部章节在同一事务中写入；
+     * 唯一键竞争时只复用fingerprint一致的任务。
      */
     @Transactional(rollbackFor = Exception.class)
     public CompositeReportTask create(CreateCommand command) {
@@ -72,7 +77,17 @@ public class CompositeReportTaskService {
         if (existing != null) {
             return verifySameRequest(existing, validated.requestFingerprint());
         }
+
         CompositeReportTask task = newTask(validated);
+        List<CompositeReportSection> sections = newSections(
+                task.getTaskId(), validated.plan().sections(), validated.now()
+        );
+
+        // 入队前冻结安全事实，Worker后续只负责文件渲染。
+        FrozenReport frozen = reportFileHandler.freeze(task, sections);
+        task.setContentVersion(frozen.contentVersion());
+        task.setLogicalReportJson(frozen.logicalReportJson());
+
         try {
             if (taskMapper.insertTask(task) != 1) {
                 throw new IllegalStateException("组合报告任务写入失败");
@@ -84,7 +99,8 @@ public class CompositeReportTaskService {
             }
             return verifySameRequest(concurrent, validated.requestFingerprint());
         }
-        insertSections(task.getTaskId(), validated.plan().sections(), validated.now());
+
+        insertSections(sections);
         return task;
     }
 
@@ -182,6 +198,7 @@ public class CompositeReportTaskService {
         }
         requireText(command.userId(), 128, "userId");
         requireText(command.sessionId(), 64, "sessionId");
+        requireText(command.sourceRunId(), 64, "sourceRunId");
         if (StringUtils.hasText(command.authorization())) {
             requireText(command.authorization(), 4096, "authorization");
         }
@@ -220,9 +237,9 @@ public class CompositeReportTaskService {
         String requestKey = hash(requestKeyMaterial(command, canonicalQuery));
         String fingerprint = hash(fingerprintMaterial(command, canonicalQuery));
         return new ValidatedCreate(
-                command.userId(), command.sessionId(), plan,
-                command.plannedReport().templateChecksum(),
-                command.expiresAt(), command.maxAttempts(), requestKey, fingerprint, now
+                command.userId(), command.sessionId(), command.sourceRunId(), plan,
+                command.plannedReport().templateChecksum(), command.expiresAt(),
+                command.maxAttempts(), requestKey, fingerprint, now
         );
     }
 
@@ -272,6 +289,7 @@ public class CompositeReportTaskService {
         Map<String, Object> material = new LinkedHashMap<>();
         material.put("userId", command.userId());
         material.put("sessionId", command.sessionId());
+        material.put("sourceRunId", command.sourceRunId());
         material.put("subjectType", plan.subjectType().name());
         material.put("subjectId", plan.subjectId());
         material.put("templateCode", plan.templateCode());
@@ -327,6 +345,8 @@ public class CompositeReportTaskService {
         task.setFormat(plan.format());
         task.setStatus("PENDING");
         task.setDataComplete(plan.dataComplete());
+        task.setSourceRunId(command.sourceRunId());
+        task.setFrozenAt(command.now());
         task.setAttemptCount(0);
         task.setMaxAttempts(command.maxAttempts());
         task.setExpiresAt(command.expiresAt());
@@ -335,10 +355,11 @@ public class CompositeReportTaskService {
         return task;
     }
 
-    private void insertSections(
-            String taskId,
-            List<LogicalReportSection> source,
-            LocalDateTime now) {
+    /** 先在内存中形成稳定章节顺序，供冻结和数据库写入共同使用。 */
+    private List<CompositeReportSection> newSections(String taskId,
+                                                     List<LogicalReportSection> source,
+                                                     LocalDateTime now) {
+        List<CompositeReportSection> sections = new ArrayList<>(source.size());
         for (int index = 0; index < source.size(); index++) {
             LogicalReportSection logical = source.get(index);
             CompositeReportSection section = new CompositeReportSection();
@@ -351,6 +372,13 @@ public class CompositeReportTaskService {
             section.setSafeMessage(logical.safeMessage());
             section.setCreatedAt(now);
             section.setUpdatedAt(now);
+            sections.add(section);
+        }
+        return List.copyOf(sections);
+    }
+
+    private void insertSections(List<CompositeReportSection> sections) {
+        for (CompositeReportSection section : sections) {
             if (sectionMapper.insertSection(section) != 1) {
                 throw new IllegalStateException("组合报告章节写入失败");
             }
@@ -413,19 +441,12 @@ public class CompositeReportTaskService {
         }
     }
 
-    public record CreateCommand(
-            String userId,
-            String sessionId,
-            String authorization,
-            PlannedReport plannedReport,
-            Map<String, Object> canonicalQuery,
-            LocalDateTime expiresAt,
-            int maxAttempts) {
-
+    public record CreateCommand(String userId, String sessionId, String sourceRunId,
+                                String authorization, PlannedReport plannedReport, Map<String, Object> canonicalQuery,
+                                LocalDateTime expiresAt, int maxAttempts) {
         public CreateCommand {
             canonicalQuery = canonicalQuery == null ? Map.of() : canonicalQuery;
         }
-
         /** 日志不输出认证、主体和查询内容。 */
         @Override
         public String toString() {
@@ -433,6 +454,7 @@ public class CompositeReportTaskService {
             return "CreateCommand[format=" + (plan == null ? null : plan.format())
                     + ", sectionCount=" + (plan == null || plan.sections() == null
                     ? 0 : plan.sections().size())
+                    + ", sourceRunPresent=" + StringUtils.hasText(sourceRunId)
                     + ", authorizationPresent=" + StringUtils.hasText(authorization) + ']';
         }
     }
@@ -448,6 +470,7 @@ public class CompositeReportTaskService {
     private record ValidatedCreate(
             String userId,
             String sessionId,
+            String sourceRunId,
             LogicalReportPlan plan,
             String templateChecksum,
             LocalDateTime expiresAt,

@@ -4,7 +4,6 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.example.ai.agent.chat.entity.AgentRequest;
-import org.example.ai.agent.chat.entity.AgentStreamEvent;
 import org.example.ai.agent.chat.memory.model.ReportFollowUpDecision;
 import org.example.ai.agent.chat.memory.service.ReportFollowUpService;
 import org.example.ai.agent.chat.service.AgentOrchestrator;
@@ -16,7 +15,6 @@ import org.example.ai.agent.vo.ActionFormVO;
 import org.example.ai.agent.chat.support.AgentClientDisconnectedException;
 import org.example.ai.agent.chat.support.AgentStreamSession;
 import org.example.ai.agent.chat.support.AgentStreamSessionFactory;
-import org.example.ai.agent.common.enums.AgentStreamEventType;
 import org.example.ai.agent.common.enums.ModelCallType;
 import org.example.ai.agent.common.modelusage.ModelCallContext;
 import org.example.ai.agent.modules.knowledgebase.dto.KnowledgeDocumentQueryRequest;
@@ -36,7 +34,6 @@ import org.example.ai.agent.tool.ToolResult;
 import org.example.ai.agent.trace.service.RunTraceService;
 import org.example.ai.agent.vo.ActionPreviewVO;
 import org.example.ai.agent.workflow.answer.WorkflowAnswerAnalysisResult;
-import org.example.ai.agent.workflow.answer.WorkflowAnswerComposeResult;
 import org.example.ai.agent.workflow.answer.WorkflowAnswerComposer;
 import org.example.ai.agent.workflow.answer.WorkflowAnswerPreparation;
 import org.example.ai.agent.workflow.answer.analysis.WorkflowAnswerAnalysisDecider;
@@ -63,6 +60,7 @@ import org.example.ai.agent.workflow.answer.analysis.ReportAnalysisInput;
 import org.example.ai.agent.workflow.answer.analysis.ReportAnalysisInputBuilder;
 import org.example.ai.agent.workflow.answer.presentation.WorkflowAnswerPolicyResolver;
 import org.example.ai.agent.workflow.answer.text.WorkflowTextFactBuilder;
+import org.example.ai.agent.pending.support.PendingActionPreviewMasker;
 import org.example.ai.agent.chat.protocol.block.TextBlock;
 import org.example.ai.agent.chat.protocol.response.AiResponse;
 import org.example.ai.agent.chat.protocol.response.ResponseMeta;
@@ -246,15 +244,7 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
             runTraceService.startRun(runId, request);
             // 排队期间已取消时，从这里进入统一取消收尾。
             stream.bindExecutionThread();
-            // 推送开始处理事件。
-            stream.send("thinking",
-                    AgentStreamEvent.of(
-                            runId,
-                            AgentStreamEventType.THINKING.name(),
-                            "正在处理。",
-                            null
-                    )
-            );
+
             //  runId 用于记录上下文改写模型的调用链路。
             String contextualQuestion =conversationContextResolver.resolve(request,runId );
             stream.checkCancellation();
@@ -311,9 +301,6 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                     runTraceService.markSuccess(runId, System.currentTimeMillis()- startTime);
                     return;
                 }
-                stream.send("thinking",
-                        AgentStreamEvent.of(runId, AgentStreamEventType.THINKING.name(), "正在分析上一轮查询结果。", null)
-                );
                 executeResultAnalysis(request, stream, runId);
                 stream.checkCancellation();
                 runTraceService.markSuccess(runId,System.currentTimeMillis()- startTime);
@@ -323,9 +310,6 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
             stream.checkCancellation();
             //  更新路由类型。
             runTraceService.updateRouteType(runId, intentResult.getRouteType());
-            // 推送路由结果，方便前端展示和后端排查。
-            stream.send("thinking", AgentStreamEvent.of(runId, AgentStreamEventType.THINKING.name(),
-                    "路由结果：" + intentResult.getRouteType() + "，原因：" + intentResult.getReason(), intentResult));
 
             /*
              * 已确认的只读业务查询交给新的单一业务编排入口。
@@ -338,23 +322,11 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
             }
 
             /*
-             *  根据路由结果生成运行计划。
-             *
-             * RoutePlan 只描述“准备做哪些步骤”，不负责真正执行。
-             * 当前阶段可以先把计划返回给前端，方便你确认规划是否合理。
+             * 根据路由结果生成运行计划。
+             * RoutePlan只描述准备执行的步骤，
+             * 不负责真正执行业务能力。
              */
             RoutePlan routePlan = planTemplateRegistry.buildPlan(runId, request, intentResult);
-
-            //  推送运行计划。
-            stream.send(
-                    "plan",
-                    AgentStreamEvent.of(
-                            runId,
-                            AgentStreamEventType.PLAN.name(),
-                            "已生成 Agent 运行计划。",
-                            routePlan
-                    )
-            );
             /*
              *  如果信息不足，需要追问用户。
              *
@@ -514,8 +486,9 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
         }
     }
 
-    /**
-     * 只有已匹配的注册 READ 能力才能进入新业务助手，畸形写计划和工作流计划继续走旧防线。
+    /*
+     * 已确认的只读业务查询和业务制度对照问题，
+     * 统一交给新版业务助手主链处理。
      */
     static boolean isConfirmedBusinessRead(IntentResult result) {
         if (result == null || result.isNeedClarify() || result.getWorkflowPlan() != null) {
@@ -526,7 +499,8 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                 && capability.isMatched()
                 && "READ".equalsIgnoreCase(capability.getSideEffect())
                 && (result.getRouteType() == RouteType.BUSINESS_QUERY
-                || result.getRouteType() == RouteType.STATISTIC_QUERY);
+                || result.getRouteType() == RouteType.STATISTIC_QUERY
+                || result.getRouteType() == RouteType.MIXED_QUERY);
     }
 
 
@@ -772,15 +746,6 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                                 request,
                                 decision
                         );
-        stream.send(
-                "plan",
-                AgentStreamEvent.of(
-                        runId,
-                        AgentStreamEventType.PLAN.name(),
-                        "已生成业务明细查询计划。",
-                        routePlan
-                )
-        );
 
         /*
          * 复用现有执行、审计、字段投影和回答链路。
@@ -864,16 +829,6 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
     private void executeToolPlan(AgentRequest request, AgentStreamSession stream,
                                  String runId, RoutePlan routePlan) throws Exception {
 
-        stream.send(
-                "thinking",
-                AgentStreamEvent.of(
-                        runId,
-                        AgentStreamEventType.THINKING.name(),
-                        "正在查询业务数据。",
-                        null
-                )
-        );
-
         ToolExecutionContext toolContext =
                 ToolExecutionContext.builder()
                         .runId(runId)
@@ -888,16 +843,6 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                         toolContext,
                         routePlan
                 );
-
-        stream.send(
-                "tool_result",
-                AgentStreamEvent.of(
-                        runId,
-                        AgentStreamEventType.TOOL_RESULT.name(),
-                        "业务数据查询完成。",
-                        null
-                )
-        );
 
         ToolResult failedResult =
                 findFirstFailedResult(toolResults);
@@ -1203,14 +1148,9 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                 "ACTION_FORM",
                 objectMapper.writeValueAsString(form)
         );
-        stream.send(
-                "action_form",
-                AgentStreamEvent.of(
-                        runId,
-                        AgentStreamEventType.ACTION_FORM.name(),
-                        messageContent,
-                        form
-                )
+        // 写操作表单统一使用ResponseStreamEvent信封。
+        stream.sendResponseEvent(
+                stream.getResponseEventFactory().actionForm(form)
         );
     }
     /**
@@ -1220,23 +1160,26 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                                     String runId,
                                     DynamicCapabilityPlan plan,
                                     PendingAction pendingAction) throws Exception {
-        // 操作参数必须读取数据库中的待确认记录，
-        // 避免前端依赖或修改 Agent 内部的规划对象。
         Map<String, Object> input = objectMapper.readValue(
                 pendingAction.getInputJson(),
-                new TypeReference<>() {
-                }
+                new TypeReference<>() {}
         );
+        /*
+         * 聊天记录和SSE只保存脱敏预览。
+         * 真实参数只保留在PendingAction中。
+         */
+        Map<String, Object> safeInput = PendingActionPreviewMasker.mask(input);
+        Map<String, Object> safeDisplayInput =PendingActionPreviewMasker.mask(plan.getDisplayInput());
         ActionPreviewVO preview = ActionPreviewVO.builder()
                 .runId(runId)
                 .capabilityCode(pendingAction.getCapabilityCode())
                 .capabilityName(pendingAction.getCapabilityName())
                 .actionSummary(pendingAction.getActionSummary())
-                .input(input)
+                .input(safeInput)
                 .status(pendingAction.getStatus())
                 .expireAt(pendingAction.getExpireAt())
                 .requireConfirm(true)
-                .displayInput(plan.getDisplayInput())
+                .displayInput(safeDisplayInput)
                 .build();
         StringBuilder markdown = new StringBuilder();
         markdown.append("## 操作确认\n\n")
@@ -1260,15 +1203,9 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                 "ACTION_PREVIEW",
                 objectMapper.writeValueAsString(preview)
         );
-        // data 只返回稳定的预览 VO，不再暴露 DynamicCapabilityPlan。
-        stream.send(
-                "action_preview",
-                AgentStreamEvent.of(
-                        runId,
-                        AgentStreamEventType.ACTION_PREVIEW.name(),
-                        markdown.toString(),
-                        preview
-                )
+        // 写操作预览只返回稳定VO，并统一使用ResponseStreamEvent信封。
+        stream.sendResponseEvent(
+                stream.getResponseEventFactory().actionPreview(preview)
         );
     }
 
@@ -1298,14 +1235,6 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                     "缺少可执行工作流计划"
             );
         }
-        stream.send(
-                "thinking",
-                AgentStreamEvent.of(
-                        runId,
-                        AgentStreamEventType.THINKING.name(), "正在执行工作流：" + plan.getWorkflowName(),
-                        null)
-        );
-
         WorkflowExecutionCommand command =WorkflowExecutionCommand.builder()
                         .runId(runId)
                         .userId(request.getUserId())
@@ -1346,11 +1275,9 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                         .toList()
         );
 
-        stream.send(
-                "workflow_result",
-                AgentStreamEvent.of(
-                        runId,
-                        AgentStreamEventType.WORKFLOW_RESULT.name(),
+        // 工作流只发送已经过滤的安全摘要，并统一使用ResponseStreamEvent信封。
+        stream.sendResponseEvent(
+                stream.getResponseEventFactory().workflowResult(
                         outcome.success() ? "工作流执行完成。" : "工作流执行失败。",
                         progress
                 )
@@ -1563,10 +1490,7 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                 completedResponse
         );
 
-        /*
-         * 追问仍然保持现有行为。
-         * 后续清理旧协议阶段再统一迁移追问事件。
-         */
+        // 报告完成后通过统一事件发送独立追问。
         publishReportFollowUpPrompt(request, stream, runId);
         stream.finishReportResponse(completedResponse);
     }
@@ -1996,23 +1920,9 @@ public class DefaultAgentOrchestrator implements AgentOrchestrator {
                     "TEXT",
                     null
             );
-
-            stream.send(
-                    "report_follow_up",
-                    AgentStreamEvent.builder()
-                            .runId(runId)
-                            .type(
-                                    AgentStreamEventType
-                                            .REPORT_FOLLOW_UP
-                                            .name()
-                            )
-                            .content(prompt)
-                            .data(Map.of(
-                                    "prompt",
-                                    prompt
-                            ))
-                            .presentationType("MARKDOWN")
-                            .build()
+            // 报告追问作为独立助手消息发送，并复用统一事件序号。
+            stream.sendResponseEvent(
+                    stream.getResponseEventFactory().reportFollowUp(prompt)
             );
         } catch (Exception exception) {
             /*

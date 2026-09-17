@@ -65,6 +65,7 @@ class BusinessSnapshotAccessServiceTest {
 
         assertThat(grant).isPresent();
         assertThat(grant.orElseThrow().configChecksum()).isEqualTo(CONFIG);
+        assertThat(grant.orElseThrow().ttlMinutes()).isEqualTo(60);
         ArgumentCaptor<WorkflowExecutionCommand> command =
                 ArgumentCaptor.forClass(WorkflowExecutionCommand.class);
         verify(facade).execute(command.capture());
@@ -149,6 +150,7 @@ class BusinessSnapshotAccessServiceTest {
         dataset.setInputMappingJson("{\"access\":{\"subjectId\":\"employee_code\"},\"query\":{}}");
         dataset.setConfigChecksum(CONFIG);
         dataset.setFieldPolicyChecksum(POLICY);
+        dataset.setTtlMinutes(60);
         dataset.setEnabled(true);
         return dataset;
     }

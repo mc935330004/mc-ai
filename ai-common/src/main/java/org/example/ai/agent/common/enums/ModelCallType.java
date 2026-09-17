@@ -33,10 +33,6 @@ public enum ModelCallType {
      */
     CONTEXT_REWRITE,
 
-    /**
-     * 直接聊天。
-     */
-    DIRECT_CHAT,
 
     /**
      * 字段语义生成。
@@ -98,8 +94,7 @@ public enum ModelCallType {
             case ANSWER,
                  ANSWER_RETRY,
                  REPORT_ANALYSIS,
-                 RAG,
-                 DIRECT_CHAT -> true;
+                 RAG -> true;
             default -> false;
         };
     }

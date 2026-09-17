@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonIgnore;
 import jakarta.validation.constraints.NotBlank;
 import lombok.Data;
 import org.example.ai.agent.chat.memory.model.ResultStatisticsContext;
+import org.example.ai.agent.common.enums.SnapshotReadMode;
 import org.example.ai.agent.modules.knowledgebase.security.KnowledgeAccessPrincipal;
 
 import java.util.ArrayList;
@@ -136,6 +137,15 @@ public class AgentRequest {
      */
     @JsonIgnore
     private boolean resultAnalysisRequest;
+
+    /**
+     * 本次业务数据读取模式。
+     *
+     * 只能由服务端根据用户问题和可信会话状态确定，
+     * 禁止客户端直接指定。
+     */
+    @JsonIgnore
+    private SnapshotReadMode snapshotReadMode = SnapshotReadMode.REUSE_IF_FRESH;
 
     /**
      * 上一轮结果中的项目展示顺序，只允许后端注入。

@@ -12,20 +12,41 @@ public record ResponseReference(
         String documentVersionId,
         String chunkId,
         String title,
+        String versionNo,
         String sourceUrl,
         String excerpt) {
 
     public ResponseReference {
-        referenceId = ResponseSupport.requireText(
-                referenceId,
-                "引用referenceId不能为空"
-        );
-
+        referenceId = ResponseSupport.requireText(referenceId, "引用referenceId不能为空");
         documentId = ResponseSupport.normalizeText(documentId);
         documentVersionId = ResponseSupport.normalizeText(documentVersionId);
         chunkId = ResponseSupport.normalizeText(chunkId);
         title = ResponseSupport.normalizeText(title);
+        versionNo = ResponseSupport.normalizeText(versionNo);
         sourceUrl = ResponseSupport.normalizeText(sourceUrl);
         excerpt = ResponseSupport.normalizeText(excerpt);
+    }
+
+    /**
+     * 保留普通知识问答现有构造方式。
+     */
+    public ResponseReference(
+            String referenceId,
+            String documentId,
+            String documentVersionId,
+            String chunkId,
+            String title,
+            String sourceUrl,
+            String excerpt) {
+        this(
+                referenceId,
+                documentId,
+                documentVersionId,
+                chunkId,
+                title,
+                "",
+                sourceUrl,
+                excerpt
+        );
     }
 }

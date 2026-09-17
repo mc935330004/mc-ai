@@ -432,7 +432,9 @@ class CompositeReportWorkerTest {
     private CompositeReportTaskService service(
             CompositeReportTaskMapper taskMapper,
             CompositeReportSectionMapper sectionMapper) {
-        return new CompositeReportTaskService(taskMapper, sectionMapper, CLOCK);
+        return new CompositeReportTaskService(
+                taskMapper, sectionMapper, mock(BusinessReportFileHandler.class), CLOCK
+        );
     }
 
     private CompositeReportTask task(String taskId, String status) {

@@ -14,6 +14,7 @@ import org.example.ai.agent.business.snapshot.entity.BusinessSnapshotItem;
 import org.example.ai.agent.business.snapshot.mapper.BusinessSnapshotItemMapper;
 import org.example.ai.agent.business.snapshot.mapper.BusinessSnapshotMapper;
 import org.example.ai.agent.chat.support.ContentHashUtils;
+import org.example.ai.agent.common.enums.SnapshotReadMode;
 import org.example.ai.agent.workflow.answer.artifact.entity.ResultArtifact;
 import org.example.ai.agent.workflow.answer.artifact.mapper.ResultArtifactMapper;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -88,10 +89,11 @@ public class BusinessSnapshotMatcher {
     }
 
     public SnapshotMatchResult match(MatchCommand command) {
-        if (!valid(command) || command.refreshRequested()) {
-            return requery(command != null && command.refreshRequested()
-                    ? "用户已明确要求刷新"
-                    : GENERIC_REQUERY_REASON);
+        if (!valid(command)) {
+            return requery(GENERIC_REQUERY_REASON);
+        }
+        if (command.readMode() == SnapshotReadMode.FORCE_LIVE) {
+            return requery("用户已明确要求刷新");
         }
         Optional<BusinessSnapshotAccessService.AccessGrant> grant = accessService.reauthorize(
                 new BusinessSnapshotAccessService.AccessCommand(
@@ -227,6 +229,7 @@ public class BusinessSnapshotMatcher {
                 && StringUtils.hasText(command.subjectId())
                 && StringUtils.hasText(command.datasetCode())
                 && command.associationType() != null
+                && command.readMode() != null
                 && command.requiredFactCodes().size() <= MAX_ITEMS
                 && command.requiredFactCodes().stream().allMatch(
                 code -> StringUtils.hasText(code) && code.length() <= 128
@@ -262,7 +265,23 @@ public class BusinessSnapshotMatcher {
                 && Objects.equals(snapshot.getFieldPolicyChecksum(), grant.fieldPolicyChecksum())
                 && REUSABLE_STATUS.contains(snapshot.getStatus())
                 && snapshot.getExpiresAt() != null
-                && snapshot.getExpiresAt().isAfter(now);
+                && snapshot.getExpiresAt().isAfter(now)
+                && withinReadWindow(snapshot, command.readMode(), grant.ttlMinutes(), now);
+    }
+
+    /**
+     * 历史模式只校验保留期，普通复用还必须处于数据集新鲜期。
+     */
+    private boolean withinReadWindow(
+            BusinessSnapshot snapshot,
+            SnapshotReadMode readMode,
+            int ttlMinutes,
+            LocalDateTime now) {
+        if (readMode == SnapshotReadMode.REUSE_SNAPSHOT) {
+            return true;
+        }
+        return snapshot.getCompletedAt() != null
+                && snapshot.getCompletedAt().plusMinutes(ttlMinutes).isAfter(now);
     }
 
     private List<BusinessSnapshotItem> loadUsableItems(
@@ -487,7 +506,7 @@ public class BusinessSnapshotMatcher {
             String requestedGrain,
             Set<String> requiredFactCodes,
             Set<SnapshotFactChannel> requiredChannels,
-            boolean refreshRequested) {
+            SnapshotReadMode readMode) {
 
         @SuppressWarnings("unchecked")
         public MatchCommand {
@@ -512,7 +531,7 @@ public class BusinessSnapshotMatcher {
                     + ", sessionId=" + sessionId
                     + ", datasetCode=" + datasetCode
                     + ", subjectType=" + subjectType
-                    + ", refreshRequested=" + refreshRequested
+                    + ", readMode=" + readMode
                     + ", authorizationPresent=" + StringUtils.hasText(authorization)
                     + ", secureContextSize=" + secureContext.size()
                     + ", canonicalQuerySize=" + canonicalQuery.size() + ']';

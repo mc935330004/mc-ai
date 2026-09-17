@@ -21,6 +21,7 @@ import org.example.ai.agent.business.snapshot.BusinessSnapshotAccessService;
 import org.example.ai.agent.business.snapshot.entity.BusinessSnapshot;
 import org.example.ai.agent.business.snapshot.mapper.BusinessSnapshotMapper;
 import org.example.ai.agent.chat.support.ContentHashUtils;
+import org.example.ai.agent.common.enums.SnapshotReadMode;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
@@ -118,7 +119,8 @@ public class ProjectPanoramaSnapshotReuseService {
      * 任一身份、配置、引用或安全事实不一致都统一返回空，避免泄露失败原因。
      */
     public Optional<ProjectPanoramaResult> reuse(ReuseCommand command) {
-        if (!valid(command)) {
+        if (!valid(command)
+                || command.readMode() == SnapshotReadMode.FORCE_LIVE) {
             return Optional.empty();
         }
         try {
@@ -134,7 +136,7 @@ public class ProjectPanoramaSnapshotReuseService {
             AuthorizedProjectSubject subject = authorizationService.authorize(
                     authorizationCommand
             );
-            ProjectPanoramaPlan plan = profileService.resolve(subject.projectType());
+            ProjectPanoramaPlan plan = profileService.resolve(subject.projectType()).select(command.scope());
             if (plan.modules().isEmpty() || plan.modules().size() > MAX_MODULES) {
                 return Optional.empty();
             }
@@ -196,7 +198,9 @@ public class ProjectPanoramaSnapshotReuseService {
                 && validText(command.sessionId(), 64)
                 && validText(command.authorization(), 8192)
                 && validText(command.selectionToken(), 4096)
-                && validText(command.panoramaSnapshotId(), 64);
+                && validText(command.panoramaSnapshotId(), 64)
+                && command.scope() != null
+                && command.readMode() != null;
     }
 
     private boolean validText(String value, int maxLength) {
@@ -367,7 +371,28 @@ public class ProjectPanoramaSnapshotReuseService {
                 && snapshot.getDataComplete() != null
                 && BUSINESS_SNAPSHOT_STATUSES.contains(snapshot.getStatus())
                 && snapshot.getExpiresAt() != null
-                && snapshot.getExpiresAt().isAfter(now);
+                && snapshot.getExpiresAt().isAfter(now)
+                && withinReadWindow(
+                snapshot,
+                command.readMode(),
+                grant.ttlMinutes(),
+                now
+        );
+    }
+
+    /**
+     * 明确历史引用只要求仍在保留期内，普通追问还要求业务事实仍然新鲜。
+     */
+    private boolean withinReadWindow(
+            BusinessSnapshot snapshot,
+            SnapshotReadMode readMode,
+            int ttlMinutes,
+            LocalDateTime now) {
+        if (readMode == SnapshotReadMode.REUSE_SNAPSHOT) {
+            return true;
+        }
+        return snapshot.getCompletedAt() != null
+                && snapshot.getCompletedAt().plusMinutes(ttlMinutes).isAfter(now);
     }
 
     @SuppressWarnings("unchecked")
@@ -478,6 +503,8 @@ public class ProjectPanoramaSnapshotReuseService {
             Map<String, Object> secureContext,
             String selectionToken,
             String panoramaSnapshotId,
+            ProjectPanoramaPlan.Scope scope,
+            SnapshotReadMode readMode,
             Map<String, Object> canonicalQuery) {
 
         @SuppressWarnings("unchecked")
@@ -497,6 +524,8 @@ public class ProjectPanoramaSnapshotReuseService {
                     + ", secureContextSize=" + secureContext.size()
                     + ", selectionTokenPresent=" + StringUtils.hasText(selectionToken)
                     + ", panoramaSnapshotPresent=" + StringUtils.hasText(panoramaSnapshotId)
+                    + ", analysisMode=" + (scope == null ? null : scope.mode())
+                    + ", readMode=" + readMode
                     + ", canonicalQuerySize=" + canonicalQuery.size() + ']';
         }
     }

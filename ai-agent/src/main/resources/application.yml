@@ -120,9 +120,6 @@ app:
     knowledge-query-days: 180
     audit-days: 365
   agent:
-    legacy-direct-chat:
-      # 旧版模型直连接口默认关闭，紧急回滚时才临时开启。
-      enabled: ${LEGACY_DIRECT_CHAT_ENABLED:false}
     stream:
       # 单次SSE连接最长保留3分钟
       timeout-ms: 180000

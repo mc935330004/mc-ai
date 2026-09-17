@@ -320,14 +320,16 @@ public class BusinessAssistantReportService {
             BusinessReportPlanService.PlannedReport planned) {
         CompositeReportTask task = reportTaskService.create(
                 new CompositeReportTaskService.CreateCommand(
-                        identity.userId(), identity.sessionId(), identity.authorization(),
-                        planned, canonicalQuery, LocalDateTime.now().plusHours(24), 3
+                        identity.userId(), identity.sessionId(), identity.agentRunId(),
+                        identity.authorization(), planned, canonicalQuery,
+                        LocalDateTime.now().plusHours(24), 3
                 )
         );
+        // 页面、历史消息和下载任务共同绑定同一份冻结逻辑报告版本。
         return new ArtifactBlock(
                 "report_artifact", "报告文件", 100, BlockStatus.PENDING, BlockSource.SYSTEM,
                 task.getTaskId(), normalizeFormat(format), "", task.getStatus(), task.getExpiresAt(),
-                false, "报告已进入生成队列"
+                task.getFrozenAt(), task.getContentVersion(), false, "报告已进入生成队列"
         );
     }
 

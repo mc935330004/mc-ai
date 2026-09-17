@@ -1,9 +1,11 @@
 package org.example.ai.agent.business.report;
 
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.example.ai.agent.business.dataset.BusinessFactSanitizer;
+import org.example.ai.agent.business.dataset.ReportDatasetValidator;
 import org.example.ai.agent.business.dataset.entity.ReportDataset;
 import org.example.ai.agent.business.dataset.entity.ReportDatasetField;
 import org.example.ai.agent.business.dataset.mapper.ReportDatasetFieldMapper;
@@ -18,6 +20,7 @@ import org.example.ai.agent.business.report.CompositeReportTaskService.ArtifactM
 import org.example.ai.agent.business.report.entity.CompositeReportSection;
 import org.example.ai.agent.business.report.entity.CompositeReportTask;
 import org.example.ai.agent.business.report.mapper.CompositeReportTaskMapper;
+import org.example.ai.agent.business.report.model.LogicalReportDocument;
 import org.example.ai.agent.business.report.model.LogicalReportDocument.SectionState;
 import org.example.ai.agent.business.report.model.LogicalReportDocument.SourceDisclosure;
 import org.example.ai.agent.business.report.model.LogicalReportDocument.StatusSection;
@@ -25,6 +28,7 @@ import org.example.ai.agent.business.snapshot.entity.BusinessSnapshot;
 import org.example.ai.agent.business.snapshot.entity.BusinessSnapshotItem;
 import org.example.ai.agent.business.snapshot.mapper.BusinessSnapshotItemMapper;
 import org.example.ai.agent.business.snapshot.mapper.BusinessSnapshotMapper;
+import org.example.ai.agent.chat.support.ContentHashUtils;
 import org.example.ai.agent.common.file.SafeArtifactStorageService;
 import org.example.ai.agent.common.file.SafeArtifactStorageService.StoredArtifact;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -34,7 +38,7 @@ import org.springframework.util.StringUtils;
 
 import java.io.IOException;
 import java.nio.file.Path;
-import java.time.OffsetDateTime;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
@@ -72,7 +76,7 @@ public class BusinessReportFileHandler implements CompositeReportWorker.ReportFi
     private static final String EXPORT_CHANNEL = "export";
     private static final String FACTS_ERROR = "报告快照事实结构不合法";
     private static final String SOURCE_REFERENCE = "安全快照导出事实";
-    private static final int MAX_SECTIONS = 32;
+    private static final int MAX_SECTIONS = 64;
 
     private final CompositeReportTaskMapper taskMapper;
     private final BusinessSnapshotMapper snapshotMapper;
@@ -144,33 +148,108 @@ public class BusinessReportFileHandler implements CompositeReportWorker.ReportFi
     }
 
     @Override
-    public ArtifactMetadata generate(
-            String taskId,
-            String format,
-            String targetPath,
-            List<CompositeReportSection> sections) {
+    public ArtifactMetadata generate(String taskId, String format, String targetPath, List<CompositeReportSection> sections) {
         CompositeReportTask task = taskMapper.selectByTaskId(taskId);
-        if (task == null) {
-            throw new IllegalStateException("报告任务不存在");
-        }
-        if (sections == null || sections.isEmpty() || sections.size() > MAX_SECTIONS) {
-            throw new IllegalStateException("报告章节数量不合法");
-        }
-        ReportRenderer renderer = renderers.get(
-                String.valueOf(format).toUpperCase(Locale.ROOT)
-        );
+        validateTask(task);
+        validateSections(sections);
+        ReportRenderer renderer = renderers.get(String.valueOf(format).toUpperCase(Locale.ROOT));
         if (renderer == null) {
             throw new IllegalStateException("报告格式不受支持");
         }
-        byte[] content = renderer.render(assembler.assemble(collect(task, sections)));
+        // 异步阶段只读取创建任务时冻结的逻辑报告，不再读取业务快照和字段配置。
+        byte[] content = renderer.render(readFrozenDocument(task, sections));
         try {
             StoredArtifact stored = storage.store(targetPath, content);
-            return new ArtifactMetadata(
-                    stored.relativePath(), stored.fileName(),
-                    renderer.mimeType(), stored.fileSize(), stored.checksum()
-            );
+            return new ArtifactMetadata(stored.relativePath(), stored.fileName(), renderer.mimeType(),
+                    stored.fileSize(), stored.checksum());
         } catch (IOException exception) {
             throw new IllegalStateException("报告文件写入失败", exception);
+        }
+    }
+
+    /**
+     * 创建报告任务时冻结安全逻辑报告。
+     *
+     * 这里允许读取业务快照和字段配置；任务进入异步队列后只能读取冻结JSON。
+     */
+    public FrozenReport freeze(CompositeReportTask task, List<CompositeReportSection> sections) {
+        validateTask(task);
+        validateSections(sections);
+
+        LogicalReportDocument document = assembler.assemble(collect(task, sections));
+        String logicalReportJson = writeDocument(document);
+        String contentVersion = contentVersion(task, sections, logicalReportJson);
+        return new FrozenReport(contentVersion, logicalReportJson);
+    }
+
+    /** 校验并读取冻结报告，发现任务内容和来源引用不一致时失败关闭。 */
+    private LogicalReportDocument readFrozenDocument(CompositeReportTask task, List<CompositeReportSection> sections) {
+        if (!StringUtils.hasText(task.getContentVersion())
+                || !StringUtils.hasText(task.getLogicalReportJson())
+                || task.getFrozenAt() == null) {
+            throw new IllegalStateException("报告任务缺少冻结逻辑报告");
+        }
+
+        String actualVersion = contentVersion(task, sections, task.getLogicalReportJson());
+        if (!Objects.equals(task.getContentVersion(), actualVersion)) {
+            throw new IllegalStateException("冻结逻辑报告内容版本不一致");
+        }
+
+        try {
+            return objectMapper.readValue(task.getLogicalReportJson(), LogicalReportDocument.class);
+        } catch (JsonProcessingException exception) {
+            throw new IllegalStateException("冻结逻辑报告结构不合法", exception);
+        }
+    }
+
+    private String writeDocument(LogicalReportDocument document) {
+        try {
+            return objectMapper.writeValueAsString(document);
+        } catch (JsonProcessingException exception) {
+            throw new IllegalStateException("逻辑报告冻结失败", exception);
+        }
+    }
+
+    /** 内容版本同时绑定回答运行、逻辑报告和全部安全快照引用。 */
+    private String contentVersion(CompositeReportTask task, List<CompositeReportSection> sections,
+                                  String logicalReportJson) {
+        Map<String, Object> material = new LinkedHashMap<>();
+        material.put("sourceRunId", task.getSourceRunId());
+        material.put("logicalReportHash", ContentHashUtils.sha256(logicalReportJson));
+        material.put("sections", ordered(sections).stream().map(this::sectionVersionMaterial).toList());
+        return ContentHashUtils.sha256(
+                ReportDatasetValidator.canonicalSafeValue(
+                        ReportDatasetValidator.freezeSafeValue(material)
+                )
+        );
+    }
+
+    private Map<String, Object> sectionVersionMaterial(CompositeReportSection section) {
+        Map<String, Object> material = new LinkedHashMap<>();
+        material.put("datasetCode", section.getDatasetCode());
+        material.put("snapshotId", Objects.toString(section.getSnapshotId(), ""));
+        material.put("fieldPolicyChecksum", section.getFieldPolicyChecksum());
+        material.put("status", section.getStatus());
+        material.put("displayOrder", section.getDisplayOrder());
+        material.put("safeMessage", Objects.toString(section.getSafeMessage(), ""));
+        return material;
+    }
+
+    private void validateTask(CompositeReportTask task) {
+        if (task == null) {
+            throw new IllegalStateException("报告任务不存在");
+        }
+        if (!StringUtils.hasText(task.getTaskId()) || !StringUtils.hasText(task.getSourceRunId())) {
+            throw new IllegalStateException("报告任务缺少来源回答标识");
+        }
+        if (task.getFrozenAt() == null) {
+            throw new IllegalStateException("报告任务缺少冻结时间");
+        }
+    }
+
+    private void validateSections(List<CompositeReportSection> sections) {
+        if (sections == null || sections.isEmpty() || sections.size() > MAX_SECTIONS) {
+            throw new IllegalStateException("报告章节数量不合法");
         }
     }
 
@@ -207,8 +286,8 @@ public class BusinessReportFileHandler implements CompositeReportWorker.ReportFi
                 .allMatch(section -> section.state() == SectionState.SUCCESS);
         return new ReportInput(
                 reportTitle(task),
-                "report-" + task.getTaskId(),
-                OffsetDateTime.now(),
+                reportFileStem(task),
+                task.getFrozenAt().atZone(ZoneId.systemDefault()).toOffsetDateTime(),
                 sources,
                 List.copyOf(associationLabels),
                 metricFacts,
@@ -458,6 +537,18 @@ public class BusinessReportFileHandler implements CompositeReportWorker.ReportFi
                 : "业务章节";
     }
 
+    /** 文件名只表达报告主体类型，不混入任务ID、主体编号或其他敏感信息。 */
+    private static String reportFileStem(CompositeReportTask task) {
+        String subjectType = StringUtils.hasText(task.getSubjectType())
+                ? task.getSubjectType().trim().toUpperCase(Locale.ROOT) : "";
+        return switch (subjectType) {
+            case "PROJECT" -> "项目业务数据报告";
+            case "PERSON" -> "人员业务数据报告";
+            case "DEPARTMENT" -> "部门业务数据报告";
+            default -> "业务数据报告";
+        };
+    }
+
     /** 标题只由主体类型枚举生成，不拼装主体名称或编码。 */
     private static String reportTitle(CompositeReportTask task) {
         String subjectType = StringUtils.hasText(task.getSubjectType())
@@ -483,5 +574,16 @@ public class BusinessReportFileHandler implements CompositeReportWorker.ReportFi
             case "TIMEOUT" -> SectionState.TIMEOUT;
             default -> SectionState.FAILED;
         };
+    }
+
+    /** 创建任务时生成的冻结报告内容。 */
+    public record FrozenReport(String contentVersion, String logicalReportJson) {
+        public FrozenReport {
+            if (!StringUtils.hasText(contentVersion)
+                    || !contentVersion.matches("[0-9a-f]{64}")
+                    || !StringUtils.hasText(logicalReportJson)) {
+                throw new IllegalArgumentException("冻结报告内容不合法");
+            }
+        }
     }
 }

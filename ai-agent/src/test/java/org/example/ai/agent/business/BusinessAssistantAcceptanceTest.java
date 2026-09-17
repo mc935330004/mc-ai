@@ -11,6 +11,7 @@ import org.example.ai.agent.business.dataset.entity.ReportDataset;
 import org.example.ai.agent.business.dataset.model.DatasetExecutionRequest;
 import org.example.ai.agent.business.dataset.model.DatasetExecutionResult;
 import org.example.ai.agent.business.dataset.model.DatasetExecutionSource;
+import org.example.ai.agent.business.metric.ProjectMetricReadService;
 import org.example.ai.agent.business.model.AssociationType;
 import org.example.ai.agent.business.model.BusinessSubjectType;
 import org.example.ai.agent.business.model.DatasetExecutionStatus;
@@ -66,7 +67,11 @@ import org.springframework.context.annotation.ClassPathScanningCandidateComponen
 import org.springframework.core.type.filter.AssignableTypeFilter;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.prompt.ChatOptions;
+import org.example.ai.agent.business.metric.BusinessMetricCatalogService.MetricOption;
+import org.example.ai.agent.common.enums.protocol.ValueType;
+import org.example.ai.agent.common.model.ProjectRelationship;
 
+import static org.mockito.ArgumentMatchers.eq;
 import java.math.BigDecimal;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
@@ -118,13 +123,98 @@ class BusinessAssistantAcceptanceTest {
 
         facade.handle("我的项目");
 
-        assertThat(facade.savedJson()).contains(
-                "SUBJECT_CANDIDATES", PROJECT_CODE, "XXXT2674050", "选择凭证"
-        );
-        verify(facade.panoramaExecution, never()).execute(any(), any());
+        assertThat(facade.savedJson())
+                .contains("SUBJECT_CANDIDATES", PROJECT_CODE, "XXXT2674050", "分析此项目", "我负责", "进行中")
+                .doesNotContain("选择凭证");
+        verify(facade.panoramaExecution, never()).execute(any(), any(), any());
         verify(facade.personQuery, never()).query(any());
     }
+    @Test
+    void a03SingleMetricOnlyReturnsPersonnelExpenseAndSkipsPanorama() {
+        FacadeHarness facade = new FacadeHarness();
 
+        String question =
+                "查询 XXXT2674040 项目概算中人员费用已用金额";
+
+        facade.intents(new BusinessQueryIntent(
+                BusinessSubjectType.PROJECT,
+                PROJECT_CODE,
+                null,
+                null,
+                null,
+                null,
+                null,
+                List.of("BUDGET"),
+                false,
+                null,
+                false,
+                false,
+                true
+        ));
+
+        when(facade.projects.search(any()))
+                .thenReturn(new SubjectDirectoryPage(
+                        true,
+                        List.of(project("project-1", PROJECT_CODE)),
+                        1,
+                        20,
+                        1,
+                        false
+                ));
+
+        MetricOption metric = new MetricOption(
+                "PROJECT_BUDGET",
+                "项目概算",
+                "personnelExpenseUsed",
+                "人员费用已用金额",
+                ValueType.AMOUNT,
+                "元"
+        );
+
+        when(facade.projectMetricReadService.execute(
+                any(ProjectPanoramaCommand.class),
+                eq(List.of("BUDGET")),
+                eq(question)
+        )).thenReturn(new ProjectMetricReadService.Result(
+                metric,
+                DatasetExecutionStatus.SUCCESS,
+                true,
+                Map.of(
+                        "personnelExpenseUsed",
+                        new BigDecimal("125000.00")
+                ),
+                Map.of(),
+                "数据查询完成"
+        ));
+
+        facade.handle(question);
+
+        String responseJson = facade.savedJson();
+
+        assertThat(responseJson)
+                .contains(
+                        "PROJECT_BUDGET",
+                        "人员费用已用金额",
+                        "personnelExpenseUsed",
+                        "125000.00",
+                        "元"
+                )
+                .doesNotContain(
+                        "contractAmount",
+                        "cashFlow",
+                        "paymentAmount"
+                );
+
+        verify(facade.projectMetricReadService).execute(
+                any(ProjectPanoramaCommand.class),
+                eq(List.of("BUDGET")),
+                eq(question)
+        );
+
+        // 单指标查询不能执行整套项目全景。
+        verify(facade.panoramaExecution, never())
+                .execute(any(), any(), any());
+    }
     @Test
     void exactProjectPanoramaKeepsDeterministicModuleStatesAndDisclosesPartialResult() {
         ProjectSubjectAuthorizationService authorization = mock(ProjectSubjectAuthorizationService.class);
@@ -171,6 +261,8 @@ class BusinessAssistantAcceptanceTest {
         ProjectPanoramaResult result = service.execute(new ProjectPanoramaCommand(
                 "run-1", USER_ID, SESSION_ID, "Bearer current-user", Map.of(),
                 "project-token", Map.of("projectCode", PROJECT_CODE)
+        ), new ProjectPanoramaPlan.Scope(
+                ProjectPanoramaPlan.AnalysisMode.DEEP, List.of()
         ), ignored -> { });
 
         assertThat(result.state()).isEqualTo(PanoramaExecutionState.PARTIAL_SUCCESS);
@@ -293,6 +385,8 @@ class BusinessAssistantAcceptanceTest {
         task.setFormat("PDF");
         task.setStatus("PENDING");
         task.setExpiresAt(LocalDateTime.now().plusHours(1));
+        task.setFrozenAt(LocalDateTime.of(2026, 9, 17, 10, 0));
+        task.setContentVersion("a".repeat(64));
         when(tasks.create(any())).thenReturn(task);
         BusinessAssistantReportService reports = new BusinessAssistantReportService(
                 tokens, datasets, validation, tasks
@@ -325,6 +419,7 @@ class BusinessAssistantAcceptanceTest {
         ArgumentCaptor<CompositeReportTaskService.CreateCommand> command =
                 ArgumentCaptor.forClass(CompositeReportTaskService.CreateCommand.class);
         verify(tasks).create(command.capture());
+        assertThat(command.getValue().sourceRunId()).isEqualTo("run-1");
         assertThat(command.getValue().plannedReport().plan().format()).isEqualTo("PDF");
         assertThat(command.getValue().plannedReport().plan().dataComplete()).isFalse();
         assertThat(command.getValue().canonicalQuery()).containsEntry("projectCode", PROJECT_CODE);
@@ -587,7 +682,8 @@ class BusinessAssistantAcceptanceTest {
 
     private AuthorizedSubjectCandidate project(String id, String code) {
         return new AuthorizedSubjectCandidate(
-                BusinessSubjectType.PROJECT, id, code + " 项目", null, null, code, "DELIVERY"
+                BusinessSubjectType.PROJECT, id, code + " 项目", null, null, code, "DELIVERY",
+                ProjectRelationship.RESPONSIBLE, "进行中"
         );
     }
 
@@ -651,6 +747,8 @@ class BusinessAssistantAcceptanceTest {
                 mock(ReportDatasetExecutionService.class);
         private final DatasetExecutionProofVerifier periodProofVerifier =
                 mock(DatasetExecutionProofVerifier.class);
+        private final ProjectMetricReadService projectMetricReadService =
+                mock(ProjectMetricReadService.class);
         private final org.example.ai.agent.business.person.ProjectPeriodContextService projectPeriod;
         private final DepartmentBusinessQueryService departmentQuery = mock(DepartmentBusinessQueryService.class);
         private final ReportDatasetService datasets = mock(ReportDatasetService.class);
@@ -708,13 +806,32 @@ class BusinessAssistantAcceptanceTest {
                 accumulator.setDataComplete(invocation.getArgument(0));
                 return null;
             }).when(stream).setResponseDataComplete(org.mockito.ArgumentMatchers.anyBoolean());
+            org.example.ai.agent.business.security.BusinessResponseAccessService responseAccessService =
+                    mock(org.example.ai.agent.business.security.BusinessResponseAccessService.class);
+            org.example.ai.agent.business.policy.BusinessPolicyComparisonService policyComparisonService =
+                    mock(org.example.ai.agent.business.policy.BusinessPolicyComparisonService.class);
+            when(responseAccessService.bind(any(), any(), any())).thenAnswer(invocation ->
+                    objectMapper.writeValueAsString(invocation.getArgument(0))
+            );
             service = new org.example.ai.agent.business.impl.BusinessAssistantServiceImpl(
-                    intents, subjects, panoramaExecution, panoramaReuse,
-                    personQuery, new PersonDatasetSelectionService(),
-                    new PersonDatasetPlanService(objectMapper), projectPeriod,
+                    intents,
+                    subjects,
+                    panoramaExecution,
+                    panoramaReuse,
+                    personQuery,
+                    new PersonDatasetSelectionService(),
+                    new PersonDatasetPlanService(objectMapper),
+                    projectPeriod,
                     departmentQuery,
-                    datasets, new DeterministicBusinessAnswerComposer(answerModel), reportService,
-                    conversationState, chatSession, objectMapper
+                    datasets,
+                    new DeterministicBusinessAnswerComposer(answerModel),
+                    reportService,
+                    conversationState,
+                    chatSession,
+                    projectMetricReadService,
+                    responseAccessService,
+                    policyComparisonService,
+                    objectMapper
             );
         }
 

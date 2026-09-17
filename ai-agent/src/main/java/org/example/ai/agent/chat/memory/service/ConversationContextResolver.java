@@ -6,9 +6,9 @@ import org.example.ai.agent.chat.entity.AgentRequest;
 import org.example.ai.agent.chat.memory.model.BusinessConversationState;
 import org.example.ai.agent.chat.memory.model.ConversationRewriteDecision;
 import org.example.ai.agent.chat.memory.model.ResultStatisticsContext;
+import org.example.ai.agent.common.enums.SnapshotReadMode;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
-import org.example.ai.agent.chat.support.ReportRequestDetector;
 
 import java.time.LocalDateTime;
 import java.util.LinkedHashMap;
@@ -29,28 +29,30 @@ public class ConversationContextResolver {
     private final ConversationContextRewriteService rewriteService;
 
     private final ConversationStateService  conversationStateService;
+
     /**
-     * 明确引用上一轮查询结果的表达。
-     *
-     * 这里只作为模型分类失败时的确定性兜底，
-     * 其他自然语言仍然交给上下文分类模型判断。
+     * 明确引用历史查询结果的表达。
      */
-    private static final List<String> RESULT_REFERENCE_MARKERS =
-            List.of(
-                    "上面的",
-                    "上述的",
-                    "刚才的",
-                    "上面的数据",
-                    "上面数据",
-                    "上述数据",
-                    "上述结果",
-                    "刚才的数据",
-                    "刚才的结果",
-                    "上一轮数据",
-                    "上一轮结果",
-                    "这些数据",
-                    "这些结果"
-            );
+    private static final List<String> RESULT_REFERENCE_MARKERS = List.of(
+            "上面的",
+            "上述的",
+            "刚才的",
+            "上次的",
+            "上面的数据",
+            "上面数据",
+            "上述数据",
+            "上述结果",
+            "刚才的数据",
+            "刚才的结果",
+            "上次结果",
+            "上一次结果",
+            "上一轮数据",
+            "上一轮结果",
+            "之前的结果",
+            "历史结果",
+            "这些数据",
+            "这些结果"
+    );
 
     /**
      * 可以直接基于上一轮快照处理的问题表达。
@@ -75,7 +77,10 @@ public class ConversationContextResolver {
                     "占比",
                     "排序",
                     "筛选",
-                    "分析"
+                    "分析",
+                    "导出",
+                    "生成报告",
+                    "下载报告"
             );
     /**
      * 用户明确要求丢弃旧业务上下文时，清理旧项目和查询状态。
@@ -111,7 +116,18 @@ public class ConversationContextResolver {
 
     private static final List<String> RESULT_ANALYSIS_MARKERS = List.of("继续分析", "接着分析", "再分析一下", "为什么有风险", "为什么不规范", "为什么异常");
 
-    private static final List<String> REFRESH_MARKERS = List.of("刷新数据", "重新查询", "重新查一下", "获取最新数据");
+    /**
+     * 只有明确要求最新数据时才强制重新查询。
+     */
+    private static final List<String> FORCE_LIVE_MARKERS = List.of(
+            "刷新数据",
+            "重新查询",
+            "重新查一下",
+            "获取最新数据",
+            "按最新数据",
+            "查询最新数据",
+            "使用最新数据"
+    );
 
     /**
      * 解析当前问题与上一轮业务状态的关系。
@@ -123,7 +139,8 @@ public class ConversationContextResolver {
         }
 
         String question = request.getUserQuestion().trim();
-
+        // 读取模式只根据当前用户原始问题确定，不能由模型或前端覆盖。
+        request.setSnapshotReadMode(resolveReadMode(question));
         if (isContextReset(question)) {
             return resetContext(request, question);
         }
@@ -139,7 +156,7 @@ public class ConversationContextResolver {
         if (state == null) {
             return null;
         }
-        boolean hasPendingReportFollowUp =state.getPendingReportFollowUp() != null;
+        boolean hasPendingReportFollowUp = state.getPendingReportFollowUp() != null;
         /*
          * 明确指代优先使用后端确定性规则，
          * 不依赖上下文分类模型是否可用。
@@ -202,12 +219,11 @@ public class ConversationContextResolver {
      */
     private String resolveDeterministicReference(AgentRequest request, BusinessConversationState state, String question) {
 
-        boolean freshQuery = ReportRequestDetector.isExplicitRequest(question)
-                || containsAny(question, REFRESH_MARKERS);
+        boolean forceLive = request.getSnapshotReadMode() == SnapshotReadMode.FORCE_LIVE;
 
         // 要求重新查询时，不允许短追问规则提前复用旧统计结果。
         ResultStatisticsContext statistics = state.getLastStatisticsContext();
-        if (!freshQuery
+        if (!forceLive
                 && statistics != null
                 && statistics.matchesArtifact(state.getResultArtifactId())
                 && statistics.resolveShortOperation(question) != null) {
@@ -216,7 +232,7 @@ public class ConversationContextResolver {
             return question;
         }
 
-        if (!freshQuery
+        if (!forceLive
                 && isExplicitResultFollowUp(question)
                 && StringUtils.hasText(state.getResultArtifactId())) {
             applyState(request, state);
@@ -289,7 +305,7 @@ public class ConversationContextResolver {
             );
         }
 
-        if (freshQuery) {
+        if (forceLive) {
             return completeDeterministicResolution(
                     request, state, question, List.of()
             );
@@ -326,9 +342,8 @@ public class ConversationContextResolver {
      */
     private String completeDeterministicResolution(AgentRequest request, BusinessConversationState state, String rewrittenQuestion, List<String> targetObjectIds) {
 
-        boolean freshQuery = ReportRequestDetector.isExplicitRequest(rewrittenQuestion)
-                        || containsAny(rewrittenQuestion, REFRESH_MARKERS);
-        if (freshQuery) {
+        boolean forceLive = request.getSnapshotReadMode() == SnapshotReadMode.FORCE_LIVE;
+        if (forceLive) {
             // 保留原查询条件和项目指代，清理依赖旧结果产生的状态。
             state.setResultArtifactId(null);
             state.setLastStatisticsContext(null);
@@ -428,8 +443,20 @@ public class ConversationContextResolver {
         return String.join("、", objectIds.stream().limit(20).toList());
     }
 
-    private boolean containsAny(String question, List<String> markers) {
+    /**
+     * 最新查询优先级最高，避免“重新分析刚才结果”错误复用旧快照。
+     */
+    private SnapshotReadMode resolveReadMode(String question) {
+        if (containsAny(question, FORCE_LIVE_MARKERS)) {
+            return SnapshotReadMode.FORCE_LIVE;
+        }
+        if (containsAny(question, RESULT_REFERENCE_MARKERS)) {
+            return SnapshotReadMode.REUSE_SNAPSHOT;
+        }
+        return SnapshotReadMode.REUSE_IF_FRESH;
+    }
 
+    private boolean containsAny(String question, List<String> markers) {
         return markers.stream().anyMatch(
                 question::contains
         );
@@ -524,7 +551,12 @@ public class ConversationContextResolver {
         request.setPreviousWorkflowCode(state.getWorkflowCode());
         request.setPreviousCapabilityCode(state.getCapabilityCode());
         Map<String, Object> lastInput = state.getLastInput();
-        request.setInheritedInput(lastInput == null ? new LinkedHashMap<>() : new LinkedHashMap<>(lastInput));
+        Map<String, Object> inheritedInput = lastInput == null ? new LinkedHashMap<>() : new LinkedHashMap<>(lastInput);
+        // 来源运行只从服务端会话状态继承，不接受前端直接指定。
+        if (StringUtils.hasText(state.getLastRunId())) {
+            inheritedInput.put("sourceRunId", state.getLastRunId().trim());
+        }
+        request.setInheritedInput(inheritedInput);
         request.setResultArtifactId(state.getResultArtifactId());
         ResultStatisticsContext statistics = state.getLastStatisticsContext();
         // 不把其他快照的统计字段带入本轮请求。

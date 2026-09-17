@@ -563,6 +563,22 @@ class BusinessSnapshotServiceTest {
         assertThat(snapshot.getExpiresAt()).isEqualTo(NOW.plusMinutes(12));
     }
 
+    /**
+     * 数据集TTL只控制新鲜期，小型安全事实最长保留24小时供明确历史引用。
+     */
+    @Test
+    void shouldRetainInlineSnapshotForGlobalRetentionPeriod() {
+        stubCurrentConfiguration(10);
+        stubSuccessfulInsert();
+        when(workflowRunMapper.selectOne(any())).thenReturn(workflowRun("SUCCESS"));
+
+        BusinessSnapshot snapshot = service.create(command(
+                query(), List.of(item(successResult(query(), "run-1", null)))
+        ));
+
+        assertThat(snapshot.getExpiresAt()).isEqualTo(NOW.plusHours(24));
+    }
+
     @Test
     void shouldRejectInvalidLengthsAndChecksumsBeforeInsert() {
         ReportDataset invalid = dataset(120);

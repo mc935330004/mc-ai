@@ -189,6 +189,10 @@ class CompositeReportTaskServiceTest {
         assertThat(created.getRequestKey()).hasSize(64);
         assertThat(created.getRequestFingerprint()).hasSize(64);
         assertThat(created.getStatus()).isEqualTo("PENDING");
+        assertThat(created.getSourceRunId()).isEqualTo("run-1");
+        assertThat(created.getContentVersion()).isEqualTo(SHA);
+        assertThat(created.getLogicalReportJson()).isEqualTo("{}");
+        assertThat(created.getFrozenAt()).isEqualTo(LocalDateTime.of(2026, 9, 8, 2, 0));
         verify(taskMapper).insertTask(any());
         verify(sectionMapper, times(2)).insertSection(any());
         Method create = CompositeReportTaskService.class.getMethod(
@@ -260,6 +264,29 @@ class CompositeReportTaskServiceTest {
                 .containsExactly(captor.getAllValues().get(0).getRequestKey(),
                         captor.getAllValues().get(0).getRequestKey());
         assertThat(captor.getAllValues().get(0).toString()).doesNotContain("secret-a");
+    }
+
+    @Test
+    void newSourceRunShouldCreateIndependentReportTask() {
+        CompositeReportTaskMapper taskMapper = mock(CompositeReportTaskMapper.class);
+        CompositeReportSectionMapper sectionMapper = mock(CompositeReportSectionMapper.class);
+        ArgumentCaptor<CompositeReportTask> captor = ArgumentCaptor.forClass(CompositeReportTask.class);
+        when(taskMapper.selectByRequestKey(any())).thenReturn(null);
+        when(taskMapper.insertTask(any())).thenReturn(1);
+        when(sectionMapper.insertSection(any())).thenReturn(1);
+        CompositeReportTaskService service = taskService(taskMapper, sectionMapper);
+        CompositeReportTaskService.CreateCommand current = createCommand();
+        CompositeReportTaskService.CreateCommand latest = new CompositeReportTaskService.CreateCommand(
+                current.userId(), current.sessionId(), "run-2", current.authorization(),
+                current.plannedReport(), current.canonicalQuery(), current.expiresAt(), current.maxAttempts()
+        );
+
+        service.create(current);
+        service.create(latest);
+
+        verify(taskMapper, times(2)).insertTask(captor.capture());
+        assertThat(captor.getAllValues()).extracting(CompositeReportTask::getRequestKey)
+                .doesNotHaveDuplicates();
     }
 
     @Test
@@ -398,7 +425,7 @@ class CompositeReportTaskServiceTest {
         );
         CompositeReportTaskService.CreateCommand command =
                 new CompositeReportTaskService.CreateCommand(
-                        "user-1", "session-1", null, new PlannedReport(unsafe, SHA),
+                        "user-1", "session-1", "run-1", null, new PlannedReport(unsafe, SHA),
                         Map.of("year", 2026),
                         LocalDateTime.of(2026, 9, 9, 10, 0), 3
                 );
@@ -423,7 +450,7 @@ class CompositeReportTaskServiceTest {
         );
         CompositeReportTaskService.CreateCommand command =
                 new CompositeReportTaskService.CreateCommand(
-                        "user-1", "session-1", null, new PlannedReport(unsafe, SHA),
+                        "user-1", "session-1", "run-1", null, new PlannedReport(unsafe, SHA),
                         Map.of("year", 2026),
                         LocalDateTime.of(2026, 9, 9, 10, 0), 3
                 );
@@ -437,7 +464,11 @@ class CompositeReportTaskServiceTest {
     private CompositeReportTaskService taskService(
             CompositeReportTaskMapper taskMapper,
             CompositeReportSectionMapper sectionMapper) {
-        return new CompositeReportTaskService(taskMapper, sectionMapper, CLOCK);
+        BusinessReportFileHandler fileHandler = mock(BusinessReportFileHandler.class);
+        when(fileHandler.freeze(any(), any())).thenReturn(
+                new BusinessReportFileHandler.FrozenReport(SHA, "{}")
+        );
+        return new CompositeReportTaskService(taskMapper, sectionMapper, fileHandler, CLOCK);
     }
 
     private CompositeReportTaskService.CreateCommand createCommand() {
@@ -472,7 +503,7 @@ class CompositeReportTaskServiceTest {
                 false
         );
         return new CompositeReportTaskService.CreateCommand(
-                "user-1", "session-1", authorization,
+                "user-1", "session-1", "run-1", authorization,
                 new PlannedReport(plan, templateChecksum), query,
                 LocalDateTime.of(2026, 9, 9, 10, 0), 3
         );
@@ -507,7 +538,7 @@ class CompositeReportTaskServiceTest {
                 dataComplete
         );
         return new CompositeReportTaskService.CreateCommand(
-                "user-1", "session-1", "Bearer secret",
+                "user-1", "session-1", "run-1", "Bearer secret",
                 new PlannedReport(plan, SHA), Map.of("year", 2026),
                 LocalDateTime.of(2026, 9, 9, 10, 0), 3
         );

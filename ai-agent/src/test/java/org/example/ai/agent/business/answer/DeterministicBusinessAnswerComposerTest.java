@@ -5,6 +5,7 @@ import org.example.ai.agent.business.answer.DeterministicBusinessAnswerComposer.
 import org.example.ai.agent.business.answer.DeterministicBusinessAnswerComposer.ComposeCommand;
 import org.example.ai.agent.business.answer.DeterministicBusinessAnswerComposer.DatasetAnswerInput;
 import org.example.ai.agent.business.answer.DeterministicBusinessAnswerComposer.MetricDefinition;
+import org.example.ai.agent.business.answer.DeterministicBusinessAnswerComposer.RowActionDefinition;
 import org.example.ai.agent.business.answer.DeterministicBusinessAnswerComposer.TableDefinition;
 import org.example.ai.agent.business.model.DatasetExecutionStatus;
 import org.example.ai.agent.business.panorama.model.IssueMatchStatus;
@@ -12,6 +13,7 @@ import org.example.ai.agent.business.panorama.model.ProjectIssueResult;
 import org.example.ai.agent.chat.protocol.block.ArtifactBlock;
 import org.example.ai.agent.chat.protocol.block.ResponseBlock;
 import org.example.ai.agent.chat.protocol.block.StatusListBlock;
+import org.example.ai.agent.chat.protocol.block.TableBlock;
 import org.example.ai.agent.chat.protocol.response.AiResponse;
 import org.example.ai.agent.chat.protocol.response.ResponseContext;
 import org.example.ai.agent.chat.protocol.response.ResponseMeta;
@@ -60,7 +62,7 @@ class DeterministicBusinessAnswerComposerTest {
     private final ObjectMapper objectMapper = new ObjectMapper().findAndRegisterModules();
 
     @Test
-    void protocolRoundTripsNewBlocksAndKeepsV1HistoryCompatible() throws Exception {
+    void protocolRoundTripsCurrentBlocks() throws Exception {
         ResponseContext context = context();
         StatusListBlock status = statusBlock();
         ArtifactBlock artifact = artifact("COMPLETED", BlockStatus.READY);
@@ -75,24 +77,25 @@ class DeterministicBusinessAnswerComposerTest {
         assertThat(context.subjectId()).isEqualTo("P-1001");
         assertThat(status.type()).isEqualTo(BlockType.STATUS_LIST);
         assertThat(artifact.type()).isEqualTo(BlockType.ARTIFACT);
+        assertThat(artifactJson).contains("\"contentVersion\":\"" + "a".repeat(64), "\"frozenAt\"");
+    }
 
-        AiResponse legacy = objectMapper.readValue("""
-                {
-                  "schemaVersion":1,
-                  "responseId":"response-1",
-                  "runId":"run-1",
-                  "conversationId":"conversation-1",
-                  "mode":"CHAT",
-                  "status":"COMPLETED",
-                  "dataComplete":true,
-                  "blocks":[],
-                  "references":[],
-                  "meta":{}
-                }
-                """, AiResponse.class);
-
-        assertThat(legacy.schemaVersion()).isEqualTo(1);
-        assertThat(legacy.context()).isNull();
+    @Test
+    void chatRejectsNonCurrentSchemaVersion() {
+        assertThatThrownBy(() -> new AiResponse(
+                1,
+                "response-1",
+                "run-1",
+                "conversation-1",
+                PresentationMode.CHAT,
+                ResponseStatus.COMPLETED,
+                true,
+                context(),
+                List.of(),
+                List.of(),
+                ResponseMeta.empty()
+        )).isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("CHAT回答协议版本必须是2");
     }
 
     @Test
@@ -400,10 +403,17 @@ class DeterministicBusinessAnswerComposerTest {
         )) {
             assertThatThrownBy(() -> new ArtifactBlock(
                     "artifact", "报告", 1, BlockStatus.READY, BlockSource.SYSTEM,
-                    "task-1", "XLSX", fileName, "SUCCESS", null, true, "已完成"
+                    "task-1", "XLSX", fileName, "SUCCESS", null,
+                    LocalDateTime.of(2026, 9, 3, 9, 0), "a".repeat(64), true, "已完成"
             )).isInstanceOf(IllegalArgumentException.class)
                     .hasMessageContaining("fileName");
         }
+        assertThatThrownBy(() -> new ArtifactBlock(
+                "artifact", "报告", 1, BlockStatus.READY, BlockSource.SYSTEM,
+                "task-1", "XLSX", "report.xlsx", "SUCCESS", null,
+                LocalDateTime.of(2026, 9, 3, 9, 0), "bad-version", true, "已完成"
+        )).isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("contentVersion");
     }
 
     @Test
@@ -471,13 +481,55 @@ class DeterministicBusinessAnswerComposerTest {
 
         ArtifactBlock conflictingArtifact = new ArtifactBlock(
                 "dataset_status", "报告", 100, BlockStatus.READY, BlockSource.SYSTEM,
-                "task-1", "XLSX", "report.xlsx", "COMPLETED", null, true, "已完成"
+                "task-1", "XLSX", "report.xlsx", "COMPLETED", null,
+                LocalDateTime.of(2026, 9, 3, 9, 0), "a".repeat(64), true, "已完成"
         );
         assertThatThrownBy(() -> composer.compose(command(
                 List.of(dataset), List.of(), List.of(), List.of(),
                 conflictingArtifact, false
         ))).isInstanceOf(IllegalArgumentException.class)
                 .hasMessageContaining("Block id重复");
+    }
+
+    /**
+     * 项目候选表格必须保留未知总数，并把选择凭证放入行操作。
+     */
+    @Test
+    void composesSubjectSelectionActionAndUnknownTotal() {
+        DeterministicBusinessAnswerComposer composer =
+                new DeterministicBusinessAnswerComposer(mock(BusinessAnswerModelService.class));
+        DatasetAnswerInput dataset = new DatasetAnswerInput(
+                "SUBJECT_CANDIDATES", "项目候选", DatasetExecutionStatus.SUCCESS, true,
+                Map.of("rows", List.of(Map.of(
+                        "displayName", "项目甲",
+                        "selectionToken", "opaque-token"
+                ))), Map.of(), "请选择项目"
+        );
+        TableDefinition table = new TableDefinition(
+                "subject_candidates", "请选择要分析的项目", "SUBJECT_CANDIDATES", "rows",
+                List.of(new ColumnDefinition("displayName", "项目名称", ValueType.TEXT, "", Tone.DEFAULT)),
+                2, 10, 0L, false, true,
+                new RowActionDefinition("SELECT_SUBJECT", "分析此项目", "selectionToken")
+        );
+
+        AiResponse response = composer.compose(command(
+                List.of(dataset), List.of(), List.of(table), List.of(), null, false
+        ));
+
+        assertThat(response.blocks()).filteredOn(TableBlock.class::isInstance).singleElement().satisfies(block -> {
+            TableBlock result = (TableBlock) block;
+            assertThat(result.totalKnown()).isFalse();
+            assertThat(result.total()).isZero();
+            assertThat(result.hasMore()).isTrue();
+            assertThat(result.pageNumber()).isEqualTo(2);
+            assertThat(result.pageSize()).isEqualTo(10);
+            assertThat(result.rows()).singleElement().satisfies(row -> {
+                assertThat(row.action().type()).isEqualTo("SELECT_SUBJECT");
+                assertThat(row.action().label()).isEqualTo("分析此项目");
+                assertThat(row.action().selectionToken()).isEqualTo("opaque-token");
+                assertThat(row.cells()).extracting("key").containsExactly("displayName");
+            });
+        });
     }
 
     @Test
@@ -502,7 +554,8 @@ class DeterministicBusinessAnswerComposerTest {
         for (String taskStatus : List.of("FAILED", "EXPIRED", "PARTIAL_SUCCESS")) {
             assertThatThrownBy(() -> new ArtifactBlock(
                     "artifact", "报告", 1, BlockStatus.READY, BlockSource.SYSTEM,
-                    "task-1", "XLSX", "report.xlsx", taskStatus, null, true, "状态异常"
+                    "task-1", "XLSX", "report.xlsx", taskStatus, null,
+                    LocalDateTime.of(2026, 9, 3, 9, 0), "a".repeat(64), true, "状态异常"
             )).isInstanceOf(IllegalArgumentException.class)
                     .hasMessageContaining("dataComplete");
         }
@@ -552,6 +605,7 @@ class DeterministicBusinessAnswerComposerTest {
                 blockStatus, BlockSource.SYSTEM,
                 "task-1", "XLSX", "项目报告.xlsx", taskStatus,
                 LocalDateTime.of(2026, 9, 3, 10, 0),
+                LocalDateTime.of(2026, 9, 3, 9, 0), "a".repeat(64),
                 "COMPLETED".equals(taskStatus), "报告任务状态"
         );
     }

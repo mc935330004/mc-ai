@@ -4,15 +4,7 @@ import org.example.ai.agent.business.model.DatasetExecutionStatus;
 import org.example.ai.agent.business.panorama.model.IssueMatchStatus;
 import org.example.ai.agent.business.panorama.model.ProjectIssueResult;
 import org.example.ai.agent.business.dataset.ReportDatasetValidator;
-import org.example.ai.agent.chat.protocol.block.ArtifactBlock;
-import org.example.ai.agent.chat.protocol.block.CalloutBlock;
-import org.example.ai.agent.chat.protocol.block.DisplayValue;
-import org.example.ai.agent.chat.protocol.block.MetricsBlock;
-import org.example.ai.agent.chat.protocol.block.ResponseBlock;
-import org.example.ai.agent.chat.protocol.block.StatusListBlock;
-import org.example.ai.agent.chat.protocol.block.TableBlock;
-import org.example.ai.agent.chat.protocol.block.TextBlock;
-import org.example.ai.agent.chat.protocol.block.WarningsBlock;
+import org.example.ai.agent.chat.protocol.block.*;
 import org.example.ai.agent.chat.protocol.response.AiResponse;
 import org.example.ai.agent.chat.protocol.response.ResponseContext;
 import org.example.ai.agent.chat.protocol.response.ResponseMeta;
@@ -217,33 +209,73 @@ public class DeterministicBusinessAnswerComposer {
         }
     }
 
+    /**
+     * 将安全展示事实转换成通用表格区块。
+     */
     private TableBlock toTableBlock(
             TableDefinition definition,
             List<?> sourceRows,
-            int tableIndex) {
-        List<TableBlock.Column> columns = definition.columns().stream()
-                .map(column -> new TableBlock.Column(
-                        column.factCode(), column.label(),
-                        column.valueType(), column.unit()
-                ))
-                .toList();
+            int tableIndex
+    ) {
+        List<TableBlock.Column> columns =
+                definition.columns().stream()
+                        .map(column ->
+                                new TableBlock.Column(
+                                        column.factCode(),
+                                        column.label(),
+                                        column.valueType(),
+                                        column.unit()
+                                )
+                        )
+                        .toList();
+
         List<TableBlock.Row> rows = new ArrayList<>();
+
         for (int index = 0; index < sourceRows.size() && rows.size() < MAX_TABLE_ROWS; index++) {
-            if (!(sourceRows.get(index) instanceof Map<?, ?> row)) {
+            Object rawRow = sourceRows.get(index);
+            if (!(rawRow instanceof Map<?, ?> sourceRow)) {
                 continue;
             }
-            List<DisplayValue> cells = definition.columns().stream()
-                    .map(column -> tableCell(column, row.get(column.factCode())))
-                    .toList();
-            rows.add(new TableBlock.Row(definition.id() + "_" + index, cells));
+            List<DisplayValue> cells = definition.columns().stream().map(column -> tableCell(column, sourceRow.get(column.factCode()))).toList();
+            rows.add(new TableBlock.Row(definition.id() + "_" + index, cells,
+                    rowAction(definition.rowAction(), sourceRow)
+            ));
         }
+
+        boolean explicitPaging = definition.total() != null;
+
+        long total = explicitPaging ? definition.total() : sourceRows.size();
+
+        boolean totalKnown = explicitPaging ? definition.totalKnown() : true;
+
+        boolean hasMore = explicitPaging
+                ? definition.hasMore()
+                  || sourceRows.size() > rows.size()
+                : sourceRows.size() > rows.size();
+
+        int pageNumber = explicitPaging
+                ? definition.pageNumber()
+                : 1;
+
+        int pageSize = explicitPaging
+                ? definition.pageSize()
+                : Math.max(rows.size(), 1);
+
         return new TableBlock(
-                definition.id(), definition.title(), TABLE_ORDER + tableIndex,
-                BlockStatus.READY, BlockSource.BUSINESS,
-                columns, rows, sourceRows.size(), sourceRows.size() > MAX_TABLE_ROWS
+                definition.id(),
+                definition.title(),
+                TABLE_ORDER + tableIndex,
+                BlockStatus.READY,
+                BlockSource.BUSINESS,
+                columns,
+                rows,
+                total,
+                hasMore,
+                totalKnown,
+                pageNumber,
+                pageSize
         );
     }
-
     private DisplayValue tableCell(ColumnDefinition column, Object raw) {
         Object value = scalarValue(raw);
         return new DisplayValue(
@@ -252,7 +284,6 @@ public class DeterministicBusinessAnswerComposer {
                 column.valueType(), column.unit(), column.tone(), List.of()
         );
     }
-
     private BusinessAnswerModelService.ModelRequest toModelRequest(ComposeCommand command) {
         List<BusinessAnswerModelService.ModelDatasetInput> datasets = command.datasets().stream()
                 .map(dataset -> new BusinessAnswerModelService.ModelDatasetInput(
@@ -265,12 +296,16 @@ public class DeterministicBusinessAnswerComposer {
         );
     }
 
+    /**
+     * 只调整产物展示顺序，冻结时间和内容版本必须原样保留。
+     */
     private ArtifactBlock withArtifactOrder(ArtifactBlock artifact) {
         return new ArtifactBlock(
                 artifact.id(), artifact.title(), ARTIFACT_ORDER,
                 artifact.status(), artifact.source(), artifact.taskId(),
                 artifact.format(), artifact.fileName(), artifact.taskStatus(),
-                artifact.expiresAt(), artifact.dataComplete(), artifact.safeMessage()
+                artifact.expiresAt(), artifact.frozenAt(), artifact.contentVersion(),
+                artifact.dataComplete(), artifact.safeMessage()
         );
     }
 
@@ -454,21 +489,118 @@ public class DeterministicBusinessAnswerComposer {
     }
 
     /**
-     * 表格定义指向displayFacts中的列表字段。
+     * 表格生成定义。
      */
     public record TableDefinition(
             String id,
             String title,
             String datasetCode,
             String factCode,
-            List<ColumnDefinition> columns) {
+            List<ColumnDefinition> columns,
+            int pageNumber,
+            int pageSize,
+            Long total,
+            boolean totalKnown,
+            boolean hasMore,
+            RowActionDefinition rowAction
+    ) {
 
         public TableDefinition {
-            id = requireText(id, "表格id不能为空");
+            id = requireText(
+                    id,
+                    "表格 id 不能为空"
+            );
+
             title = normalize(title);
-            datasetCode = requireText(datasetCode, "表格datasetCode不能为空");
-            factCode = requireText(factCode, "表格factCode不能为空");
+
+            datasetCode = requireText(
+                    datasetCode,
+                    "表格 datasetCode 不能为空"
+            );
+
+            factCode = requireText(
+                    factCode,
+                    "表格 factCode 不能为空"
+            );
+
             columns = copy(columns);
+
+            if (columns.isEmpty()) {
+                throw new IllegalArgumentException(
+                        "表格列不能为空"
+                );
+            }
+
+            if (pageNumber < 1) {
+                throw new IllegalArgumentException(
+                        "表格 pageNumber 必须大于 0"
+                );
+            }
+
+            if (pageSize < 1) {
+                throw new IllegalArgumentException(
+                        "表格 pageSize 必须大于 0"
+                );
+            }
+
+            if (total != null && total < 0) {
+                throw new IllegalArgumentException(
+                        "表格 total 不能小于 0"
+                );
+            }
+
+            if (!totalKnown
+                    && total != null
+                    && total != 0) {
+                throw new IllegalArgumentException(
+                        "未知总数时 total 必须为 0"
+                );
+            }
+        }
+
+        /**
+         * 兼容原有普通表格定义。
+         */
+        public TableDefinition(
+                String id,
+                String title,
+                String datasetCode,
+                String factCode,
+                List<ColumnDefinition> columns
+        ) {
+            this(
+                    id,
+                    title,
+                    datasetCode,
+                    factCode,
+                    columns,
+                    1,
+                    MAX_TABLE_ROWS,
+                    null,
+                    true,
+                    false,
+                    null
+            );
+        }
+    }
+
+    /**
+     * 表格行操作定义。
+     */
+    public record RowActionDefinition(String type, String label, String selectionTokenFactCode) {
+        public RowActionDefinition {
+            type = requireText(
+                    type,
+                    "行操作类型不能为空"
+            );
+            label = requireText(
+                    label,
+                    "行操作名称不能为空"
+            );
+            selectionTokenFactCode = requireText(
+                    selectionTokenFactCode,
+                    "选择令牌事实编码不能为空"
+            );
         }
     }
 
@@ -533,5 +665,33 @@ public class DeterministicBusinessAnswerComposer {
 
     private static String normalize(String value) {
         return value == null ? "" : value.trim();
+    }
+
+    /**
+     * 使用候选行中的服务端凭证构建安全操作。
+     */
+    private TableBlock.Action rowAction(
+            RowActionDefinition definition,
+            Map<?, ?> sourceRow) {
+        if (definition == null) {
+            return null;
+        }
+
+        Object tokenValue = sourceRow.get(
+                definition.selectionTokenFactCode()
+        );
+
+        if (!(tokenValue instanceof String selectionToken)
+                || selectionToken.isBlank()) {
+            throw new IllegalArgumentException(
+                    "声明了表格行操作，但候选行缺少 selectionToken"
+            );
+        }
+
+        return new TableBlock.Action(
+                definition.type(),
+                definition.label(),
+                selectionToken
+        );
     }
 }

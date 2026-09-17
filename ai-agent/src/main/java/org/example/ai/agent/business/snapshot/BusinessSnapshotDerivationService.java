@@ -437,7 +437,8 @@ public class BusinessSnapshotDerivationService {
         child.setSourceSnapshotId(source.getSnapshotId());
         child.setExpiresAt(source.getExpiresAt());
         child.setCreatedAt(now);
-        child.setCompletedAt(now);
+        // 派生操作不能延长来源事实的新鲜期。
+        child.setCompletedAt(source.getCompletedAt());
         return child;
     }
 
@@ -749,7 +750,8 @@ public class BusinessSnapshotDerivationService {
         child.setSourceSnapshotId(source.getSnapshotId());
         child.setExpiresAt(expiresAt);
         child.setCreatedAt(now);
-        child.setCompletedAt(now);
+        // 派生操作不能延长来源事实的新鲜期。
+        child.setCompletedAt(source.getCompletedAt());
         return child;
     }
 

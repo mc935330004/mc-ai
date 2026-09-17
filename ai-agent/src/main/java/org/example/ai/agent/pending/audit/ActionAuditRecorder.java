@@ -3,6 +3,8 @@ package org.example.ai.agent.pending.audit;
 import lombok.RequiredArgsConstructor;
 import org.example.ai.agent.pending.entity.ActionAuditLog;
 import org.example.ai.agent.pending.entity.PendingAction;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
 import org.example.ai.agent.pending.mapper.ActionAuditLogMapper;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StringUtils;
@@ -26,6 +28,8 @@ public class ActionAuditRecorder {
     public static final String EXECUTION_STARTED = "EXECUTION_STARTED";
     public static final String EXECUTION_SUCCEEDED = "EXECUTION_SUCCEEDED";
     public static final String EXECUTION_FAILED = "EXECUTION_FAILED";
+    public static final String REJECTED = "REJECTED";
+    public static final String RESULT_UNKNOWN = "RESULT_UNKNOWN";
 
     private final ActionAuditLogMapper actionAuditLogMapper;
 
@@ -43,6 +47,24 @@ public class ActionAuditRecorder {
         auditLog.setCapabilityCode(action.getCapabilityCode());
         auditLog.setCapabilityName(action.getCapabilityName());
         auditLog.setEventType(eventType);
+        auditLog.setEventDetail(normalizeDetail(detail));
+        auditLog.setCreatedAt(LocalDateTime.now());
+        actionAuditLogMapper.insert(auditLog);
+    }
+
+    /**
+     * 记录未创建PendingAction的拒绝事件。
+     *
+     * 使用独立事务，保证外层抛出异常后拒绝审计仍然保留。
+     */
+    @Transactional(propagation = Propagation.REQUIRES_NEW)
+    public void recordRejected(String runId, String userId, String capabilityCode, String capabilityName, String detail) {
+        ActionAuditLog auditLog = new ActionAuditLog();
+        auditLog.setRunId(runId);
+        auditLog.setUserId(userId);
+        auditLog.setCapabilityCode(capabilityCode);
+        auditLog.setCapabilityName(capabilityName);
+        auditLog.setEventType(REJECTED);
         auditLog.setEventDetail(normalizeDetail(detail));
         auditLog.setCreatedAt(LocalDateTime.now());
         actionAuditLogMapper.insert(auditLog);

@@ -25,7 +25,7 @@ import java.util.regex.Pattern;
 public class BusinessSnapshotAccessService {
 
     private static final Pattern SHA256 = Pattern.compile("[0-9a-fA-F]{64}");
-
+    private static final int MAX_TTL_MINUTES = 24 * 60;
     private final ReportDatasetMapper datasetMapper;
     private final DatasetAccessWorkflowExecutor accessExecutor;
     private final ObjectMapper objectMapper;
@@ -65,7 +65,10 @@ public class BusinessSnapshotAccessService {
                 return Optional.empty();
             }
             return Optional.of(new AccessGrant(
-                    dataset.getId(), dataset.getConfigChecksum(), dataset.getFieldPolicyChecksum()
+                    dataset.getId(),
+                    dataset.getConfigChecksum(),
+                    dataset.getFieldPolicyChecksum(),
+                    dataset.getTtlMinutes()
             ));
         } catch (RuntimeException exception) {
             return Optional.empty();
@@ -87,6 +90,9 @@ public class BusinessSnapshotAccessService {
         if (dataset == null || dataset.getId() == null
                 || !Boolean.TRUE.equals(dataset.getEnabled())
                 || !StringUtils.hasText(dataset.getAccessWorkflowCode())
+                || dataset.getTtlMinutes() == null
+                || dataset.getTtlMinutes() < 1
+                || dataset.getTtlMinutes() > MAX_TTL_MINUTES
                 || !SHA256.matcher(Objects.toString(dataset.getConfigChecksum(), "")).matches()
                 || !SHA256.matcher(Objects.toString(dataset.getFieldPolicyChecksum(), "")).matches()) {
             return false;
@@ -110,7 +116,8 @@ public class BusinessSnapshotAccessService {
     public record AccessGrant(
             Long datasetId,
             String configChecksum,
-            String fieldPolicyChecksum) {
+            String fieldPolicyChecksum,
+            int ttlMinutes) {
     }
 
     public record AccessCommand(

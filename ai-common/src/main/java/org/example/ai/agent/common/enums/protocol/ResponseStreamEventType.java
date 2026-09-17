@@ -48,11 +48,18 @@ public enum ResponseStreamEventType {
      * 写操作执行前确认预览。
      */
     ACTION_PREVIEW,
+    /**
+     * 工作流执行结果摘要。
+     */
+    WORKFLOW_RESULT,
+
+    /**
+     * 报告完成后的独立业务追问。
+     */
+    REPORT_FOLLOW_UP,
 
     /**
      * 完整回答快照。
-     *
-     * 用于内容校验、页面刷新和异常恢复。
      */
     RESPONSE_SNAPSHOT,
 

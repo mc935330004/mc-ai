@@ -33,7 +33,7 @@ public class BusinessQueryIntentResolver {
             6. 导出格式：exportFormat。
             7. 是否需要展示异常人员明细：anomalyPeopleRequested。
             8. 是否要求按项目起止日期查询：projectPeriodRequested。
-
+            9. 是否明确查询单个业务指标：singleMetricRequested。
             输出要求：
             1. 只输出一个完整 JSON 对象，不要输出解释文字。
             2. subjectType 仅允许 PROJECT、PERSON、DEPARTMENT；无法判断时为 null。
@@ -47,7 +47,10 @@ public class BusinessQueryIntentResolver {
             10. exportFormat 仅允许 XLSX、DOCX、PDF；未要求导出时为 null。
             11. anomalyPeopleRequested 仅当用户明确询问谁、哪些人、人员名单或人员明细时为 true；该字段只控制展示，不改变可查询数据范围，也不能替代后端校验。
             12. projectPeriodRequested 仅当用户明确表达“项目期间”等按项目起止日期查询的语义时为 true；该字段不得用于生成 periodStart 或 periodEnd。
-
+            13. singleMetricRequested 仅当用户明确询问一个金额、数量、比例、日期或状态指标时为 true。
+            14. “人员费用已用金额”“合同金额”“预算使用率”等明确单指标问题为 true。
+            15. “分析概算”“查看项目情况”“完整分析”不是单指标问题，必须为 false。
+            16. PROJECT 的 datasetCodes 只表达模块语义，例如概算使用 BUDGET；不能生成 URL、SQL、接口名或认证信息。
             返回字段必须完整：
             {
               "subjectType": null,
@@ -61,7 +64,8 @@ public class BusinessQueryIntentResolver {
               "refresh": false,
               "exportFormat": null,
               "anomalyPeopleRequested": false,
-              "projectPeriodRequested": false
+              "projectPeriodRequested": false,
+              "singleMetricRequested": false
             }
             """;
 
@@ -115,7 +119,6 @@ public class BusinessQueryIntentResolver {
         if (!StringUtils.hasText(content)) {
             throw new BusinessException(400, "业务查询意图解析失败：模型返回内容为空");
         }
-
         int start = content.indexOf('{');
         int end = content.lastIndexOf('}');
         if (start < 0 || end < start) {

@@ -436,6 +436,73 @@ class BusinessIntentValidatorTest {
         assertThat(resolved.projectPeriodRequested()).isFalse();
     }
 
+    @Test
+    void singleMetricProjectAllowsOneDataset() {
+        BusinessQueryIntent intent = new BusinessQueryIntent(
+                BusinessSubjectType.PROJECT,
+                "P-1001",
+                null,
+                null,
+                2026,
+                null,
+                null,
+                List.of("BUDGET"),
+                false,
+                null,
+                false,
+                false,
+                true
+        );
+
+        assertThat(validator.validate(intent)).isSameAs(intent);
+    }
+
+    @Test
+    void singleMetricRejectsMultipleDatasets() {
+        BusinessQueryIntent intent = new BusinessQueryIntent(
+                BusinessSubjectType.PROJECT,
+                "P-1001",
+                null,
+                null,
+                2026,
+                null,
+                null,
+                List.of("BUDGET", "CASH_FLOW"),
+                false,
+                null,
+                false,
+                false,
+                true
+        );
+
+        assertThatThrownBy(() -> validator.validate(intent))
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("最多指定一个数据集");
+    }
+
+    @Test
+    void singleMetricRejectsPersonSubject() {
+        BusinessQueryIntent intent = new BusinessQueryIntent(
+                BusinessSubjectType.PERSON,
+                null,
+                "张三",
+                null,
+                null,
+                null,
+                null,
+                List.of("REIMBURSEMENT"),
+                false,
+                null,
+                false,
+                false,
+                true
+        );
+
+        assertThatThrownBy(() -> validator.validate(intent))
+                .isInstanceOf(BusinessException.class)
+                .hasMessageContaining("只支持项目主体");
+    }
+
     private BusinessQueryIntent intent(
             Integer projectYear,
             LocalDate periodStart,

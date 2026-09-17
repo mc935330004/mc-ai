@@ -66,6 +66,7 @@ public class ChatResponseAccumulator {
      * 开始一个流式TEXT区块。
      */
     public synchronized void startText(BlockStartPayload payload) {
+        ensureRunning();
         Objects.requireNonNull(
                 payload,
                 "TEXT区块开始数据不能为空"
@@ -96,6 +97,7 @@ public class ChatResponseAccumulator {
      * 追加TEXT增量内容。
      */
     public synchronized void appendText(BlockDeltaPayload payload) {
+        ensureRunning();
         Objects.requireNonNull(
                 payload,
                 "TEXT增量数据不能为空"
@@ -120,11 +122,8 @@ public class ChatResponseAccumulator {
      * TEXT和结构化区块完成后都调用该方法。
      */
     public synchronized void completeBlock(ResponseBlock block) {
-        Objects.requireNonNull(
-                block,
-                "完成的区块不能为空"
-        );
-
+        ensureRunning();
+        Objects.requireNonNull(block, "完成的区块不能为空");
         streamingTextBlocks.remove(block.id());
         streamingTextContents.remove(block.id());
         completedBlocks.put(block.id(), block);
@@ -137,6 +136,7 @@ public class ChatResponseAccumulator {
      * 不清除其他成功业务区块。
      */
     public synchronized void failBlock(BlockErrorPayload payload) {
+        ensureRunning();
         Objects.requireNonNull(
                 payload,
                 "区块失败数据不能为空"
@@ -169,6 +169,7 @@ public class ChatResponseAccumulator {
      * 更新业务基础数据是否完整。
      */
     public synchronized void setDataComplete(boolean dataComplete) {
+        ensureRunning();
         this.dataComplete = dataComplete;
     }
 
@@ -176,6 +177,7 @@ public class ChatResponseAccumulator {
      * 更新回答对象和时间范围等通用上下文。
      */
     public synchronized void setContext(ResponseContext responseContext) {
+        ensureRunning();
         this.responseContext = responseContext;
     }
 
@@ -183,7 +185,7 @@ public class ChatResponseAccumulator {
      * 更新知识库引用。
      */
     public synchronized void setReferences(List<ResponseReference> references) {
-
+        ensureRunning();
         this.references = references == null ? List.of() : List.copyOf(references);
     }
 
@@ -191,6 +193,7 @@ public class ChatResponseAccumulator {
      * 更新本次回答运行信息。
      */
     public synchronized void setMeta(ResponseMeta meta) {
+        ensureRunning();
         this.meta = meta == null ? ResponseMeta.empty() : meta;
     }
 
@@ -251,10 +254,9 @@ public class ChatResponseAccumulator {
      * 整体失败时保留成功区块和已经生成的文字。
      */
     public synchronized AiResponse fail() {
+        if (status != ResponseStatus.RUNNING) return snapshot();
         finishStreamingText(BlockStatus.FAILED);
-        status = hasVisibleContent()
-                ? ResponseStatus.PARTIAL
-                : ResponseStatus.FAILED;
+        status = hasVisibleContent() ? ResponseStatus.PARTIAL : ResponseStatus.FAILED;
         return snapshot();
     }
 
@@ -262,6 +264,7 @@ public class ChatResponseAccumulator {
      * 主动取消只终止正在生成的文字，不修改已经完成的业务区块。
      */
     public synchronized AiResponse cancel() {
+        if (status != ResponseStatus.RUNNING) return snapshot();
         finishStreamingText(BlockStatus.CANCELLED);
         status = ResponseStatus.CANCELLED;
         return snapshot();
@@ -331,5 +334,13 @@ public class ChatResponseAccumulator {
 
         streamingTextBlocks.clear();
         streamingTextContents.clear();
+    }
+    /**
+     * 最终状态生成后禁止迟到回调继续修改回答。
+     */
+    private void ensureRunning() {
+        if (status != ResponseStatus.RUNNING) {
+            throw new IllegalStateException("CHAT回答已经结束");
+        }
     }
 }

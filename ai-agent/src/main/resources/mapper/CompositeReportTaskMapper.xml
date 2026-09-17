@@ -15,6 +15,10 @@
         <result property="format" column="format"/>
         <result property="status" column="status"/>
         <result property="dataComplete" column="data_complete"/>
+        <result property="sourceRunId" column="source_run_id"/>
+        <result property="contentVersion" column="content_version"/>
+        <result property="logicalReportJson" column="logical_report_json"/>
+        <result property="frozenAt" column="frozen_at"/>
         <result property="workerId" column="worker_id"/>
         <result property="leaseUntil" column="lease_until"/>
         <result property="attemptCount" column="attempt_count"/>
@@ -48,19 +52,23 @@
         LIMIT 1
     </select>
 
+    <!-- 创建任务时同时写入冻结逻辑报告，避免异步渲染阶段重新查询业务数据。 -->
     <insert id="insertTask">
         INSERT INTO ai_composite_report_task (
             task_id, request_key, request_fingerprint, session_id, user_id,
             subject_type, subject_id, template_code, template_checksum, format,
-            status, data_complete, attempt_count, max_attempts, expires_at,
-            created_at, updated_at
+            status, data_complete, source_run_id, content_version,
+            logical_report_json, frozen_at, attempt_count, max_attempts,
+            expires_at, created_at, updated_at
         ) VALUES (
-            #{task.taskId}, #{task.requestKey}, #{task.requestFingerprint},
-            #{task.sessionId}, #{task.userId}, #{task.subjectType}, #{task.subjectId},
-            #{task.templateCode}, #{task.templateChecksum}, #{task.format},
-            #{task.status}, #{task.dataComplete}, #{task.attemptCount},
-            #{task.maxAttempts}, #{task.expiresAt}, #{task.createdAt}, #{task.updatedAt}
-        )
+                     #{task.taskId}, #{task.requestKey}, #{task.requestFingerprint},
+                     #{task.sessionId}, #{task.userId}, #{task.subjectType}, #{task.subjectId},
+                     #{task.templateCode}, #{task.templateChecksum}, #{task.format},
+                     #{task.status}, #{task.dataComplete}, #{task.sourceRunId},
+                     #{task.contentVersion}, #{task.logicalReportJson}, #{task.frozenAt},
+                     #{task.attemptCount}, #{task.maxAttempts}, #{task.expiresAt},
+                     #{task.createdAt}, #{task.updatedAt}
+                 )
     </insert>
 
     <!-- 崩溃恢复必须先于普通领取，且活动租约和终态永不进入恢复集合。 -->
@@ -242,6 +250,10 @@
     <update id="markExpiredAndClearArtifact">
         UPDATE ai_composite_report_task
         SET status = 'EXPIRED',
+            source_run_id = NULL,
+            content_version = NULL,
+            logical_report_json = NULL,
+            frozen_at = NULL,
             storage_path = NULL,
             file_name = NULL,
             mime_type = NULL,

@@ -59,22 +59,49 @@ public class KnowledgeBaseVectorTaskWorker {
         }
     }
     /**
-     * 处理任务
-     * @param taskId
+     * 处理向量任务。
      */
     private void process(Long taskId) {
         KnowledgeBaseVectorTask task = taskService.getById(taskId);
-        if (task == null) {
-            return;
-        }
+        if (task == null || task.getVersionId() == null) return;
+
         try {
-            if (task.getVersionId() != null) {
-                // 新企业文档版本流程
-                knowledgeDocumentVersionService.vectorizeVersion(task.getVersionId());
-            }
+            knowledgeDocumentVersionService.vectorizeVersion(
+                    task.getVersionId(),
+                    vectorJobId(task.getId())
+            );
             markCompleted(task);
-        } catch (Exception e) {
-            markFailedOrRetry(task, e);
+        } catch (Exception exception) {
+            persistVersionFailure(task, exception);
+            markFailedOrRetry(task, exception);
+        }
+    }
+
+    /**
+     * 同一个任务无论重试多少次，都使用相同的向量业务幂等标识。
+     */
+    private String vectorJobId(Long taskId) {
+        return "vector-task:" + taskId;
+    }
+
+    /**
+     * 向量化主事务失败后单独保存版本失败状态。
+     */
+    private void persistVersionFailure(KnowledgeBaseVectorTask task, Exception exception) {
+        if (task.getVersionId() == null) return;
+        try {
+            knowledgeDocumentVersionService.markVectorizeFailed(
+                    task.getVersionId(),
+                    truncate(exception.getMessage())
+            );
+        } catch (Exception stateException) {
+            log.error(
+                    "保存文档版本失败状态异常: taskId={}, versionId={}, error={}",
+                    task.getId(),
+                    task.getVersionId(),
+                    stateException.getMessage(),
+                    stateException
+            );
         }
     }
 
@@ -87,9 +114,15 @@ public class KnowledgeBaseVectorTaskWorker {
         task.setFinishedAt(LocalDateTime.now());
         task.setUpdatedAt(LocalDateTime.now());
         task.setErrorMessage(null);
+        task.setLockOwner(null);
+        task.setLockedAt(null);
         taskService.updateById(task);
 
-        log.info("知识库向量化任务完成: taskId={}, kbId={}", task.getId(), task.getVersionId());
+        log.info(
+                "知识库向量化任务完成: taskId={}, versionId={}",
+                task.getId(),
+                task.getVersionId()
+        );
     }
 
     /**

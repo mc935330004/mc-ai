@@ -8,6 +8,7 @@ import org.example.ai.agent.business.dataset.entity.ReportDatasetField;
 import org.example.ai.agent.business.dataset.mapper.ReportDatasetFieldMapper;
 import org.example.ai.agent.business.dataset.mapper.ReportDatasetMapper;
 import org.example.ai.agent.business.report.CompositeReportTaskService.ArtifactMetadata;
+import org.example.ai.agent.business.report.BusinessReportFileHandler.FrozenReport;
 import org.example.ai.agent.business.report.entity.CompositeReportSection;
 import org.example.ai.agent.business.report.entity.CompositeReportTask;
 import org.example.ai.agent.business.report.mapper.CompositeReportTaskMapper;
@@ -26,6 +27,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 
+import java.time.LocalDateTime;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -34,7 +36,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
@@ -74,9 +78,7 @@ class BusinessReportFileHandlerTest {
         );
 
         String target = "reports/" + TASK_ID + "/report." + format.toLowerCase();
-        ArtifactMetadata artifact = fixture.handler.generate(
-                TASK_ID, format, target, fixture.sections(UNAVAILABLE_MESSAGE)
-        );
+        ArtifactMetadata artifact = fixture.generate(format, target, fixture.sections(UNAVAILABLE_MESSAGE));
 
         LogicalReportDocument document = fixture.capturedDocument;
         assertThat(document.associationLabels())
@@ -113,9 +115,7 @@ class BusinessReportFileHandlerTest {
                 """);
         fixture.prepareItems(item("direct", "DIRECT", 1));
 
-        fixture.handler.generate(
-                TASK_ID, "XLSX", "reports/task-1/report.xlsx", fixture.sections(null)
-        );
+        fixture.generate("XLSX", "reports/task-1/report.xlsx", fixture.sections(null));
 
         LogicalReportDocument document = fixture.capturedDocument;
         assertThat(document.metrics()).isEmpty();
@@ -125,15 +125,29 @@ class BusinessReportFileHandlerTest {
     }
 
     @Test
+    void exportableFactMustRemainAvailableWhenModelVisibilityIsDisabled() {
+        Fixture fixture = new Fixture();
+        ReportDatasetField exportOnly = field("approved_amount", "审批金额", 1);
+        exportOnly.setModelVisible(false);
+        fixture.prepareDataset(exportOnly);
+        fixture.prepareSnapshot("{\"direct\":{\"export\":{\"approved_amount\":88},\"model\":{}}}");
+        fixture.prepareItems(item("direct", "DIRECT", 1));
+
+        fixture.generate("XLSX", "reports/task-1/report.xlsx", fixture.sections(null));
+
+        assertThat(fixture.capturedDocument.metrics()).extracting(Metric::label)
+                .containsExactly("审批金额");
+    }
+
+    @Test
     void invalidSnapshotFactsMustFailClosed() {
         Fixture fixture = new Fixture();
         fixture.prepareDataset(field("travel_amount", "出差总金额", 1));
         fixture.prepareSnapshot("not-a-json-object");
         fixture.prepareItems(item("direct", "DIRECT", 1));
 
-        assertThatThrownBy(() -> fixture.handler.generate(
-                TASK_ID, "XLSX", "reports/task-1/report.xlsx", fixture.sections(null)
-        )).isInstanceOf(IllegalStateException.class)
+        assertThatThrownBy(() -> fixture.freeze(fixture.sections(null)))
+                .isInstanceOf(IllegalStateException.class)
                 .hasMessage("报告快照事实结构不合法");
     }
 
@@ -142,9 +156,7 @@ class BusinessReportFileHandlerTest {
         Fixture fixture = new Fixture();
         when(fixture.datasetMapper.selectEnabledByCode("PERSON_TRAVEL")).thenReturn(null);
 
-        fixture.handler.generate(
-                TASK_ID, "XLSX", "reports/task-1/report.xlsx", fixture.sections(null)
-        );
+        fixture.generate("XLSX", "reports/task-1/report.xlsx", fixture.sections(null));
 
         LogicalReportDocument document = fixture.capturedDocument;
         assertThat(document.statusSections()).extracting(StatusSection::state)
@@ -165,6 +177,55 @@ class BusinessReportFileHandlerTest {
                 TASK_ID, "CSV", "reports/task-1/report.csv", fixture.sections(null)
         )).isInstanceOf(IllegalStateException.class)
                 .hasMessage("报告格式不受支持");
+    }
+
+    @Test
+    void renderMustOnlyReadFrozenDocument() {
+        Fixture fixture = new Fixture();
+        fixture.prepareDataset(field("travel_amount", "出差总金额", 1));
+        fixture.prepareSnapshot("{\"export\":{\"travel_amount\":10}}");
+        List<CompositeReportSection> sections = fixture.sections(null);
+        fixture.freeze(sections);
+
+        // 冻结完成后清空交互记录，渲染阶段不得再次访问快照或字段配置。
+        clearInvocations(fixture.snapshotMapper, fixture.itemMapper,
+                fixture.datasetMapper, fixture.fieldMapper);
+        fixture.handler.generate(TASK_ID, "XLSX", "reports/task-1/report.xlsx", sections);
+
+        verifyNoInteractions(fixture.snapshotMapper, fixture.itemMapper,
+                fixture.datasetMapper, fixture.fieldMapper);
+        assertThat(fixture.capturedDocument.metrics()).extracting(Metric::label)
+                .containsExactly("出差总金额");
+    }
+
+    @Test
+    void changedFrozenJsonMustFailContentVersionCheck() {
+        Fixture fixture = new Fixture();
+        fixture.prepareDataset(field("travel_amount", "出差总金额", 1));
+        fixture.prepareSnapshot("{\"export\":{\"travel_amount\":10}}");
+        List<CompositeReportSection> sections = fixture.sections(null);
+        fixture.freeze(sections);
+        fixture.task.setLogicalReportJson("{}");
+
+        assertThatThrownBy(() -> fixture.handler.generate(
+                TASK_ID, "XLSX", "reports/task-1/report.xlsx", sections
+        )).isInstanceOf(IllegalStateException.class)
+                .hasMessage("冻结逻辑报告内容版本不一致");
+    }
+
+    @Test
+    void differentSourceRunMustProduceDifferentContentVersion() {
+        Fixture fixture = new Fixture();
+        fixture.prepareDataset(field("travel_amount", "出差总金额", 1));
+        fixture.prepareSnapshot("{\"export\":{\"travel_amount\":10}}");
+        List<CompositeReportSection> sections = fixture.sections(null);
+
+        FrozenReport current = fixture.handler.freeze(fixture.task, sections);
+        fixture.task.setSourceRunId("run-2");
+        FrozenReport latest = fixture.handler.freeze(fixture.task, sections);
+
+        assertThat(current.logicalReportJson()).isEqualTo(latest.logicalReportJson());
+        assertThat(current.contentVersion()).isNotEqualTo(latest.contentVersion());
     }
 
     private static ReportDatasetField field(String factCode, String factName, int displayOrder) {
@@ -231,6 +292,7 @@ class BusinessReportFileHandlerTest {
         private final ReportDatasetFieldMapper fieldMapper = mock(ReportDatasetFieldMapper.class);
         private final SafeArtifactStorageService storage = mock(SafeArtifactStorageService.class);
         private final Map<String, CapturingRenderer> renderers = new LinkedHashMap<>();
+        private final CompositeReportTask task = new CompositeReportTask();
 
         private final BusinessReportFileHandler handler;
         private LogicalReportDocument capturedDocument;
@@ -242,11 +304,12 @@ class BusinessReportFileHandlerTest {
                     capturedDocument = document;
                 }));
             }
-            CompositeReportTask task = new CompositeReportTask();
             task.setTaskId(TASK_ID);
+            task.setSourceRunId("run-1");
             task.setFormat("XLSX");
             task.setSubjectType("PERSON");
             task.setDataComplete(false);
+            task.setFrozenAt(LocalDateTime.of(2026, 9, 17, 10, 0));
             when(taskMapper.selectByTaskId(TASK_ID)).thenReturn(task);
             when(snapshotMapper.selectById(SNAPSHOT_ID))
                     .thenReturn(snapshot("{\"export\":{}}"));
@@ -269,7 +332,7 @@ class BusinessReportFileHandlerTest {
             handler = new BusinessReportFileHandler(
                     taskMapper, snapshotMapper, itemMapper, datasetMapper, fieldMapper,
                     new LogicalReportAssembler(new BusinessFactSanitizer(new ReportDatasetValidator())),
-                    storage, new ObjectMapper(),
+                    storage, new ObjectMapper().findAndRegisterModules(),
                     Map.copyOf(renderers)
             );
         }
@@ -289,6 +352,18 @@ class BusinessReportFileHandlerTest {
 
         private void prepareItems(BusinessSnapshotItem... items) {
             when(itemMapper.selectList(any())).thenReturn(List.of(items));
+        }
+
+        private void freeze(List<CompositeReportSection> sections) {
+            FrozenReport frozen = handler.freeze(task, sections);
+            task.setContentVersion(frozen.contentVersion());
+            task.setLogicalReportJson(frozen.logicalReportJson());
+        }
+
+        private ArtifactMetadata generate(String format, String target,
+                                          List<CompositeReportSection> sections) {
+            freeze(sections);
+            return handler.generate(TASK_ID, format, target, sections);
         }
 
         private List<CompositeReportSection> sections(String safeMessage) {

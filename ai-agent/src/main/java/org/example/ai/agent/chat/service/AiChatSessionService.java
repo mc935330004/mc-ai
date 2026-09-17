@@ -35,25 +35,12 @@ public interface AiChatSessionService {
      */
     void deleteSession(String userId, String sessionId);
 
-    /**
-     * 精确查询指定运行产生的回答快照，不重新执行业务或模型调用。
-     */
-    ChatResponseSnapshotVO getResponseSnapshot(String userId, String sessionId, String runId, String responseId);
-
-    /**
-     *  查询会话历史消息。
-     */
-    List<ChatMessageVO> listMessages(String userId, String sessionId);
 
     /**
      *  解析最终使用的模型编码。
      */
     String resolveModelCode(String userId, String sessionId, String modelCode);
 
-    /**
-     *  构建最近历史对话记忆。
-     */
-    String buildMemory(String userId, String sessionId);
 
     /**
      *  保存用户消息。
@@ -86,4 +73,22 @@ public interface AiChatSessionService {
             String modelCode,
             String payloadJson
     );
+
+    /**
+     * 精确查询指定运行产生的回答快照。
+     * 当前认证信息用于重新校验业务主体权限。
+     */
+    ChatResponseSnapshotVO getResponseSnapshot(String userId, String sessionId, String runId, String responseId, String authorization);
+
+    /**
+     * 查询会话历史消息。
+     * 已撤销权限的业务回答只返回安全提示。
+     */
+    List<ChatMessageVO> listMessages(String userId, String sessionId, String authorization);
+
+    /**
+     * 构建最近历史对话记忆。
+     * 无权访问的历史业务回答不得进入模型上下文。
+     */
+    String buildMemory(String userId, String sessionId, String authorization);
 }

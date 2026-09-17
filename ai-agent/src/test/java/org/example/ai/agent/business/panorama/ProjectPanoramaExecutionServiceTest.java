@@ -100,7 +100,7 @@ class ProjectPanoramaExecutionServiceTest {
     }
 
     @Test
-    void executesOrderedModulesWithoutInjectingProjectYearAndReportsPartialResult() {
+    void focusedBudgetSuccessAndCashFlowTimeoutReturnsPartialResult() {
         ProjectPanoramaProfileService profileService = mock(ProjectPanoramaProfileService.class);
         ProjectSubjectAuthorizationService authorizationService = authorizationService();
         PanoramaDatasetExecutor datasetExecutor = mock(PanoramaDatasetExecutor.class);
@@ -111,19 +111,19 @@ class ProjectPanoramaExecutionServiceTest {
                 "工程项目全景",
                 "a".repeat(64),
                 List.of(
-                        new ProjectPanoramaPlan.Module("CONTRACT", true, 10, 30_000),
+                        new ProjectPanoramaPlan.Module("BUDGET", true, 10, 30_000),
                         new ProjectPanoramaPlan.Module("CASH_FLOW", false, 20, 30_000)
                 )
         );
         when(profileService.resolve("工程项目")).thenReturn(plan);
         when(datasetExecutor.execute(any(), anyInt()))
-                .thenReturn(outcome("CONTRACT", DatasetExecutionStatus.SUCCESS))
+                .thenReturn(outcome("BUDGET", DatasetExecutionStatus.SUCCESS))
                 .thenReturn(new PanoramaDatasetExecutor.Result(
                         DatasetExecutionStatus.TIMEOUT,
                         null
                 ));
         BusinessSnapshot snapshot = new BusinessSnapshot();
-        snapshot.setSnapshotId("snapshot-contract");
+        snapshot.setSnapshotId("snapshot-budget");
         when(snapshotService.create(any())).thenReturn(snapshot);
         List<String> progress = new ArrayList<>();
         ProjectPanoramaExecutionService service = executionService(
@@ -138,6 +138,10 @@ class ProjectPanoramaExecutionServiceTest {
                         "projectYear", 2025,
                         "startDate", "2025-01-01"
                 )),
+                new ProjectPanoramaPlan.Scope(
+                        ProjectPanoramaPlan.AnalysisMode.FOCUSED,
+                        List.of("BUDGET", "CASH_FLOW")
+                ),
                 event -> progress.add(event.datasetCode() + ":" + event.status())
         );
 
@@ -146,7 +150,7 @@ class ProjectPanoramaExecutionServiceTest {
         verify(datasetExecutor, org.mockito.Mockito.times(2))
                 .execute(requests.capture(), anyInt());
         assertThat(requests.getAllValues()).extracting(DatasetExecutionRequest::datasetCode)
-                .containsExactly("CONTRACT", "CASH_FLOW");
+                .containsExactly("BUDGET", "CASH_FLOW");
         assertThat(requests.getAllValues()).allSatisfy(request -> {
             assertThat(request.subjectType()).isEqualTo(BusinessSubjectType.PROJECT);
             assertThat(request.subjectId()).isEqualTo("project-id-1");
@@ -160,9 +164,9 @@ class ProjectPanoramaExecutionServiceTest {
         assertThat(result.allModulesComplete()).isFalse();
         assertThat(result.aggregateSnapshotId()).isEqualTo("aggregate-1");
         assertThat(result.modules()).extracting(ProjectPanoramaResult.ModuleResult::snapshotId)
-                .containsExactly("snapshot-contract", null);
+                .containsExactly("snapshot-budget", null);
         assertThat(progress).containsExactly(
-                "CONTRACT:RUNNING", "CONTRACT:SUCCESS",
+                "BUDGET:RUNNING", "BUDGET:SUCCESS",
                 "CASH_FLOW:RUNNING", "CASH_FLOW:TIMEOUT"
         );
 
@@ -196,7 +200,7 @@ class ProjectPanoramaExecutionServiceTest {
                 snapshotService
         );
 
-        ProjectPanoramaResult result = service.execute(command(Map.of()), ignored -> { });
+        ProjectPanoramaResult result = service.execute(command(Map.of()), deepScope(), ignored -> { });
 
         assertThat(result.state()).isEqualTo(PanoramaExecutionState.FAILED);
         assertThat(result.requiredComplete()).isFalse();
@@ -233,7 +237,7 @@ class ProjectPanoramaExecutionServiceTest {
                 snapshotService
         );
 
-        ProjectPanoramaResult result = service.execute(command(Map.of()), ignored -> { });
+        ProjectPanoramaResult result = service.execute(command(Map.of()), deepScope(), ignored -> { });
 
         verify(datasetExecutor, org.mockito.Mockito.times(2)).execute(any(), anyInt());
         assertThat(result.state()).isEqualTo(PanoramaExecutionState.PARTIAL_SUCCESS);
@@ -293,7 +297,7 @@ class ProjectPanoramaExecutionServiceTest {
                 " ", Map.of()
         );
 
-        assertThatThrownBy(() -> service.execute(unresolved, ignored -> { }))
+        assertThatThrownBy(() -> service.execute(unresolved, deepScope(), ignored -> { }))
                 .isInstanceOf(IllegalArgumentException.class);
         verify(datasetExecutor, never()).execute(any(), anyInt());
     }
@@ -317,10 +321,79 @@ class ProjectPanoramaExecutionServiceTest {
                 "selection-token", Map.of()
         );
 
-        assertThatThrownBy(() -> service.execute(invalid, ignored -> { }))
+        assertThatThrownBy(() -> service.execute(invalid, deepScope(), ignored -> { }))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("sessionId不合法");
         verify(authorizationService, never()).authorize(any());
+        verify(datasetExecutor, never()).execute(any(), anyInt());
+    }
+
+    @Test
+    void a05FocusedBudgetAndCashFlowOnlyExecutesSelectedConfiguredModules() {
+        ProjectPanoramaProfileService profileService = mock(ProjectPanoramaProfileService.class);
+        PanoramaDatasetExecutor datasetExecutor = mock(PanoramaDatasetExecutor.class);
+        BusinessSnapshotService snapshotService = mock(BusinessSnapshotService.class);
+        when(profileService.resolve("工程项目")).thenReturn(plan("PROJECT_BASE", "CONTRACT", "BUDGET", "CASH_FLOW"));
+        when(datasetExecutor.execute(any(), anyInt()))
+                .thenReturn(outcome("BUDGET", DatasetExecutionStatus.SUCCESS))
+                .thenReturn(outcome("CASH_FLOW", DatasetExecutionStatus.SUCCESS));
+        BusinessSnapshot snapshot = new BusinessSnapshot();
+        snapshot.setSnapshotId("snapshot-1");
+        when(snapshotService.create(any())).thenReturn(snapshot);
+        ProjectPanoramaExecutionService service = executionService(
+                authorizationService(), profileService, datasetExecutor, snapshotService
+        );
+
+        ProjectPanoramaResult result = service.execute(command(Map.of()), new ProjectPanoramaPlan.Scope(
+                ProjectPanoramaPlan.AnalysisMode.FOCUSED, List.of("BUDGET", "CASH_FLOW")
+        ), ignored -> { });
+
+        ArgumentCaptor<DatasetExecutionRequest> requests = ArgumentCaptor.forClass(DatasetExecutionRequest.class);
+        verify(datasetExecutor, org.mockito.Mockito.times(2)).execute(requests.capture(), anyInt());
+        assertThat(requests.getAllValues()).extracting(DatasetExecutionRequest::datasetCode)
+                .containsExactly("BUDGET", "CASH_FLOW");
+        assertThat(result.modules()).extracting(ProjectPanoramaResult.ModuleResult::datasetCode)
+                .containsExactly("BUDGET", "CASH_FLOW");
+    }
+
+    @Test
+    void quickScopeOnlyExecutesProjectBase() {
+        ProjectPanoramaProfileService profileService = mock(ProjectPanoramaProfileService.class);
+        PanoramaDatasetExecutor datasetExecutor = mock(PanoramaDatasetExecutor.class);
+        BusinessSnapshotService snapshotService = mock(BusinessSnapshotService.class);
+        when(profileService.resolve("工程项目")).thenReturn(plan("PROJECT_BASE", "CONTRACT", "BUDGET"));
+        when(datasetExecutor.execute(any(), anyInt())).thenReturn(outcome("PROJECT_BASE", DatasetExecutionStatus.SUCCESS));
+        BusinessSnapshot snapshot = new BusinessSnapshot();
+        snapshot.setSnapshotId("snapshot-1");
+        when(snapshotService.create(any())).thenReturn(snapshot);
+        ProjectPanoramaExecutionService service = executionService(
+                authorizationService(), profileService, datasetExecutor, snapshotService
+        );
+
+        service.execute(command(Map.of()), new ProjectPanoramaPlan.Scope(
+                ProjectPanoramaPlan.AnalysisMode.QUICK, List.of()
+        ), ignored -> { });
+
+        ArgumentCaptor<DatasetExecutionRequest> request = ArgumentCaptor.forClass(DatasetExecutionRequest.class);
+        verify(datasetExecutor).execute(request.capture(), anyInt());
+        assertThat(request.getValue().datasetCode()).isEqualTo("PROJECT_BASE");
+    }
+
+    @Test
+    void focusedScopeRejectsDatasetOutsideCurrentProfile() {
+        ProjectPanoramaProfileService profileService = mock(ProjectPanoramaProfileService.class);
+        PanoramaDatasetExecutor datasetExecutor = mock(PanoramaDatasetExecutor.class);
+        BusinessSnapshotService snapshotService = mock(BusinessSnapshotService.class);
+        when(profileService.resolve("工程项目")).thenReturn(plan("PROJECT_BASE", "BUDGET"));
+        ProjectPanoramaExecutionService service = executionService(
+                authorizationService(), profileService, datasetExecutor, snapshotService
+        );
+
+        assertThatThrownBy(() -> service.execute(command(Map.of()), new ProjectPanoramaPlan.Scope(
+                ProjectPanoramaPlan.AnalysisMode.FOCUSED, List.of("PAYMENT")
+        ), ignored -> { }))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("所选分析模块未配置或不可用");
         verify(datasetExecutor, never()).execute(any(), anyInt());
     }
 
@@ -334,6 +407,18 @@ class ProjectPanoramaExecutionServiceTest {
                 "selection-token",
                 query
         );
+    }
+
+    private ProjectPanoramaPlan.Scope deepScope() {
+        return new ProjectPanoramaPlan.Scope(ProjectPanoramaPlan.AnalysisMode.DEEP, List.of());
+    }
+
+    private ProjectPanoramaPlan plan(String... datasetCodes) {
+        List<ProjectPanoramaPlan.Module> modules = new ArrayList<>();
+        for (int index = 0; index < datasetCodes.length; index++) {
+            modules.add(new ProjectPanoramaPlan.Module(datasetCodes[index], true, index + 1, 30_000));
+        }
+        return new ProjectPanoramaPlan(11L, "工程项目", "工程项目全景", "a".repeat(64), modules);
     }
 
     private ProjectPanoramaExecutionService executionService(

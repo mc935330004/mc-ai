@@ -25,6 +25,19 @@ public class CompositeReportTask {
     private String format;
     private String status;
     private Boolean dataComplete;
+
+    /** 产生当前冻结报告的回答运行ID。 */
+    private String sourceRunId;
+
+    /** 逻辑报告、来源快照和字段策略共同计算的内容版本。 */
+    private String contentVersion;
+
+    /** 经过导出字段策略过滤后的冻结逻辑报告。 */
+    private String logicalReportJson;
+
+    /** 逻辑报告冻结时间。 */
+    private LocalDateTime frozenAt;
+
     private String workerId;
     private LocalDateTime leaseUntil;
     private Integer attemptCount;
@@ -48,6 +61,7 @@ public class CompositeReportTask {
         return "CompositeReportTask[status=" + status
                 + ", format=" + format
                 + ", dataComplete=" + dataComplete
+                + ", contentVersionPresent=" + (contentVersion != null)
                 + ", attemptCount=" + attemptCount + ']';
     }
 }

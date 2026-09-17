@@ -8,6 +8,7 @@ import org.example.ai.agent.common.enums.protocol.BlockType;
 import java.time.LocalDateTime;
 import java.util.Locale;
 import java.util.Set;
+import java.util.regex.Pattern;
 
 /**
  * 导出文件等异步产物的安全元数据。
@@ -26,6 +27,8 @@ public record ArtifactBlock(
         String fileName,
         String taskStatus,
         LocalDateTime expiresAt,
+        LocalDateTime frozenAt,
+        String contentVersion,
         boolean dataComplete,
         String safeMessage) implements ResponseBlock {
 
@@ -42,6 +45,10 @@ public record ArtifactBlock(
             "CANCELLED",
             "EXPIRED"
     );
+    /**
+     * 内容版本使用冻结逻辑报告的 SHA-256，页面和下载文件据此关联同一版本。
+     */
+    private static final Pattern CONTENT_VERSION_PATTERN = Pattern.compile("[a-f0-9]{64}");
 
     public ArtifactBlock {
         id = BlockSupport.requireId(id);
@@ -54,6 +61,13 @@ public record ArtifactBlock(
         fileName = normalize(fileName);
         validateFileName(fileName);
         taskStatus = normalizeTaskStatus(taskStatus);
+        if (frozenAt == null) {
+            throw new IllegalArgumentException("产物frozenAt不能为空");
+        }
+        contentVersion = normalize(contentVersion).toLowerCase(Locale.ROOT);
+        if (!CONTENT_VERSION_PATTERN.matcher(contentVersion).matches()) {
+            throw new IllegalArgumentException("产物contentVersion必须是64位SHA-256");
+        }
         if (dataComplete
                 && !"SUCCESS".equals(taskStatus)
                 && !"COMPLETED".equals(taskStatus)) {

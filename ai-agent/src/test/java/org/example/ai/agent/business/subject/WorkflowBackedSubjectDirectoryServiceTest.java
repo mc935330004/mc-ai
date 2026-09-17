@@ -18,6 +18,7 @@ import org.example.ai.agent.business.subject.model.SubjectCandidate;
 import org.example.ai.agent.business.subject.model.SubjectDirectoryPage;
 import org.example.ai.agent.business.subject.model.SubjectSearchMode;
 import org.example.ai.agent.chat.support.ContentHashUtils;
+import org.example.ai.agent.common.model.ProjectRelationship;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -26,6 +27,7 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.util.List;
+import java.util.LinkedHashMap;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -102,6 +104,54 @@ class WorkflowBackedSubjectDirectoryServiceTest {
             assertThat(candidate.projectCode()).isEqualTo("P100");
             assertThat(candidate.toString()).doesNotContain("project-id-1");
         });
+    }
+
+    /**
+     * “我的项目”只接受负责或参与关系，并允许 PM 不提供可靠总数。
+     */
+    @Test
+    void parsesMyProjectRelationshipsWithoutInventingTotal() {
+        SubjectDirectoryQuery query = myProjectsQuery();
+        Map<String, Object> display = new LinkedHashMap<>();
+        display.put("subjectCandidates", List.of(
+                projectCandidate("project-1", "P100", "RESPONSIBLE"),
+                projectCandidate("project-2", "P200", "PARTICIPATING")
+        ));
+        display.put("totalCount", null);
+        display.put("hasNext", true);
+        DatasetExecutionResult result = result(query, DatasetExecutionStatus.SUCCESS, envelope(display));
+        when(executionService.execute(any())).thenReturn(result);
+        when(proofVerifier.verify(result)).thenReturn(true);
+
+        SubjectDirectoryPage page = service.search(query);
+
+        assertThat(page.accessible()).isTrue();
+        assertThat(page.totalKnown()).isFalse();
+        assertThat(page.totalCount()).isZero();
+        assertThat(page.hasNext()).isTrue();
+        assertThat(page.candidates()).extracting("projectRelationship")
+                .containsExactly(ProjectRelationship.RESPONSIBLE, ProjectRelationship.PARTICIPATING);
+        assertThat(page.candidates()).extracting("projectStatus").containsOnly("进行中");
+    }
+
+    /**
+     * PM 即使错误返回可查看关系，默认“我的项目”也必须失败关闭。
+     */
+    @Test
+    void rejectsViewableRelationshipFromMyProjectsScope() {
+        SubjectDirectoryQuery query = myProjectsQuery();
+        DatasetExecutionResult result = result(query, DatasetExecutionStatus.SUCCESS, envelope(Map.of(
+                "subjectCandidates", List.of(projectCandidate("project-1", "P100", "VIEWABLE")),
+                "totalCount", 1,
+                "hasNext", false
+        )));
+        when(executionService.execute(any())).thenReturn(result);
+        when(proofVerifier.verify(result)).thenReturn(true);
+
+        SubjectDirectoryPage page = service.search(query);
+
+        assertThat(page.accessible()).isFalse();
+        assertThat(page.candidates()).isEmpty();
     }
 
     @Test
@@ -310,6 +360,14 @@ class WorkflowBackedSubjectDirectoryServiceTest {
         );
     }
 
+    private SubjectDirectoryQuery myProjectsQuery() {
+        return new SubjectDirectoryQuery(
+                "agent-run-1", "login-user-1", "session-1", "Bearer secret",
+                Map.of("tenant", "secret"), BusinessSubjectType.PROJECT,
+                SubjectSearchMode.MY_PROJECTS, null, null, null, null, 2026, null, 1, 2
+        );
+    }
+
     private SubjectDirectoryQuery personQuery() {
         return new SubjectDirectoryQuery(
                 "agent-run-1",
@@ -367,6 +425,52 @@ class WorkflowBackedSubjectDirectoryServiceTest {
                 "safe",
                 "proof"
         );
+    }
+
+    private DatasetExecutionResult result(
+            SubjectDirectoryQuery query,
+            DatasetExecutionStatus status,
+            Map<String, Object> safeFacts) {
+        return new DatasetExecutionResult(
+                new DatasetExecutionSource(
+                        query.userId(), query.sessionId(), BusinessSubjectType.PERSON, query.userId(),
+                        "PROJECT_DIRECTORY", canonicalHash(query), "query-workflow", 10L,
+                        "a".repeat(64), "b".repeat(64)
+                ),
+                status, status == DatasetExecutionStatus.SUCCESS, safeFacts,
+                "run-1", null, null, "safe", "proof"
+        );
+    }
+
+    private String canonicalHash(SubjectDirectoryQuery query) {
+        Map<String, Object> input = new LinkedHashMap<>();
+        input.put("searchMode", query.searchMode().name());
+        putIfPresent(input, "selectedSubjectId", query.selectedSubjectId());
+        putIfPresent(input, "projectCode", query.projectCode());
+        putIfPresent(input, "searchName", query.searchName());
+        putIfPresent(input, "projectManager", query.projectManager());
+        putIfPresent(input, "projectYear", query.projectYear());
+        putIfPresent(input, "employeeNo", query.employeeNo());
+        input.put("pageNumber", query.pageNumber());
+        input.put("pageSize", query.pageSize());
+        return ContentHashUtils.sha256(ReportDatasetValidator.canonicalSafeValue(input));
+    }
+
+    private Map<String, Object> projectCandidate(String id, String code, String relationship) {
+        return Map.of(
+                "subjectRef", id,
+                "displayName", code + " 项目",
+                "projectCode", code,
+                "projectType", "DELIVERY",
+                "projectRelationship", relationship,
+                "projectStatus", "进行中"
+        );
+    }
+
+    private void putIfPresent(Map<String, Object> input, String key, Object value) {
+        if (value != null) {
+            input.put(key, value);
+        }
     }
 
     private String canonicalHash(BusinessSubjectType subjectType) {

@@ -31,9 +31,19 @@ public enum PendingActionStatus {
     SUCCESS("SUCCESS", "成功"),
 
     /**
-     * 业务系统执行失败。
+     * 已确认业务系统没有执行成功。
      */
     FAILED("FAILED", "失败"),
+
+    /**
+     * 请求已经发出，但无法判断业务系统是否执行成功。
+     */
+    UNKNOWN("UNKNOWN", "结果待确认"),
+
+    /**
+     * 确认条件发生变化，拒绝执行。
+     */
+    REJECTED("REJECTED", "已拒绝"),
 
     /**
      * 用户主动取消。

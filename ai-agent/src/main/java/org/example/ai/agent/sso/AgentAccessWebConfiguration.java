@@ -17,11 +17,15 @@ public class AgentAccessWebConfiguration implements WebMvcConfigurer {
     @Override
     public void addInterceptors(InterceptorRegistry registry) {
         /*
-         * Agent接口、知识库接口和旧版AI接口统一进入身份校验。
+         * Agent接口和知识库接口统一进入身份校验。
          *
          * 首次SSO Ticket交换仍由拦截器内部放行，
          * 不会提前要求用户已经建立Agent会话。
          */
-        registry.addInterceptor(interceptor).addPathPatterns("/api/agent/**","/api/knowledge/**","/api/aiAgent/**");
+        registry.addInterceptor(interceptor)
+                .addPathPatterns(
+                        "/api/agent/**",
+                        "/api/knowledge/**"
+                );
     }
 }

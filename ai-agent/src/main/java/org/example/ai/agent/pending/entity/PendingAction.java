@@ -44,9 +44,26 @@ public class PendingAction {
     private String capabilityName;
 
     /**
+     * 创建预览时冻结的能力发布版本ID。
+     */
+    private Long capabilityVersionId;
+
+    /**
+     * 创建预览时冻结的能力配置摘要。
+     */
+    private String capabilityConfigChecksum;
+
+    /**
      * 固定操作参数 JSON。
      */
     private String inputJson;
+
+    /**
+     * 固定操作参数JSON的SHA-256。
+     *
+     * 确认和执行前重新计算，用于发现参数被修改。
+     */
+    private String inputDigest;
 
     /**
      * 操作摘要。

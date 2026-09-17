@@ -65,7 +65,7 @@ class BusinessSnapshotDerivationServiceTest {
                 new ProjectRecordAssociationService(), objectMapper, fixedClock()
         );
         when(accessService.reauthorize(any())).thenReturn(Optional.of(
-                new BusinessSnapshotAccessService.AccessGrant(9L, CONFIG, POLICY)
+                new BusinessSnapshotAccessService.AccessGrant(9L, CONFIG, POLICY, 60)
         ));
         when(fieldMapper.selectList(any())).thenReturn(List.of(field()));
         when(snapshotMapper.selectOne(any())).thenReturn(sourceSnapshot());

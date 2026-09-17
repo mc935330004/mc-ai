@@ -3,6 +3,7 @@ package org.example.ai.agent.chat.service.impl;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
 import lombok.RequiredArgsConstructor;
+import org.example.ai.agent.business.security.BusinessResponseAccessService;
 import org.example.ai.agent.chat.dto.ChatSessionCreateDTO;
 import org.example.ai.agent.chat.entity.AiChatMessage;
 import org.example.ai.agent.chat.entity.AiChatSession;
@@ -54,7 +55,7 @@ public class AiChatSessionServiceImpl implements AiChatSessionService {
     private static final String MESSAGE_TYPE_TEXT = "TEXT";
     private final ActiveAgentRunRegistry activeAgentRunRegistry;
     private final ResponseChecksumService responseChecksumService;
-
+    private final BusinessResponseAccessService responseAccessService;
 
     @Override
     public List<ChatModelVO> listModels(String userId) {
@@ -140,16 +141,14 @@ public class AiChatSessionServiceImpl implements AiChatSessionService {
 
     /**
      * 按用户、会话、运行和回答标识恢复快照。
-     * 不按最新一条消息猜测，不重新调用工作流或大模型。
+     * 不按最新一条消息猜测，不重新调用业务工作流或大模型。
      */
     @Override
-    public ChatResponseSnapshotVO getResponseSnapshot(String userId, String sessionId, String runId, String responseId) {
+    public ChatResponseSnapshotVO getResponseSnapshot(String userId, String sessionId, String runId, String responseId, String authorization) {
         requireSession(userId, sessionId);
+        requireAuthorization(authorization);
         if (!StringUtils.hasText(runId)) {
-            throw new BusinessException(
-                    ErrorCode.BAD_REQUEST,
-                    "运行ID不能为空"
-            );
+            throw new BusinessException(ErrorCode.BAD_REQUEST, "运行ID不能为空");
         }
 
         String runKey = runId.trim();
@@ -157,12 +156,16 @@ public class AiChatSessionServiceImpl implements AiChatSessionService {
 
         /*
          * 先读取活动状态，再读取数据库。
-         * 避免先查不到快照、随后任务保存并移除登记，
-         * 最后误判为没有可恢复结果。
+         * 避免查询快照与活动任务移除之间出现误判。
          */
-        boolean active = activeAgentRunRegistry.isActive(runKey, userId, sessionId);
+        boolean active = activeAgentRunRegistry.isActive(
+                runKey,
+                userId,
+                sessionId
+        );
 
-        List<AiChatMessage> candidates = messageMapper.selectList(new LambdaQueryWrapper<AiChatMessage>()
+        List<AiChatMessage> candidates = messageMapper.selectList(
+                new LambdaQueryWrapper<AiChatMessage>()
                         .eq(AiChatMessage::getUserId, userId)
                         .eq(AiChatMessage::getSessionId, sessionId)
                         .eq(AiChatMessage::getRunId, runKey)
@@ -173,9 +176,10 @@ public class AiChatSessionServiceImpl implements AiChatSessionService {
 
         String documentJson = null;
         JsonNode document = null;
+
         for (AiChatMessage message : candidates) {
             JsonNode payload = readResponsePayload(message.getPayloadJson());
-            // 数据库查询条件和快照内部身份必须一致。
+
             if (!sessionId.equals(payload.path("conversationId").asText())
                     || !runKey.equals(payload.path("runId").asText())) {
                 throw new BusinessException(
@@ -184,39 +188,73 @@ public class AiChatSessionServiceImpl implements AiChatSessionService {
                 );
             }
 
-            if (responseKey != null && !responseKey.equals(payload.path("responseId").asText())) {
+            if (responseKey != null
+                    && !responseKey.equals(payload.path("responseId").asText())) {
                 continue;
             }
 
-            // 定位不唯一时明确报错，不能随意取第一条或最后一条。
             if (document != null) {
-                throw new BusinessException(409, "同一次回答存在多份快照，无法安全恢复");
+                throw new BusinessException(
+                        409,
+                        "同一次回答存在多份快照，无法安全恢复"
+                );
             }
+
             document = payload;
             documentJson = message.getPayloadJson();
         }
+
+        /*
+         * 返回数据库正文之前使用当前认证重新复权。
+         * checksum必须根据删除私有权限节点后的正文计算。
+         */
+        if (documentJson != null) {
+            documentJson = responseAccessService.authorizeAndSanitize(
+                    documentJson,
+                    userId,
+                    sessionId,
+                    runKey,
+                    authorization
+            );
+            document = readResponsePayload(documentJson);
+        }
+
         String state;
-        if (document != null && !"RUNNING".equals(document.path("status").asText())) {
-            // 数据库最终状态优先，活动任务可能还在执行收尾。
+        if (document != null
+                && !"RUNNING".equals(document.path("status").asText())) {
             state = "READY";
         } else {
             state = active ? "PENDING" : "UNAVAILABLE";
         }
 
-        String checksum = documentJson == null ? null : responseChecksumService.calculate(documentJson);
-        return new ChatResponseSnapshotVO(state, documentJson, checksum);
+        String checksum = documentJson == null
+                ? null
+                : responseChecksumService.calculate(documentJson);
+
+        return new ChatResponseSnapshotVO(
+                state,
+                documentJson,
+                checksum
+        );
     }
 
     @Override
-    public List<ChatMessageVO> listMessages(String userId, String sessionId) {
-        //  所有会话操作必须先验证当前用户的会话归属。
+    public List<ChatMessageVO> listMessages(String userId, String sessionId, String authorization) {
         requireSession(userId, sessionId);
-        return messageMapper.selectList(new LambdaQueryWrapper<AiChatMessage>()
-                        .eq(AiChatMessage::getUserId, userId)
-                        .eq(AiChatMessage::getSessionId, sessionId)
-                        .orderByAsc(AiChatMessage::getCreatedAt))
+        requireAuthorization(authorization);
+        return messageMapper.selectList(
+                        new LambdaQueryWrapper<AiChatMessage>()
+                                .eq(AiChatMessage::getUserId, userId)
+                                .eq(AiChatMessage::getSessionId, sessionId)
+                                .orderByAsc(AiChatMessage::getCreatedAt)
+                )
                 .stream()
-                .map(this::toMessageVO)
+                .map(message -> toMessageVO(
+                        message,
+                        userId,
+                        sessionId,
+                        authorization
+                ))
                 .toList();
     }
 
@@ -241,23 +279,43 @@ public class AiChatSessionServiceImpl implements AiChatSessionService {
     }
 
     @Override
-    public String buildMemory(String userId, String sessionId) {
-        //  所有会话操作必须先验证当前用户的会话归属。
+    public String buildMemory(String userId, String sessionId, String authorization) {
         requireSession(userId, sessionId);
-        List<AiChatMessage> messages = messageMapper.selectList(new LambdaQueryWrapper<AiChatMessage>()
-                .eq(AiChatMessage::getUserId, userId)
-                .eq(AiChatMessage::getSessionId, sessionId)
-                .orderByDesc(AiChatMessage::getCreatedAt)
-                .last("LIMIT " + MEMORY_MESSAGE_LIMIT));
+        requireAuthorization(authorization);
+        List<AiChatMessage> messages = messageMapper.selectList(
+                new LambdaQueryWrapper<AiChatMessage>()
+                        .eq(AiChatMessage::getUserId, userId)
+                        .eq(AiChatMessage::getSessionId, sessionId)
+                        .orderByDesc(AiChatMessage::getCreatedAt)
+                        .last("LIMIT " + MEMORY_MESSAGE_LIMIT)
+        );
 
         Collections.reverse(messages);
 
         StringBuilder memory = new StringBuilder();
         for (AiChatMessage message : messages) {
+            /*
+             * 用户自己输入的内容可以保留。
+             * 助手业务回答必须使用当前认证重新复权。
+             */
+            if ("ASSISTANT".equals(message.getRole())) {
+                try {
+                    sanitizePayload(
+                            message,
+                            userId,
+                            sessionId,
+                            authorization
+                    );
+                } catch (BusinessException exception) {
+                    continue;
+                }
+            }
+
             memory.append("USER".equals(message.getRole()) ? "用户：" : "助手：")
                     .append(message.getContent())
                     .append("\n");
         }
+
         return memory.toString();
     }
 
@@ -513,17 +571,77 @@ public class AiChatSessionServiceImpl implements AiChatSessionService {
                 .build();
     }
 
-    private ChatMessageVO toMessageVO(AiChatMessage message) {
+    /**
+     * 历史业务回答复权失败时只返回安全占位内容。
+     */
+    private ChatMessageVO toMessageVO(AiChatMessage message, String userId, String sessionId, String authorization) {
+        String content = message.getContent();
+        String payloadJson = message.getPayloadJson();
+        if ("ASSISTANT".equals(message.getRole())
+                && StringUtils.hasText(payloadJson)) {
+            try {
+                payloadJson = sanitizePayload(
+                        message,
+                        userId,
+                        sessionId,
+                        authorization
+                );
+            } catch (BusinessException exception) {
+                content = "该历史回答当前无权访问，请重新查询。";
+                payloadJson = null;
+            }
+        }
+
         return ChatMessageVO.builder()
                 .id(message.getId())
                 .role(message.getRole())
-                .content(message.getContent())
+                .content(content)
                 .messageType(message.getMessageType())
-                .payloadJson(message.getPayloadJson())
+                .payloadJson(payloadJson)
                 .runId(message.getRunId())
                 .modelCode(message.getModelCode())
                 .createdAt(message.getCreatedAt())
                 .build();
+    }
+
+    /**
+     * 复核并删除持久化回答中的服务端私有权限节点。
+     */
+    private String sanitizePayload(
+            AiChatMessage message,
+            String userId,
+            String sessionId,
+            String authorization) {
+        if (!StringUtils.hasText(message.getPayloadJson())) {
+            return null;
+        }
+
+        if (!StringUtils.hasText(message.getRunId())) {
+            throw new BusinessException(
+                    ErrorCode.NOT_FOUND,
+                    "回答不存在或无权访问"
+            );
+        }
+
+        return responseAccessService.authorizeAndSanitize(
+                message.getPayloadJson(),
+                userId,
+                sessionId,
+                message.getRunId(),
+                authorization
+        );
+    }
+
+    /**
+     * 所有历史、恢复和记忆入口都必须携带当前认证。
+     */
+    private void requireAuthorization(String authorization) {
+        if (!StringUtils.hasText(authorization)) {
+            throw new BusinessException(
+                    ErrorCode.UNAUTHORIZED,
+                    "当前认证信息不能为空"
+            );
+        }
     }
 
     /**

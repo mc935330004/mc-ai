@@ -361,7 +361,7 @@ class BusinessAssistantSecurityIntegrationTest {
     }
 
     private BusinessSnapshotAccessService.AccessGrant grant(String policy) {
-        return new BusinessSnapshotAccessService.AccessGrant(1L, CONFIG_CHECKSUM, policy);
+        return new BusinessSnapshotAccessService.AccessGrant(1L, CONFIG_CHECKSUM, policy, 60);
     }
 
     private CompositeReportTask successfulTask() {

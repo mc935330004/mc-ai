@@ -16,6 +16,7 @@ import org.example.ai.agent.business.department.DepartmentBusinessQueryService;
 import org.example.ai.agent.business.department.DepartmentBusinessQueryService.DepartmentQueryStatus;
 import org.example.ai.agent.business.intent.BusinessQueryIntent;
 import org.example.ai.agent.business.intent.BusinessQueryIntentResolver;
+import org.example.ai.agent.business.metric.ProjectMetricReadService;
 import org.example.ai.agent.business.model.BusinessSubjectType;
 import org.example.ai.agent.business.model.DatasetExecutionStatus;
 import org.example.ai.agent.business.panorama.ProjectPanoramaExecutionService;
@@ -33,7 +34,9 @@ import org.example.ai.agent.business.person.PersonDatasetSelectionService.Select
 import org.example.ai.agent.business.person.ProjectPeriodContextService;
 import org.example.ai.agent.business.person.model.AttendanceDayResult;
 import org.example.ai.agent.business.person.model.MultiPersonSummary.PersonQueryStatus;
+import org.example.ai.agent.business.policy.BusinessPolicyComparisonService;
 import org.example.ai.agent.business.report.BusinessAssistantReportService;
+import org.example.ai.agent.business.security.BusinessResponseAccessService;
 import org.example.ai.agent.business.subject.SubjectResolutionService;
 import org.example.ai.agent.business.subject.model.SubjectCandidate;
 import org.example.ai.agent.business.subject.model.SubjectResolutionRequest;
@@ -42,37 +45,35 @@ import org.example.ai.agent.business.subject.model.SubjectResolutionState;
 import org.example.ai.agent.chat.entity.AgentRequest;
 import org.example.ai.agent.chat.memory.model.BusinessConversationState;
 import org.example.ai.agent.chat.memory.service.ConversationStateService;
-import org.example.ai.agent.chat.protocol.block.ArtifactBlock;
-import org.example.ai.agent.chat.protocol.block.ResponseBlock;
-import org.example.ai.agent.chat.protocol.block.StatusListBlock;
-import org.example.ai.agent.chat.protocol.block.TextBlock;
+import org.example.ai.agent.chat.protocol.block.*;
 import org.example.ai.agent.chat.protocol.response.AiResponse;
 import org.example.ai.agent.chat.protocol.response.ResponseContext;
 import org.example.ai.agent.chat.protocol.response.ResponseMeta;
+import org.example.ai.agent.chat.protocol.response.ResponseReference;
 import org.example.ai.agent.chat.protocol.stream.BlockErrorPayload;
 import org.example.ai.agent.chat.service.AiChatSessionService;
 import org.example.ai.agent.chat.support.AgentStreamSession;
 import org.example.ai.agent.common.enums.ModelCallType;
+import org.example.ai.agent.common.enums.SnapshotReadMode;
 import org.example.ai.agent.common.enums.protocol.BlockSource;
 import org.example.ai.agent.common.enums.protocol.BlockStatus;
 import org.example.ai.agent.common.enums.protocol.BlockType;
 import org.example.ai.agent.common.enums.protocol.Tone;
 import org.example.ai.agent.common.enums.protocol.ValueType;
 import org.example.ai.agent.common.modelusage.ModelCallContext;
+import org.example.ai.agent.modules.knowledgebase.model.KnowledgeEvidence;
 import org.springframework.stereotype.Service;
 import org.springframework.util.StringUtils;
+import org.example.ai.agent.business.metric.BusinessMetricCatalogService.MetricOption;
+import org.example.ai.agent.common.model.ProjectListScope;
+import org.example.ai.agent.business.answer.DeterministicBusinessAnswerComposer.RowActionDefinition;
+import org.example.ai.agent.common.model.ProjectRelationship;
+import org.example.ai.agent.business.panorama.model.ProjectPanoramaPlan;
+import org.example.ai.agent.common.enums.protocol.ResponseStatus;
 
+import java.util.*;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
-import java.util.ArrayList;
-import java.util.EnumMap;
-import java.util.HashSet;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Locale;
-import java.util.Map;
-import java.util.Objects;
-import java.util.Set;
 
 /**
  * 只读业务对话的薄编排层，权限、工作流执行、计算和报告持久化继续委托给现有服务。
@@ -98,7 +99,9 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
     private final BusinessAssistantReportService reportService;
     private final ConversationStateService conversationStateService;
     private final AiChatSessionService chatSessionService;
-    private final ObjectMapper objectMapper;
+    private final ProjectMetricReadService projectMetricReadService;
+    private final BusinessResponseAccessService responseAccessService;
+    private final BusinessPolicyComparisonService policyComparisonService;
 
     public BusinessAssistantServiceImpl(
             BusinessQueryIntentResolver intentResolver,
@@ -115,6 +118,9 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
             BusinessAssistantReportService reportService,
             ConversationStateService conversationStateService,
             AiChatSessionService chatSessionService,
+            ProjectMetricReadService projectMetricReadService,
+            BusinessResponseAccessService responseAccessService,
+            BusinessPolicyComparisonService policyComparisonService,
             ObjectMapper objectMapper) {
         this.intentResolver = Objects.requireNonNull(intentResolver, "intentResolver不能为空");
         this.subjectResolutionService = Objects.requireNonNull(
@@ -150,7 +156,10 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
                 conversationStateService, "conversationStateService不能为空"
         );
         this.chatSessionService = Objects.requireNonNull(chatSessionService, "chatSessionService不能为空");
-        this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper不能为空");
+        this.projectMetricReadService = Objects.requireNonNull(projectMetricReadService, "projectMetricReadService不能为空");
+        this.responseAccessService = Objects.requireNonNull(responseAccessService, "responseAccessService不能为空");
+        this.policyComparisonService = Objects.requireNonNull(policyComparisonService, "policyComparisonService不能为空");
+
     }
 
     @Override
@@ -201,50 +210,332 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
         }
     }
 
+    /**
+     * 返回主体候选或安全终止结果。
+     */
     private void handleUnresolved(
             AgentRequest request,
             AgentStreamSession stream,
             String runId,
             BusinessQueryIntent intent,
             Selection personSelection,
-            SubjectResolutionResult result) throws Exception {
+            SubjectResolutionResult result
+    ) throws Exception {
         ResponseContext context = new ResponseContext(
-                intent.subjectType() == null ? "" : intent.subjectType().name(),
-                "", "", scopeLabel(intent), intent.periodStart(), intent.periodEnd(), LocalDateTime.now()
+                intent.subjectType() == null
+                        ? ""
+                        : intent.subjectType().name(),
+                "",
+                "",
+                scopeLabel(intent),
+                intent.periodStart(),
+                intent.periodEnd(),
+                LocalDateTime.now()
         );
+
         startWithContext(stream, context);
-        if (result.state() == SubjectResolutionState.CANDIDATES) {
-            saveCandidateState(request, runId, intent, personSelection, result.candidates());
-            DatasetAnswerInput candidates = new DatasetAnswerInput(
-                    "SUBJECT_CANDIDATES", "可选主体", DatasetExecutionStatus.SUCCESS, true,
-                    Map.of("rows", candidateRows(result.candidates())), Map.of(), result.safeMessage()
+
+        if (result.state()
+                == SubjectResolutionState.CANDIDATES) {
+            saveCandidateState(
+                    request,
+                    runId,
+                    intent,
+                    personSelection,
+                    result.candidates()
             );
-            TableDefinition table = new TableDefinition(
-                    "subject_candidates", "请选择要查询的主体", "SUBJECT_CANDIDATES", "rows",
-                    List.of(
-                            column("displayName", "名称"),
-                            column("projectCode", "项目编码"),
-                            column("projectType", "项目类型"),
-                            column("maskedEmployeeNo", "工号"),
-                            column("selectionToken", "选择凭证")
-                    )
+
+            DatasetAnswerInput candidates =
+                    new DatasetAnswerInput(
+                            "SUBJECT_CANDIDATES",
+                            "可选主体",
+                            DatasetExecutionStatus.SUCCESS,
+                            true,
+                            Map.of(
+                                    "rows",
+                                    candidateRows(
+                                            result.candidates()
+                                    )
+                            ),
+                            Map.of(),
+                            result.safeMessage()
+                    );
+
+            TableDefinition table =
+                    candidateTableDefinition(
+                            intent.subjectType(),
+                            result
+                    );
+
+            finish(
+                    request,
+                    stream,
+                    response(
+                            request,
+                            stream,
+                            runId,
+                            context,
+                            false,
+                            List.of(candidates),
+                            List.of(),
+                            List.of(table),
+                            List.of(),
+                            null,
+                            false
+                    ),
+                    false
             );
-            finish(request, stream, response(
-                    request, stream, runId, context, false,
-                    List.of(candidates), List.of(), List.of(table), List.of(), null, false
-            ), false);
             return;
         }
-        DatasetExecutionStatus status = result.state() == SubjectResolutionState.DENIED
-                ? DatasetExecutionStatus.DENIED : DatasetExecutionStatus.EMPTY;
-        DatasetAnswerInput terminal = new DatasetAnswerInput(
-                "SUBJECT_RESOLUTION", "主体定位", status, false,
-                Map.of(), Map.of(), result.safeMessage()
+
+        DatasetExecutionStatus status =
+                result.state()
+                        == SubjectResolutionState.DENIED
+                        ? DatasetExecutionStatus.DENIED
+                        : DatasetExecutionStatus.EMPTY;
+
+        DatasetAnswerInput terminal =
+                new DatasetAnswerInput(
+                        "SUBJECT_RESOLUTION",
+                        "主体定位",
+                        status,
+                        false,
+                        Map.of(),
+                        Map.of(),
+                        result.safeMessage()
+                );
+
+        finish(
+                request,
+                stream,
+                response(
+                        request,
+                        stream,
+                        runId,
+                        context,
+                        false,
+                        List.of(terminal),
+                        List.of(),
+                        List.of(),
+                        List.of(),
+                        null,
+                        false
+                ),
+                false
         );
-        finish(request, stream, response(
-                request, stream, runId, context, false,
-                List.of(terminal), List.of(), List.of(), List.of(), null, false
-        ), false);
+    }
+
+    /**
+     * 根据主体类型生成候选表格。
+     */
+    private TableDefinition candidateTableDefinition(
+            BusinessSubjectType subjectType,
+            SubjectResolutionResult result
+    ) {
+        if (subjectType == BusinessSubjectType.PROJECT) {
+            return new TableDefinition(
+                    "subject_candidates",
+                    "请选择要分析的项目",
+                    "SUBJECT_CANDIDATES",
+                    "rows",
+                    List.of(
+                            column(
+                                    "displayName",
+                                    "项目名称"
+                            ),
+                            column(
+                                    "projectCode",
+                                    "项目编码"
+                            ),
+                            column(
+                                    "projectType",
+                                    "项目类型"
+                            ),
+                            column(
+                                    "projectRelationship",
+                                    "与我的关系"
+                            ),
+                            column(
+                                    "projectStatus",
+                                    "项目状态"
+                            )
+                    ),
+                    result.pageNumber(),
+                    result.pageSize(),
+                    result.totalKnown()
+                            ? result.totalCount()
+                            : 0L,
+                    result.totalKnown(),
+                    result.hasNext(),
+                    new RowActionDefinition(
+                            "SELECT_SUBJECT",
+                            "分析此项目",
+                            "selectionToken"
+                    )
+            );
+        }
+
+        return new TableDefinition(
+                "subject_candidates",
+                "请选择要查询的主体",
+                "SUBJECT_CANDIDATES",
+                "rows",
+                List.of(
+                        column("displayName", "名称"),
+                        column(
+                                "maskedEmployeeNo",
+                                "工号"
+                        ),
+                        column(
+                                "departmentPath",
+                                "所属部门"
+                        ),
+                        column(
+                                "selectionToken",
+                                "选择凭证"
+                        )
+                ),
+                result.pageNumber(),
+                result.pageSize(),
+                result.totalKnown()
+                        ? result.totalCount()
+                        : 0L,
+                result.totalKnown(),
+                result.hasNext(),
+                null
+        );
+    }
+
+    /**
+     * 返回当前项目配置允许选择的分析范围，不执行业务模块。
+     */
+    private void handleProjectScopeClarification(
+            AgentRequest request,
+            AgentStreamSession stream,
+            String runId,
+            SubjectCandidate subject,
+            ResponseContext context) throws Exception {
+        ProjectPanoramaPlan plan =
+                panoramaExecutionService.configuredPlan(subject.projectType());
+
+        Map<String, String> names = datasetNames();
+
+        List<String> allowedCodes = plan.modules().stream()
+                .map(ProjectPanoramaPlan.Module::datasetCode)
+                .filter(code -> !"PROJECT_BASE".equals(code))
+                .toList();
+
+        List<SelectionBlock.Option> options = new ArrayList<>();
+
+        boolean quickAvailable = plan.modules().stream()
+                .anyMatch(module -> "PROJECT_BASE".equals(
+                        module.datasetCode()
+                ));
+
+        if (quickAvailable) {
+            options.add(
+                    new SelectionBlock.Option(
+                            "QUICK",
+                            "快速概览",
+                            "查看项目基础信息和核心状态",
+                            true,
+                            false
+                    )
+            );
+        }
+
+        for (String datasetCode : allowedCodes) {
+            options.add(
+                    new SelectionBlock.Option(
+                            datasetCode,
+                            names.getOrDefault(datasetCode, datasetCode),
+                            "只分析该业务模块",
+                            false,
+                            false
+                    )
+            );
+        }
+
+        options.add(
+                new SelectionBlock.Option(
+                        "DEEP",
+                        "完整分析",
+                        "执行当前项目配置的全部允许模块",
+                        true,
+                        false
+                )
+        );
+
+        String clarificationId = UUID.randomUUID().toString();
+
+        SelectionBlock block = new SelectionBlock(
+                "project_analysis_scope",
+                "请选择分析范围",
+                15,
+                BlockStatus.READY,
+                BlockSource.BUSINESS,
+                clarificationId,
+                "MULTIPLE",
+                "开始分析",
+                options
+        );
+        saveProjectScopeClarificationState(
+                request,
+                runId,
+                subject,
+                clarificationId,
+                allowedCodes
+        );
+
+        AiResponse response = new AiResponse(
+                AiResponse.CURRENT_SCHEMA_VERSION,
+                stream.getMessageId(),
+                runId,
+                request.getConversationId(),
+                org.example.ai.agent.common.enums.protocol.PresentationMode.CHAT,
+                ResponseStatus.COMPLETED,
+                false,
+                context,
+                List.of(block),
+                List.of(),
+                ResponseMeta.empty()
+        );
+
+        finish(request, stream, response, false);
+    }
+
+    /**
+     * 将待确认范围绑定到当前用户、会话和已验证项目。
+     */
+    private void saveProjectScopeClarificationState(
+            AgentRequest request,
+            String runId,
+            SubjectCandidate subject,
+            String clarificationId,
+            List<String> allowedCodes) {
+        BusinessConversationState state = new BusinessConversationState();
+        state.setRouteType("BUSINESS_ASSISTANT");
+        state.setBusinessTopic(request.getUserQuestion());
+        state.setActiveObjectType(BusinessSubjectType.PROJECT.name());
+        state.setActiveObjectIds(List.of(subjectId(subject)));
+        state.setAwaitingClarification(true);
+        state.setLastRunId(runId);
+
+        Map<String, Object> input = new LinkedHashMap<>();
+        input.put("subjectType", BusinessSubjectType.PROJECT.name());
+        input.put("selectionToken", subject.selectionToken());
+        input.put("analysisClarificationId", clarificationId);
+        input.put("analysisClarificationExpiresAt", LocalDateTime.now().plusMinutes(10).toString());
+        input.put("analysisAllowedDatasetCodes", List.copyOf(allowedCodes));
+
+        state.setLastInput(input);
+        state.setUpdatedAt(LocalDateTime.now());
+
+        conversationStateService.saveState(
+                request.getUserId(),
+                request.getConversationId(),
+                state
+        );
     }
 
     private void handleProject(
@@ -254,40 +545,314 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
             BusinessQueryIntent intent,
             SubjectCandidate subject,
             ResponseContext context) throws Exception {
+        boolean policyComparison = policyComparisonRequested(request.getEffectiveQuestion());
+        if (intent.singleMetricRequested()) {
+            handleProjectMetric(request, stream, runId, intent, subject, context);
+            return;
+        }
+        ProjectPanoramaPlan.Scope analysisScope = projectAnalysisScope(request, intent, subject);
+        if (analysisScope == null) {
+            handleProjectScopeClarification(request, stream, runId, subject, context);
+            return;
+        }
         Set<String> startedBlocks = new HashSet<>();
         StatusProgress progress = new StatusProgress(stream, datasetNames());
-        ProjectPanoramaResult panorama = reuseProjectPanorama(request, runId, intent, subject);
+        ProjectPanoramaResult panorama = reuseProjectPanorama(request, runId, intent, subject, analysisScope);
         if (panorama == null) {
             panorama = panoramaExecutionService.execute(
                     new ProjectPanoramaCommand(
-                            runId, request.getUserId(), request.getConversationId(),
-                            request.getAuthorization(), Map.of(), subject.selectionToken(), canonicalQuery(intent)
-                    ), progress::accept
+                            runId,
+                            request.getUserId(),
+                            request.getConversationId(),
+                            request.getAuthorization(),
+                            Map.of(),
+                            subject.selectionToken(),
+                            canonicalQuery(intent)
+                    ),
+                    analysisScope,
+                    progress::accept
             );
         }
-        List<DatasetAnswerInput> datasets = new ArrayList<>(projectDatasets(panorama, progress.names()));
+
+        List<DatasetAnswerInput> datasets = new ArrayList<>(
+                projectDatasets(panorama, progress.names())
+        );
+
         ArtifactBlock artifact = null;
+
         if (StringUtils.hasText(intent.exportFormat())) {
             try {
                 artifact = reportService.createProjectReport(
                         new BusinessAssistantReportService.ProjectReportCommand(
-                                reportIdentity(request, runId, subject), subject.projectType(), subject.projectCode(),
-                                intent.exportFormat(), canonicalQuery(intent), intent.refresh(), panorama
+                                reportIdentity(request, runId, subject),
+                                subject.projectType(),
+                                subject.projectCode(),
+                                intent.exportFormat(),
+                                canonicalQuery(intent),
+                                intent.refresh(),
+                                panorama
                         )
                 );
             } catch (RuntimeException exception) {
-                // 报告创建失败不清空已成功查询的项目业务数据。
-                log.warn("业务报告任务创建失败，runId={}，errorType={}",
-                        runId, exception.getClass().getSimpleName());
-                datasets.add(failedDataset("PROJECT_REPORT", "报告任务创建失败，业务数据仍可查看"));
+                // 报告失败不能清除已经成功取得的业务数据。
+                log.warn(
+                        "业务报告任务创建失败，runId={}，errorType={}",
+                        runId,
+                        exception.getClass().getSimpleName()
+                );
+
+                datasets.add(
+                        failedDataset(
+                                "PROJECT_REPORT",
+                                "报告任务创建失败，业务数据仍可查看"
+                        )
+                );
             }
         }
+
         AiResponse composed = response(
-                request, stream, runId, context, panorama.allModulesComplete(), datasets,
-                metricDefinitions(datasets), tableDefinitions(datasets), panorama.issues(), artifact, true
+                request,
+                stream,
+                runId,
+                context,
+                panorama.allModulesComplete(),
+                datasets,
+                metricDefinitions(datasets),
+                tableDefinitions(datasets),
+                panorama.issues(),
+                artifact,
+                !policyComparison
         );
-        saveState(request, runId, subject, intent, panorama.aggregateSnapshotId(), List.of(), null);
-        finish(request, stream, composed, true, startedBlocks);
+        if (policyComparison) {
+            composed = appendPolicyComparison(request, runId, panorama, composed);
+        }
+        saveState(request, runId, subject, intent, panorama.aggregateSnapshotId(), analysisScope.datasetCodes(), null, analysisScope);
+        finish(request, stream, composed, !policyComparison, startedBlocks);
+    }
+
+    /**
+     * 校验前端提交的范围选择仍属于当前用户、会话和项目。
+     */
+    private ProjectPanoramaPlan.Scope projectAnalysisActionScope(
+            AgentRequest request,
+            SubjectCandidate subject) {
+        String clarificationId = extraText(request, "analysisClarificationId");
+        String modeValue = extraText(request, "analysisMode");
+        List<String> selectedCodes = extraStringList(request, "analysisDatasetCodes");
+
+        if (!StringUtils.hasText(clarificationId)) {
+            if (StringUtils.hasText(modeValue) || !selectedCodes.isEmpty()) {
+                throw new IllegalArgumentException("项目分析范围凭证缺失");
+            }
+            return null;
+        }
+
+        BusinessConversationState state = conversationStateService.loadState(
+                request.getUserId(),
+                request.getConversationId()
+        ).orElseThrow(() -> new IllegalArgumentException("项目分析范围已失效"));
+
+        Map<String, Object> input = state.getLastInput();
+
+        if (!state.isAwaitingClarification()
+                || !clarificationId.equals(Objects.toString(
+                input.get("analysisClarificationId"),
+                ""
+        ))
+                || !state.getActiveObjectIds().contains(subjectId(subject))
+                || !subject.selectionToken().equals(Objects.toString(
+                input.get("selectionToken"),
+                ""
+        ))) {
+            throw new IllegalArgumentException("项目分析范围与当前会话不匹配");
+        }
+
+        String expiresAt = Objects.toString(
+                input.get("analysisClarificationExpiresAt"),
+                ""
+        );
+
+        try {
+            if (!StringUtils.hasText(expiresAt)
+                    || LocalDateTime.parse(expiresAt).isBefore(LocalDateTime.now())) {
+                throw new IllegalArgumentException("项目分析范围已过期");
+            }
+        } catch (java.time.format.DateTimeParseException exception) {
+            throw new IllegalArgumentException("项目分析范围有效期不合法");
+        }
+
+        List<String> allowedCodes = stringList(
+                input.get("analysisAllowedDatasetCodes")
+        );
+
+        ProjectPanoramaPlan.AnalysisMode mode;
+
+        try {
+            mode = ProjectPanoramaPlan.AnalysisMode.valueOf(modeValue);
+        } catch (RuntimeException exception) {
+            throw new IllegalArgumentException("项目分析模式不合法");
+        }
+
+        if (mode == ProjectPanoramaPlan.AnalysisMode.FOCUSED
+                && (selectedCodes.isEmpty()
+                || !allowedCodes.containsAll(selectedCodes))) {
+            throw new IllegalArgumentException("所选项目分析模块不可用");
+        }
+
+        return new ProjectPanoramaPlan.Scope(mode, selectedCodes);
+    }
+
+    private List<String> extraStringList(AgentRequest request, String key) {
+        Object value = request.getExtra() == null
+                ? null
+                : request.getExtra().get(key);
+
+        return stringList(value);
+    }
+
+    private List<String> stringList(Object value) {
+        if (!(value instanceof List<?> values)
+                || values.stream().anyMatch(item -> !(item instanceof String))) {
+            return List.of();
+        }
+
+        return values.stream()
+                .map(String.class::cast)
+                .map(String::trim)
+                .filter(StringUtils::hasText)
+                .distinct()
+                .toList();
+    }
+
+    /**
+     * 只接受明确选择、明确自然语言或可信会话状态中的分析范围。
+     */
+    private ProjectPanoramaPlan.Scope projectAnalysisScope(
+            AgentRequest request,
+            BusinessQueryIntent intent,
+            SubjectCandidate subject) {
+        ProjectPanoramaPlan.Scope actionScope = projectAnalysisActionScope(request, subject);
+
+        if (actionScope != null) {
+            return actionScope;
+        }
+        // 制度对照只读取付款模块，避免执行无关项目全景数据集。
+        if (policyComparisonRequested(request.getEffectiveQuestion())) {
+            return new ProjectPanoramaPlan.Scope(
+                    ProjectPanoramaPlan.AnalysisMode.FOCUSED,
+                    List.of("PAYMENT")
+            );
+        }
+        if (!intent.datasetCodes().isEmpty()) {
+            return new ProjectPanoramaPlan.Scope(
+                    ProjectPanoramaPlan.AnalysisMode.FOCUSED,
+                    intent.datasetCodes()
+            );
+        }
+
+        String question = Objects.toString(request.getEffectiveQuestion(), "")
+                .replaceAll("\\s+", "");
+
+        if (question.contains("快速概览")) {
+            return new ProjectPanoramaPlan.Scope(
+                    ProjectPanoramaPlan.AnalysisMode.QUICK,
+                    List.of()
+            );
+        }
+
+        if (question.contains("完整分析")
+                || question.contains("全面分析")
+                || question.contains("全景分析")
+                || question.contains("项目全景")) {
+            return new ProjectPanoramaPlan.Scope(
+                    ProjectPanoramaPlan.AnalysisMode.DEEP,
+                    List.of()
+            );
+        }
+
+        if (StringUtils.hasText(intent.projectCode())) {
+            return null;
+        }
+
+        String inheritedMode = trustedInheritedText(request, "analysisMode");
+
+        if (!StringUtils.hasText(inheritedMode)) {
+            return null;
+        }
+
+        try {
+            ProjectPanoramaPlan.AnalysisMode mode =
+                    ProjectPanoramaPlan.AnalysisMode.valueOf(inheritedMode);
+
+            List<String> datasetCodes = mode == ProjectPanoramaPlan.AnalysisMode.FOCUSED
+                    ? trustedInheritedStringList(request, "analysisDatasetCodes")
+                    : List.of();
+
+            return new ProjectPanoramaPlan.Scope(mode, datasetCodes);
+        } catch (IllegalArgumentException ignored) {
+            return null;
+        }
+    }
+
+    /**
+     * 单指标问题只执行目标指标所属的数据集。
+     *
+     * 第一阶段不生成综合说明、不创建报告、不执行项目全景。
+     */
+    private void handleProjectMetric(
+            AgentRequest request,
+            AgentStreamSession stream,
+            String runId,
+            BusinessQueryIntent intent,
+            SubjectCandidate subject,
+            ResponseContext context) throws Exception {
+        ProjectMetricReadService.Result result =
+                projectMetricReadService.execute(
+                        new ProjectPanoramaCommand(
+                                runId,
+                                request.getUserId(),
+                                request.getConversationId(),
+                                request.getAuthorization(),
+                                Map.of(),
+                                subject.selectionToken(),
+                                canonicalQuery(intent)
+                        ),
+                        intent.datasetCodes(),
+                        request.getEffectiveQuestion()
+                );
+
+        MetricOption metric = result.metric();
+
+        String datasetCode = metric == null
+                ? "PROJECT_METRIC"
+                : metric.datasetCode();
+
+        String datasetName = metric == null
+                ? "项目指标"
+                : metric.datasetName();
+
+        DatasetAnswerInput dataset =
+                new DatasetAnswerInput(
+                        datasetCode,
+                        datasetName,
+                        result.status(),
+                        result.dataComplete(),
+                        result.displayFacts(),
+                        result.modelFacts(),
+                        result.safeMessage()
+                );
+
+        List<MetricDefinition> definitions = metric == null ? List.of() : List.of(new MetricDefinition(metric.datasetCode(),
+                        metric.metricCode(), metric.metricName(), metric.valueType(), metric.unit(), Tone.DEFAULT));
+
+        /*
+         * 权威数值直接由MetricsBlock展示。
+         * 单指标回答不再额外调用模型生成重复说明。
+         */
+        AiResponse composed = response(request, stream, runId, context,
+                result.dataComplete(), List.of(dataset), definitions, List.of(), List.of(), null, false);
+        saveState(request, runId, subject, intent, null, List.of(), null);
+        finish(request, stream, composed, false);
     }
 
     /**
@@ -446,10 +1011,19 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
             java.time.LocalDate periodStart,
             java.time.LocalDate periodEnd) {
         return new BusinessQueryIntent(
-                intent.subjectType(), intent.projectCode(), intent.personName(), intent.employeeNo(),
-                intent.projectYear(), periodStart, periodEnd, intent.datasetCodes(),
-                intent.refresh(), intent.exportFormat(), intent.anomalyPeopleRequested(),
-                intent.projectPeriodRequested()
+                intent.subjectType(),
+                intent.projectCode(),
+                intent.personName(),
+                intent.employeeNo(),
+                intent.projectYear(),
+                periodStart,
+                periodEnd,
+                intent.datasetCodes(),
+                intent.refresh(),
+                intent.exportFormat(),
+                intent.anomalyPeopleRequested(),
+                intent.projectPeriodRequested(),
+                intent.singleMetricRequested()
         );
     }
 
@@ -581,28 +1155,77 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
             AgentRequest request,
             String runId,
             BusinessQueryIntent intent,
-            SubjectCandidate subject) {
+            SubjectCandidate subject,
+            ProjectPanoramaPlan.Scope analysisScope) {
         String snapshotId = trustedInheritedText(request, "panoramaSnapshotId");
-        if (intent.refresh() || StringUtils.hasText(intent.projectCode())
-                || !StringUtils.hasText(snapshotId)) {
+        String inheritedMode = trustedInheritedText(request, "analysisMode");
+        List<String> inheritedCodes = trustedInheritedStringList(
+                request,
+                "analysisDatasetCodes"
+        );
+
+        SnapshotReadMode readMode = snapshotReadMode(request, intent);
+        boolean sameScope = analysisScope.mode().name().equals(inheritedMode)
+                && analysisScope.datasetCodes().equals(inheritedCodes);
+
+        if (readMode == SnapshotReadMode.FORCE_LIVE
+                || StringUtils.hasText(intent.projectCode())
+                || !StringUtils.hasText(snapshotId)
+                || !sameScope) {
             return null;
         }
+
         return panoramaSnapshotReuseService.reuse(
                 new ProjectPanoramaSnapshotReuseService.ReuseCommand(
-                        runId, request.getUserId(), request.getConversationId(),
-                        request.getAuthorization(), Map.of(), subject.selectionToken(),
-                        snapshotId, canonicalQuery(intent)
+                        runId,
+                        request.getUserId(),
+                        request.getConversationId(),
+                        request.getAuthorization(),
+                        Map.of(),
+                        subject.selectionToken(),
+                        snapshotId,
+                        analysisScope,
+                        readMode,
+                        canonicalQuery(intent)
                 )
         ).orElse(null);
     }
 
-    private BusinessAssistantReportService.ReportIdentity reportIdentity(
+    /**
+     * 确定性会话解析结果优先，意图中的刷新标志作为安全兜底。
+     */
+    private SnapshotReadMode snapshotReadMode(
             AgentRequest request,
-            String runId,
-            SubjectCandidate subject) {
+            BusinessQueryIntent intent) {
+        if (intent.refresh()
+                || request.getSnapshotReadMode() == SnapshotReadMode.FORCE_LIVE) {
+            return SnapshotReadMode.FORCE_LIVE;
+        }
+        return request.getSnapshotReadMode() == null
+                ? SnapshotReadMode.REUSE_IF_FRESH
+                : request.getSnapshotReadMode();
+    }
+
+    /**
+     * 普通导出优先绑定上一轮可信回答；明确要求最新数据时绑定本次新运行。
+     */
+    private BusinessAssistantReportService.ReportIdentity reportIdentity(AgentRequest request, String runId,
+                                                                         SubjectCandidate subject) {
+
+        String sourceRunId = runId;
+        if (request.getSnapshotReadMode() != SnapshotReadMode.FORCE_LIVE) {
+            String inheritedRunId = trustedInheritedText(request, "sourceRunId");
+            if (StringUtils.hasText(inheritedRunId)) {
+                sourceRunId = inheritedRunId;
+            }
+        }
         return new BusinessAssistantReportService.ReportIdentity(
-                runId, request.getUserId(), request.getConversationId(),
-                request.getAuthorization(), Map.of(), subject.selectionToken()
+                sourceRunId,
+                request.getUserId(),
+                request.getConversationId(),
+                request.getAuthorization(),
+                Map.of(),
+                subject.selectionToken()
         );
     }
 
@@ -836,6 +1459,132 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
         return List.copyOf(definitions);
     }
 
+    /**
+     * 判断当前问题是否明确要求付款制度对照。
+     */
+    private boolean policyComparisonRequested(String question) {
+        String normalized = Objects.toString(question, "").replaceAll("\\s+", "");
+        if (!normalized.contains("付款")) return false;
+
+        return normalized.contains("制度")
+                || normalized.contains("规定")
+                || normalized.contains("合规")
+                || normalized.contains("符合")
+                || normalized.contains("管理办法");
+    }
+
+    /**
+     * 将付款安全事实与当前用户有权读取的制度证据进行对照。
+     */
+    private AiResponse appendPolicyComparison(
+            AgentRequest request,
+            String runId,
+            ProjectPanoramaResult panorama,
+            AiResponse response) {
+
+        Map<String, Object> paymentFacts = panorama.modules().stream()
+                .filter(module -> "PAYMENT".equals(module.datasetCode()))
+                .filter(ProjectPanoramaResult.ModuleResult::dataComplete)
+                .filter(module -> module.status() == DatasetExecutionStatus.SUCCESS)
+                .map(ProjectPanoramaResult.ModuleResult::modelFacts)
+                .findFirst()
+                .orElse(Map.of());
+
+        BusinessPolicyComparisonService.Result result = policyComparisonService.analyze(
+                new BusinessPolicyComparisonService.Command(
+                        runId,
+                        request.getConversationId(),
+                        request.getUserId(),
+                        request.getModelCode(),
+                        request.getEffectiveQuestion(),
+                        request.getCategoryIds(),
+                        request.getDocumentIds(),
+                        request.getTopK(),
+                        request.getMinScore(),
+                        request.getKnowledgeAccessPrincipal(),
+                        paymentFacts
+                )
+        );
+
+        List<ResponseBlock> blocks = new ArrayList<>(response.blocks());
+        blocks.add(policyCallout(result));
+        blocks.sort(Comparator.comparingInt(ResponseBlock::order));
+
+        List<ResponseReference> references = result.evidence().stream()
+                .map(this::policyReference)
+                .toList();
+
+        boolean dataComplete = response.dataComplete() && result.conclusive();
+        ResponseStatus status = result.conclusive()
+                ? response.status()
+                : response.status() == ResponseStatus.FAILED
+                  ? ResponseStatus.FAILED
+                  : ResponseStatus.PARTIAL;
+
+        return new AiResponse(
+                response.schemaVersion(),
+                response.responseId(),
+                response.runId(),
+                response.conversationId(),
+                response.mode(),
+                status,
+                dataComplete,
+                response.context(),
+                blocks,
+                references,
+                response.meta()
+        );
+    }
+
+    /**
+     * 制度结论使用固定结构展示，禁止模型生成任意页面结构。
+     */
+    private CalloutBlock policyCallout(BusinessPolicyComparisonService.Result result) {
+        String title = switch (result.status()) {
+            case COMPLIANT -> "制度对照：符合";
+            case NON_COMPLIANT -> "制度对照：不符合";
+            case UNABLE_TO_DETERMINE -> "制度对照：无法判断";
+            case ANALYSIS_FAILED -> "制度对照：分析失败";
+        };
+
+        Tone tone = switch (result.status()) {
+            case COMPLIANT -> Tone.SUCCESS;
+            case NON_COMPLIANT -> Tone.DANGER;
+            case UNABLE_TO_DETERMINE, ANALYSIS_FAILED -> Tone.WARNING;
+        };
+
+        return new CalloutBlock(
+                "policy_comparison",
+                title,
+                35,
+                BlockStatus.READY,
+                BlockSource.AI,
+                tone,
+                result.message()
+        );
+    }
+
+    /**
+     * 只返回实际参与判断或失败时已召回的真实制度证据。
+     */
+    private ResponseReference policyReference(KnowledgeEvidence evidence) {
+        return new ResponseReference(
+                evidence.evidenceId(),
+                Objects.toString(evidence.documentId(), ""),
+                Objects.toString(evidence.versionId(), ""),
+                Objects.toString(evidence.chunkId(), ""),
+                evidence.documentTitle(),
+                evidence.versionNo(),
+                evidence.source(),
+                referenceExcerpt(evidence.text())
+        );
+    }
+
+    private String referenceExcerpt(String text) {
+        String normalized = Objects.toString(text, "").trim();
+        return normalized.length() <= 300 ? normalized : normalized.substring(0, 300);
+    }
+
     private AiResponse response(
             AgentRequest request,
             AgentStreamSession stream,
@@ -872,6 +1621,7 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
             Set<String> startedBlockIds) throws Exception {
         boolean hasNarrative = false;
         for (ResponseBlock block : response.blocks()) {
+            stream.checkCancellation();
             if (block instanceof TextBlock text) {
                 hasNarrative = true;
                 stream.startTextResponse(text.id(), text.title(), text.order(), text.source());
@@ -883,22 +1633,37 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
             }
         }
         if (narrativeExpected && !hasNarrative) {
-            stream.startTextResponse(
-                    "business_narrative", "业务说明", 90, BlockSource.AI
-            );
+            stream.checkCancellation();
+            stream.startTextResponse("business_narrative", "业务说明", 90, BlockSource.AI);
             stream.failResponseBlock(new BlockErrorPayload(
                     "business_narrative", BlockType.TEXT, "MODEL_SUMMARY_FAILED",
                     "业务数据已返回，智能说明暂不可用", true
             ));
         }
+        // 业务制度对照引用必须进入最终响应快照。
+        stream.setResponseReferences(response.references());
         stream.setResponseDataComplete(response.dataComplete());
         stream.beginFinalization();
         AiResponse finalResponse = stream.getChatResponseAccumulator().complete();
-        stream.sendResponseSnapshot();
+
+        /*
+         * 数据库快照增加服务端权限绑定。
+         * SSE仍发送不含原始主体标识的finalResponse。
+         */
+        String storedResponse = responseAccessService.bind(
+                finalResponse,
+                request.getUserId(),
+                request.getConversationId()
+        );
+
         chatSessionService.saveAssistantMessage(
-                request.getUserId(), request.getConversationId(), visibleText(finalResponse),
-                response.runId(), request.getModelCode(), "CHAT",
-                objectMapper.writeValueAsString(finalResponse)
+                request.getUserId(),
+                request.getConversationId(),
+                visibleText(finalResponse),
+                response.runId(),
+                request.getModelCode(),
+                "CHAT",
+                storedResponse
         );
         stream.finishChatResponse();
     }
@@ -913,6 +1678,7 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
             AgentStreamSession stream,
             Set<String> startedBlockIds,
             ResponseBlock block) throws Exception {
+        stream.checkCancellation();
         if (startedBlockIds.add(block.id())) {
             stream.sendResponseEvent(stream.getResponseEventFactory().blockStart(block));
         }
@@ -932,36 +1698,98 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
             String panoramaSnapshotId,
             List<String> semanticCodes,
             ProjectPeriodScope projectScope) {
+        saveState(
+                request,
+                runId,
+                subject,
+                intent,
+                panoramaSnapshotId,
+                semanticCodes,
+                projectScope,
+                null
+        );
+    }
+
+    private void saveState(
+            AgentRequest request,
+            String runId,
+            SubjectCandidate subject,
+            BusinessQueryIntent intent,
+            String panoramaSnapshotId,
+            List<String> semanticCodes,
+            ProjectPeriodScope projectScope,
+            ProjectPanoramaPlan.Scope analysisScope) {
         BusinessConversationState state = new BusinessConversationState();
         state.setRouteType("BUSINESS_ASSISTANT");
         state.setBusinessTopic(request.getUserQuestion());
         state.setActiveObjectType(subject.type().name());
         state.setActiveObjectIds(List.of(subjectId(subject)));
         state.setLastRunId(runId);
-        Map<String, Object> input = new LinkedHashMap<>(canonicalQuery(intent));
+
+        Map<String, Object> input =
+                new LinkedHashMap<>(canonicalQuery(intent));
+
         if (subject.type() == BusinessSubjectType.PERSON) {
-            input.put("personSelectionToken", subject.selectionToken());
+            input.put(
+                    "personSelectionToken",
+                    subject.selectionToken()
+            );
         } else {
-            input.put("selectionToken", subject.selectionToken());
+            input.put(
+                    "selectionToken",
+                    subject.selectionToken()
+            );
         }
+
         input.put("subjectType", subject.type().name());
-        if (subject.type() == BusinessSubjectType.PERSON
-                || subject.type() == BusinessSubjectType.DEPARTMENT) {
-            input.put("datasetCodes", List.copyOf(semanticCodes));
+
+        if (!semanticCodes.isEmpty()) {
+            input.put(
+                    "datasetCodes",
+                    List.copyOf(semanticCodes)
+            );
         }
-        if (projectScope != null && projectScope.associationContext() != null) {
+
+        if (analysisScope != null) {
+            input.put(
+                    "analysisMode",
+                    analysisScope.mode().name()
+            );
+
+            input.put(
+                    "analysisDatasetCodes",
+                    analysisScope.datasetCodes()
+            );
+        }
+
+        if (projectScope != null
+                && projectScope.associationContext() != null) {
             PersonBusinessQueryService.ProjectAssociationContext projectContext =
                     projectScope.associationContext();
-            if (StringUtils.hasText(projectScope.projectSelectionToken())) {
-                input.put("projectSelectionToken", projectScope.projectSelectionToken());
+
+            if (StringUtils.hasText(
+                    projectScope.projectSelectionToken()
+            )) {
+                input.put(
+                        "projectSelectionToken",
+                        projectScope.projectSelectionToken()
+                );
             }
-            if (StringUtils.hasText(projectContext.projectCode())) {
-                input.put("projectCode", projectContext.projectCode());
+
+            if (StringUtils.hasText(
+                    projectContext.projectCode()
+            )) {
+                input.put(
+                        "projectCode",
+                        projectContext.projectCode()
+                );
             }
         }
+
         if (intent.projectPeriodRequested()) {
             input.put("projectPeriodRequested", true);
         }
+
         if (StringUtils.hasText(panoramaSnapshotId)) {
             input.put("panoramaSnapshotId", panoramaSnapshotId);
         }
@@ -969,12 +1797,17 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
         state.setUpdatedAt(LocalDateTime.now());
         try {
             conversationStateService.saveState(
-                    request.getUserId(), request.getConversationId(), state
+                    request.getUserId(),
+                    request.getConversationId(),
+                    state
             );
         } catch (RuntimeException exception) {
-            // 会话状态失败不能破坏已成功取得的业务结果。
-            log.warn("业务助手会话状态保存失败，runId={}，errorType={}",
-                    runId, exception.getClass().getSimpleName());
+            // 状态保存失败不能破坏已经完成的业务查询。
+            log.warn(
+                    "业务助手会话状态保存失败，runId={}，errorType={}",
+                    runId,
+                    exception.getClass().getSimpleName()
+            );
         }
     }
 
@@ -1014,52 +1847,111 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
         }
     }
 
-    private SubjectResolutionRequest subjectRequest(
-            AgentRequest request,
-            BusinessQueryIntent intent,
-            String runId) {
+    /**
+     * 根据当前问题构建主体定位请求。
+     */
+    private SubjectResolutionRequest subjectRequest(AgentRequest request, BusinessQueryIntent intent, String runId) {
         String selectionToken = selectionToken(request, intent);
+
         BusinessSubjectType subjectType = intent.subjectType();
+
         boolean selected = StringUtils.hasText(selectionToken);
-        boolean myProjects = !selected && subjectType == BusinessSubjectType.PROJECT
-                && !StringUtils.hasText(intent.projectCode())
-                && isMyProjectsRequest(request.getEffectiveQuestion());
-        boolean managerSearch = !selected && subjectType == BusinessSubjectType.PROJECT
-                && request.getEffectiveQuestion().contains("项目经理")
-                && StringUtils.hasText(intent.personName());
-        boolean projectCodeSearch = !selected && subjectType == BusinessSubjectType.PROJECT
-                && StringUtils.hasText(intent.projectCode());
-        String name = selected || myProjects || managerSearch || projectCodeSearch
-                ? null : intent.personName();
-        return new SubjectResolutionRequest(
-                runId, request.getUserId(), request.getConversationId(), request.getAuthorization(), Map.of(),
-                subjectType, selectionToken,
-                projectCodeSearch ? intent.projectCode() : null, name,
-                managerSearch ? intent.personName() : null,
-                !selected && subjectType == BusinessSubjectType.PROJECT ? intent.projectYear() : null, myProjects,
-                selected ? null : intent.employeeNo(), pageNumber(request), pageSize(request)
+
+        String question = Objects.toString(request.getEffectiveQuestion(), "");
+
+        boolean projectCodeSearch = !selected
+                        && subjectType
+                        == BusinessSubjectType.PROJECT
+                        && StringUtils.hasText(
+                        intent.projectCode()
+                );
+
+        ProjectListScope projectListScope = !selected
+                        && subjectType
+                        == BusinessSubjectType.PROJECT
+                        && !projectCodeSearch
+                        ? projectListScope(question)
+                        : null;
+
+        boolean managerSearch = !selected
+                        && projectListScope == null
+                        && subjectType
+                        == BusinessSubjectType.PROJECT
+                        && question.contains("项目经理")
+                        && StringUtils.hasText(
+                        intent.personName()
+                );
+
+        String name = selected
+                        || projectListScope != null
+                        || managerSearch
+                        || projectCodeSearch
+                        ? null
+                        : intent.personName();
+
+        int requestedPageSize = pageSize(request);
+
+        // 项目候选表格最多展示 10 条，
+        // 查询页大小必须与展示上限保持一致。
+        int effectivePageSize = subjectType
+                        == BusinessSubjectType.PROJECT
+                        ? Math.min(requestedPageSize, 10)
+                        : requestedPageSize;
+
+        return new SubjectResolutionRequest(runId, request.getUserId(), request.getConversationId(),
+                request.getAuthorization(), Map.of(), subjectType, selectionToken, projectCodeSearch
+                        ? intent.projectCode()
+                        : null,
+                name,
+                managerSearch
+                        ? intent.personName()
+                        : null,
+                !selected
+                        && subjectType
+                        == BusinessSubjectType.PROJECT
+                        ? intent.projectYear()
+                        : null,
+                projectListScope,
+                selected
+                        ? null
+                        : intent.employeeNo(),
+                pageNumber(request),
+                effectivePageSize
         );
     }
 
     /**
-     * 项目主体定位请求。
-     *
-     * 项目期间查询必须独立定位和授权项目，不复用人员定位结果，
-     * 也不把项目编码当作人员定位条件。
+     * 构建人员项目期间查询所需的独立项目定位请求。
      */
-    private SubjectResolutionRequest projectSubjectRequest(
-            AgentRequest request,
-            BusinessQueryIntent intent,
-            String runId) {
+    private SubjectResolutionRequest projectSubjectRequest(AgentRequest request, BusinessQueryIntent intent, String runId) {
         String selectionToken = projectSelectionToken(request, intent);
+
         boolean selected = StringUtils.hasText(selectionToken);
-        boolean projectCodeSearch = !selected && StringUtils.hasText(intent.projectCode());
+
+        boolean projectCodeSearch = !selected
+                        && StringUtils.hasText(
+                        intent.projectCode()
+                );
+
         return new SubjectResolutionRequest(
-                runId, request.getUserId(), request.getConversationId(), request.getAuthorization(), Map.of(),
-                BusinessSubjectType.PROJECT, selectionToken,
-                projectCodeSearch ? intent.projectCode() : null, null, null,
-                !selected ? intent.projectYear() : null, false, null,
-                pageNumber(request), pageSize(request)
+                runId,
+                request.getUserId(),
+                request.getConversationId(),
+                request.getAuthorization(),
+                Map.of(),
+                BusinessSubjectType.PROJECT,
+                selectionToken,
+                projectCodeSearch
+                        ? intent.projectCode()
+                        : null,
+                null,
+                null,
+                !selected
+                        ? intent.projectYear()
+                        : null, null,
+                null,
+                pageNumber(request),
+                Math.min(pageSize(request), 10)
         );
     }
 
@@ -1167,17 +2059,47 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
             BusinessQueryIntent intent,
             BusinessSubjectType subjectType) {
         return new BusinessQueryIntent(
-                subjectType, intent.projectCode(), intent.personName(), intent.employeeNo(),
-                intent.projectYear(), intent.periodStart(), intent.periodEnd(), intent.datasetCodes(),
-                intent.refresh(), intent.exportFormat(), intent.anomalyPeopleRequested(),
-                intent.projectPeriodRequested()
+                subjectType,
+                intent.projectCode(),
+                intent.personName(),
+                intent.employeeNo(),
+                intent.projectYear(),
+                intent.periodStart(),
+                intent.periodEnd(),
+                intent.datasetCodes(),
+                intent.refresh(),
+                intent.exportFormat(),
+                intent.anomalyPeopleRequested(),
+                intent.projectPeriodRequested(),
+                intent.singleMetricRequested()
         );
     }
 
-    private boolean isMyProjectsRequest(String question) {
-        return StringUtils.hasText(question) && List.of(
-                "我的项目", "我负责的项目", "我管理的项目", "有权查看的项目", "全部项目"
-        ).stream().anyMatch(question::contains);
+    /**
+     * 识别用户明确表达的项目查询范围。
+     */
+    private ProjectListScope projectListScope(String question) {
+        if (question == null || question.isBlank()) {
+            return null;
+        }
+
+        String normalized = question.replaceAll("\\s+", "");
+
+        if (normalized.contains("我可查看的项目")
+                || normalized.contains("我能查看的项目")
+                || normalized.contains("有权查看的项目")
+                || normalized.contains("全部可查看项目")) {
+            return ProjectListScope.VIEWABLE_PROJECTS;
+        }
+
+        if (normalized.contains("我的项目")
+                || normalized.contains("我负责的项目")
+                || normalized.contains("我参与的项目")
+                || normalized.contains("我管理的项目")) {
+            return ProjectListScope.MY_PROJECTS;
+        }
+
+        return null;
     }
 
     private ModelCallContext modelContext(AgentRequest request, String runId) {
@@ -1192,8 +2114,14 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
 
     private ResponseContext context(BusinessQueryIntent intent, SubjectCandidate subject) {
         return new ResponseContext(
-                subject.type().name(), subjectId(subject), subject.displayName(), scopeLabel(intent),
-                intent.periodStart(), intent.periodEnd(), LocalDateTime.now()
+                subject.type().name(),
+                subjectId(subject),
+                subject.displayName(),
+                scopeLabel(intent),
+                intent.periodStart(),
+                intent.periodEnd(),
+                LocalDateTime.now(),
+                subject.selectionToken()
         );
     }
 
@@ -1249,11 +2177,9 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
                 ? intent.periodStart() : dateValue(inherited.get("startDate"));
         java.time.LocalDate end = intent.periodEnd() != null
                 ? intent.periodEnd() : dateValue(inherited.get("endDate"));
-        return new BusinessQueryIntent(
-                intent.subjectType(), intent.projectCode(), intent.personName(), intent.employeeNo(),
-                projectYear, start, end, intent.datasetCodes(), intent.refresh(), intent.exportFormat(),
-                intent.anomalyPeopleRequested(), intent.projectPeriodRequested()
-        );
+        return new BusinessQueryIntent(intent.subjectType(), intent.projectCode(),
+                intent.personName(), intent.employeeNo(), projectYear, start, end,
+                intent.datasetCodes(), intent.refresh(), intent.exportFormat(), intent.anomalyPeopleRequested(), intent.projectPeriodRequested(), intent.singleMetricRequested());
     }
 
     /**
@@ -1272,12 +2198,11 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
         if (inheritedCodes.isEmpty()) {
             return intent;
         }
-        return new BusinessQueryIntent(
-                intent.subjectType(), intent.projectCode(), intent.personName(), intent.employeeNo(),
-                intent.projectYear(), intent.periodStart(), intent.periodEnd(), inheritedCodes,
-                intent.refresh(), intent.exportFormat(), intent.anomalyPeopleRequested(),
-                intent.projectPeriodRequested()
-        );
+        return new BusinessQueryIntent(intent.subjectType(), intent.projectCode(),
+                intent.personName(), intent.employeeNo(), intent.projectYear(),
+                intent.periodStart(), intent.periodEnd(), inheritedCodes, intent.refresh(),
+                intent.exportFormat(), intent.anomalyPeopleRequested(), intent.projectPeriodRequested(),
+                intent.singleMetricRequested());
     }
 
     private List<String> trustedInheritedStringList(AgentRequest request, String key) {
@@ -1323,16 +2248,95 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
         return Map.copyOf(names);
     }
 
-    private List<Map<String, Object>> candidateRows(List<SubjectCandidate> candidates) {
-        return candidates.stream().map(candidate -> {
-            Map<String, Object> row = new LinkedHashMap<>();
-            row.put("displayName", candidate.displayName());
-            row.put("projectCode", Objects.toString(candidate.projectCode(), ""));
-            row.put("projectType", Objects.toString(candidate.projectType(), ""));
-            row.put("maskedEmployeeNo", Objects.toString(candidate.maskedEmployeeNo(), ""));
-            row.put("selectionToken", candidate.selectionToken());
-            return Map.copyOf(row);
-        }).toList();
+    /**
+     * 将授权主体候选转换成安全展示行。
+     */
+    private List<Map<String, Object>> candidateRows(
+            List<SubjectCandidate> candidates
+    ) {
+        return candidates.stream()
+                .map(candidate -> {
+                    Map<String, Object> row =
+                            new LinkedHashMap<>();
+
+                    row.put(
+                            "displayName",
+                            candidate.displayName()
+                    );
+
+                    row.put(
+                            "projectCode",
+                            Objects.toString(
+                                    candidate.projectCode(),
+                                    ""
+                            )
+                    );
+
+                    row.put(
+                            "projectType",
+                            Objects.toString(
+                                    candidate.projectType(),
+                                    ""
+                            )
+                    );
+
+                    row.put(
+                            "projectRelationship",
+                            projectRelationshipLabel(
+                                    candidate
+                                            .projectRelationship()
+                            )
+                    );
+
+                    row.put(
+                            "projectStatus",
+                            Objects.toString(
+                                    candidate.projectStatus(),
+                                    ""
+                            )
+                    );
+
+                    row.put(
+                            "maskedEmployeeNo",
+                            Objects.toString(
+                                    candidate
+                                            .maskedEmployeeNo(),
+                                    ""
+                            )
+                    );
+
+                    row.put(
+                            "departmentPath",
+                            Objects.toString(
+                                    candidate.departmentPath(),
+                                    ""
+                            )
+                    );
+
+                    // 凭证只供后端生成通用 action，
+                    // 不作为项目表格的可见列。
+                    row.put(
+                            "selectionToken",
+                            candidate.selectionToken()
+                    );
+
+                    return Map.copyOf(row);
+                })
+                .toList();
+    }
+
+    /**
+     * 转换项目关系的中文展示名称。
+     */
+    private String projectRelationshipLabel(ProjectRelationship relationship) {
+        if (relationship == null) {
+            return "";
+        }
+        return switch (relationship) {
+            case RESPONSIBLE -> "我负责";
+            case PARTICIPATING -> "我参与";
+            case VIEWABLE -> "可查看";
+        };
     }
 
     private String safeMessage(DatasetExecutionStatus status, DatasetExecutionResult result) {
@@ -1430,6 +2434,7 @@ public class BusinessAssistantServiceImpl implements BusinessAssistantService {
         private void accept(ProjectPanoramaProgressEvent event) {
             states.put(event.datasetCode(), event.status());
             try {
+                stream.checkCancellation();
                 StatusListBlock current = block();
                 stream.sendResponseEvent(stream.getResponseEventFactory().blockStart(current));
                 stream.publishResponseBlock(current);

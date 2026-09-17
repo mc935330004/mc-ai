@@ -2,7 +2,6 @@ package org.example.ai.agent.chat.support;
 
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
-import org.example.ai.agent.chat.entity.AgentStreamEvent;
 import org.example.ai.agent.common.exception.BusinessException;
 import org.example.ai.agent.observability.AgentMetrics;
 import org.flywaydb.core.internal.util.StringUtils;
@@ -168,40 +167,6 @@ public class AgentStreamSession {
     }
 
     /**
-     * 发送进度事件。连接断开只停止推送，不中断业务处理。
-     */
-    public synchronized void send(String eventName, AgentStreamEvent event) throws Exception {
-        if (completed.get() || !connectionOpen.get()) {
-            return;
-        }
-        Objects.requireNonNull(event, "进度事件不能为空");
-        long currentSequence = sequenceGenerator.next();
-        String eventId = runId + "-" + currentSequence;
-
-        event.setRunId(runId);
-        event.setMessageId(messageId);
-        event.setEventId(eventId);
-        event.setSequence(currentSequence);
-        event.setTimestamp(System.currentTimeMillis());
-
-        try {
-            emitter.send(SseEmitter.event()
-                    .id(eventId)
-                    .name(eventName)
-                    .data(event));
-        } catch (Exception exception) {
-            if (!connectionOpen.get() || isClientDisconnected(exception)) {
-                closeConnection("DISCONNECTED");
-                return;
-            }
-
-            throw exception;
-        }
-
-        agentMetrics.recordSseEvent(event.getType());
-    }
-
-    /**
      * 绑定执行线程。排队期间已经取消的任务，只进入取消收尾。
      */
     public synchronized void bindExecutionThread() {
@@ -330,23 +295,17 @@ public class AgentStreamSession {
     /**
      * 开始CHAT模式回答。
      */
-    public synchronized void startChatResponse()
-            throws Exception {
-
-        startResponse(
-                PresentationMode.CHAT
-        );
+    public synchronized void startChatResponse() throws Exception {
+        checkCancellation();
+        startResponse(PresentationMode.CHAT);
     }
 
     /**
      * 开始REPORT模式回答。
      */
-    public synchronized void startReportResponse()
-            throws Exception {
-
-        startResponse(
-                PresentationMode.REPORT
-        );
+    public synchronized void startReportResponse() throws Exception {
+        checkCancellation();
+        startResponse(PresentationMode.REPORT);
     }
 
     /**
@@ -425,16 +384,10 @@ public class AgentStreamSession {
         );
     }
 
-    /**
-     * 追加当前TEXT区块的增量内容。
-     */
-    public synchronized void appendTextResponse(
-            String delta) throws Exception {
-
+    public synchronized void appendTextResponse(String delta) throws Exception {
+        checkCancellation();
         if (activeTextBlock == null) {
-            throw new IllegalStateException(
-                    "当前没有正在生成的TEXT区块"
-            );
+            throw new IllegalStateException("当前没有正在生成的TEXT区块");
         }
 
         if (delta == null || delta.isEmpty()) {
@@ -446,12 +399,8 @@ public class AgentStreamSession {
                 ++activeTextDeltaIndex,
                 delta
         );
-
         chatResponseAccumulator.appendText(payload);
-
-        sendResponseEvent(
-                responseEventFactory.blockDelta(payload)
-        );
+        sendResponseEvent(responseEventFactory.blockDelta(payload));
     }
 
     /**
@@ -460,13 +409,10 @@ public class AgentStreamSession {
      * BLOCK_DONE携带最终完整内容，
      * 前端按blockId替换增量内容。
      */
-    public synchronized void finishTextResponse(
-            String finalMarkdown) throws Exception {
-
+    public synchronized void finishTextResponse(String finalMarkdown) throws Exception {
+        checkCancellation();
         if (activeTextBlock == null) {
-            throw new IllegalStateException(
-                    "当前没有正在生成的TEXT区块"
-            );
+            throw new IllegalStateException("当前没有正在生成的TEXT区块");
         }
 
         TextBlock textBlock = new TextBlock(
@@ -479,10 +425,7 @@ public class AgentStreamSession {
         );
 
         chatResponseAccumulator.completeBlock(textBlock);
-
-        sendResponseEvent(
-                responseEventFactory.blockDone(textBlock)
-        );
+        sendResponseEvent(responseEventFactory.blockDone(textBlock));
 
         activeTextBlock = null;
         activeTextDeltaIndex = 0;

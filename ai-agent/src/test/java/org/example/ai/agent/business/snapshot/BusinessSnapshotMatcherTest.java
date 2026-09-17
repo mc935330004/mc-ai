@@ -14,6 +14,7 @@ import org.example.ai.agent.business.snapshot.entity.BusinessSnapshot;
 import org.example.ai.agent.business.snapshot.entity.BusinessSnapshotItem;
 import org.example.ai.agent.business.snapshot.mapper.BusinessSnapshotItemMapper;
 import org.example.ai.agent.business.snapshot.mapper.BusinessSnapshotMapper;
+import org.example.ai.agent.common.enums.SnapshotReadMode;
 import org.example.ai.agent.workflow.answer.artifact.mapper.ResultArtifactMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -66,7 +67,7 @@ class BusinessSnapshotMatcherTest {
                 accessService, new ObjectMapper(), fixedClock()
         );
         when(accessService.reauthorize(any())).thenReturn(Optional.of(
-                new AccessGrant(9L, CONFIG, POLICY)
+                new AccessGrant(9L, CONFIG, POLICY, 60)
         ));
         when(fieldMapper.selectList(any())).thenReturn(List.of(field("DAY", true)));
         when(itemMapper.selectList(any())).thenReturn(List.of(item(AssociationType.DIRECT)));
@@ -111,6 +112,26 @@ class BusinessSnapshotMatcherTest {
         assertThat(result.decision()).isEqualTo(SnapshotMatchDecision.REQUERY);
         verify(snapshotMapper, never()).selectList(any());
         verify(accessService, never()).reauthorize(any());
+    }
+
+    /**
+     * 普通追问不能复用已过新鲜期的快照，明确历史引用仍可在保留期内复用。
+     */
+    @Test
+    void staleRetainedSnapshotRequiresExplicitHistoryMode() {
+        Map<String, Object> query = Map.of("year", 2026, "grain", "YEAR");
+        BusinessSnapshot retained = snapshot(
+                "retained", "PROJECT", "P100", query, POLICY, NOW.plusHours(2)
+        );
+        retained.setCompletedAt(NOW.minusMinutes(61));
+        when(snapshotMapper.selectList(any())).thenReturn(List.of(retained));
+
+        assertThat(matcher.match(command(
+                BusinessSubjectType.PROJECT, "P100", query, "YEAR", SnapshotReadMode.REUSE_IF_FRESH
+        )).decision()).isEqualTo(SnapshotMatchDecision.REQUERY);
+        assertThat(matcher.match(command(
+                BusinessSubjectType.PROJECT, "P100", query, "YEAR", SnapshotReadMode.REUSE_SNAPSHOT
+        )).decision()).isEqualTo(SnapshotMatchDecision.REUSE);
     }
 
     @Test
@@ -210,7 +231,7 @@ class BusinessSnapshotMatcherTest {
                 Map.of("startDate", "2026-01-01", "endDate", "2026-03-31",
                         "grain", "QUARTER", "status", "ACTIVE"),
                 AssociationType.DIRECT, "QUARTER", Set.of(),
-                Set.of(SnapshotFactChannel.CALCULATION), false
+                Set.of(SnapshotFactChannel.CALCULATION), SnapshotReadMode.REUSE_IF_FRESH
         );
         assertThat(matcher.match(noFacts).decision()).isEqualTo(SnapshotMatchDecision.REQUERY);
     }
@@ -274,12 +295,18 @@ class BusinessSnapshotMatcherTest {
 
     private MatchCommand command(BusinessSubjectType type, String subjectId,
                                  Map<String, Object> query, String grain, boolean refresh) {
+        return command(type, subjectId, query, grain,
+                refresh ? SnapshotReadMode.FORCE_LIVE : SnapshotReadMode.REUSE_IF_FRESH);
+    }
+
+    private MatchCommand command(BusinessSubjectType type, String subjectId,
+                                 Map<String, Object> query, String grain, SnapshotReadMode readMode) {
         return new MatchCommand(
                 "agent-1", "user-1", "session-1", "Bearer current",
                 Map.of("roles", List.of("employee")), type, subjectId,
                 "ATTENDANCE", query, AssociationType.DIRECT, grain,
                 Set.of("attendanceDetails"),
-                Set.of(SnapshotFactChannel.CALCULATION), refresh
+                Set.of(SnapshotFactChannel.CALCULATION), readMode
         );
     }
 
@@ -308,6 +335,7 @@ class BusinessSnapshotMatcherTest {
         )));
         snapshot.setConfigChecksum(CONFIG);
         snapshot.setFieldPolicyChecksum(policy);
+        snapshot.setCompletedAt(NOW.minusMinutes(5));
         snapshot.setExpiresAt(expiresAt);
         return snapshot;
     }

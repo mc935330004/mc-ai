@@ -7,6 +7,8 @@ import org.example.ai.agent.business.subject.model.SubjectResolutionRequest;
 import org.example.ai.agent.business.subject.model.SubjectResolutionResult;
 import org.example.ai.agent.business.subject.model.SubjectResolutionState;
 import org.example.ai.agent.business.subject.model.SubjectSearchMode;
+import org.example.ai.agent.common.model.ProjectListScope;
+import org.example.ai.agent.common.model.ProjectRelationship;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -152,6 +154,58 @@ class SubjectResolutionServiceTest {
         assertThat(result.totalCount()).isEqualTo(236);
         verify(personDirectoryService, never()).search(any());
         verify(departmentDirectoryService, never()).search(any());
+    }
+
+    /**
+     * “可查看项目”必须使用独立查询范围，不能降级成默认“我的项目”。
+     */
+    @Test
+    void routesExplicitViewableProjectsToIndependentSearchMode() {
+        AuthorizedSubjectCandidate candidate = project(
+                "project-id-1", "P100", "工程项目", ProjectRelationship.VIEWABLE, "进行中"
+        );
+        when(projectDirectoryService.search(any())).thenReturn(
+                new SubjectDirectoryPage(true, List.of(candidate), 1, 10, 1, true, false)
+        );
+
+        SubjectResolutionResult result = service.resolve(request(
+                BusinessSubjectType.PROJECT, null, null, null, null, null,
+                ProjectListScope.VIEWABLE_PROJECTS, null, 1, 10
+        ));
+
+        ArgumentCaptor<SubjectDirectoryQuery> query = ArgumentCaptor.forClass(SubjectDirectoryQuery.class);
+        verify(projectDirectoryService).search(query.capture());
+        assertThat(query.getValue().searchMode()).isEqualTo(SubjectSearchMode.VIEWABLE_PROJECTS);
+        assertThat(query.getValue().projectYear()).isEqualTo(2026);
+        assertThat(result.state()).isEqualTo(SubjectResolutionState.CANDIDATES);
+        assertThat(result.candidates()).singleElement().satisfies(project -> {
+            assertThat(project.projectRelationship()).isEqualTo(ProjectRelationship.VIEWABLE);
+            assertThat(project.projectStatus()).isEqualTo("进行中");
+        });
+    }
+
+    /**
+     * PM 未返回可靠总数时，只透传 hasNext，不能把当前页数量伪造成总数。
+     */
+    @Test
+    void keepsUnknownProjectTotalWithoutAutoResolvingFirstCandidate() {
+        AuthorizedSubjectCandidate candidate = project(
+                "project-id-1", "P100", "工程项目", ProjectRelationship.RESPONSIBLE, "进行中"
+        );
+        when(projectDirectoryService.search(any())).thenReturn(
+                SubjectDirectoryPage.unknownTotal(List.of(candidate), 1, 10, true)
+        );
+
+        SubjectResolutionResult result = service.resolve(request(
+                BusinessSubjectType.PROJECT, null, null, null, null, null,
+                ProjectListScope.MY_PROJECTS, null, 1, 10
+        ));
+
+        assertThat(result.state()).isEqualTo(SubjectResolutionState.CANDIDATES);
+        assertThat(result.totalKnown()).isFalse();
+        assertThat(result.totalCount()).isZero();
+        assertThat(result.hasNext()).isTrue();
+        assertThat(result.resolvedSubject()).isNull();
     }
 
     @Test
@@ -438,6 +492,24 @@ class SubjectResolutionServiceTest {
         );
     }
 
+    private SubjectResolutionRequest request(
+            BusinessSubjectType type,
+            String selectionToken,
+            String projectCode,
+            String searchName,
+            String projectManager,
+            Integer projectYear,
+            ProjectListScope projectListScope,
+            String employeeNo,
+            int pageNumber,
+            int pageSize) {
+        return new SubjectResolutionRequest(
+                "agent-run-1", "login-user-1", "session-1", "Bearer secret",
+                Map.of("tenantToken", "secret"), type, selectionToken, projectCode, searchName,
+                projectManager, projectYear, projectListScope, employeeNo, pageNumber, pageSize
+        );
+    }
+
     private SubjectDirectoryPage page(AuthorizedSubjectCandidate candidate) {
         return new SubjectDirectoryPage(true, List.of(candidate), 1, 20, 1, false);
     }
@@ -451,6 +523,18 @@ class SubjectResolutionServiceTest {
                 null,
                 code,
                 type
+        );
+    }
+
+    private AuthorizedSubjectCandidate project(
+            String id,
+            String code,
+            String type,
+            ProjectRelationship relationship,
+            String status) {
+        return new AuthorizedSubjectCandidate(
+                BusinessSubjectType.PROJECT, id, "项目" + code, null, null,
+                code, type, relationship, status
         );
     }
 

@@ -84,68 +84,78 @@ public class ProjectPanoramaExecutionService {
     }
 
     /**
-     * 模块按配置顺序串行执行，底层数据集服务继续负责 READ 工作流、活动版本和权限校验。
+     * 只执行用户已经确认且当前项目配置允许的分析模块。
      */
     public ProjectPanoramaResult execute(
             ProjectPanoramaCommand command,
+            ProjectPanoramaPlan.Scope scope,
             Consumer<ProjectPanoramaProgressEvent> progressConsumer) {
         validateCommand(command);
+
+        if (scope == null) {
+            throw new IllegalArgumentException("项目分析范围不能为空");
+        }
+
         Consumer<ProjectPanoramaProgressEvent> listener = Objects.requireNonNull(
                 progressConsumer,
                 "progressConsumer不能为空"
         );
+
         AuthorizedProjectSubject subject = subjectAuthorizationService.authorize(command);
-        ProjectPanoramaPlan plan = profileService.resolve(subject.projectType());
+
+        ProjectPanoramaPlan plan = profileService.resolve(subject.projectType()).select(scope);
+
         if (plan.modules().isEmpty() || plan.modules().size() > maxModules) {
             throw new IllegalStateException("项目全景模块数量超过执行上限");
         }
         ProjectIssueRuleService.RuleSet ruleSet = issueRuleService.loadRules(plan.profileId());
-
         Map<String, Object> canonicalInput = moduleInput(command, subject);
+
         List<ProjectPanoramaResult.ModuleResult> results = new ArrayList<>();
+
         List<String> missingRequired = new ArrayList<>();
+
         int completeCount = 0;
-        long deadlineNanos = System.nanoTime() + maxTotalMillis * 1_000_000L;
+        long deadlineNanos =
+                System.nanoTime() + maxTotalMillis * 1_000_000L;
+
         for (int index = 0; index < plan.modules().size(); index++) {
             ProjectPanoramaPlan.Module module = plan.modules().get(index);
-            notifyProgress(listener, progress(
-                    module,
-                    DatasetExecutionStatus.RUNNING,
-                    index,
-                    plan.modules().size()
-            ));
+
+            notifyProgress(
+                    listener,
+                    progress(
+                            module,
+                            DatasetExecutionStatus.RUNNING,
+                            index,
+                            plan.modules().size()
+                    )
+            );
             DatasetExecutionResult executionResult = null;
             DatasetExecutionStatus status = DatasetExecutionStatus.FAILED;
             boolean complete = false;
             String snapshotId = null;
             try {
                 int timeoutMs = remainingTimeout(module.timeoutMs(), deadlineNanos);
-                PanoramaDatasetExecutor.Result timedResult = datasetExecutor.execute(
-                        request(command, subject, module.datasetCode(), canonicalInput),
-                        timeoutMs
-                );
+                PanoramaDatasetExecutor.Result timedResult =
+                        datasetExecutor.execute(request(command, subject, module.datasetCode(), canonicalInput), timeoutMs);
                 executionResult = timedResult.executionResult();
                 status = timedResult.status();
+
                 if (executionResult == null) {
                     throw new ModuleTerminalException(status);
                 }
                 validateExecutionResult(module, executionResult);
                 if (canPersist(executionResult)) {
-                    snapshotId = createSnapshot(
-                            command,
-                            subject,
-                            module,
-                            canonicalInput,
-                            executionResult
-                    );
+                    snapshotId = createSnapshot(command, subject, module, canonicalInput, executionResult);
                 }
-                complete = isComplete(executionResult)
-                        && StringUtils.hasText(snapshotId);
+
+                complete = isComplete(executionResult) && StringUtils.hasText(snapshotId);
             } catch (ModuleTerminalException exception) {
                 status = exception.status();
                 executionResult = null;
             } catch (RuntimeException ignored) {
-                /* 单模块系统失败按 FAILED 收口，后续模块继续执行。 */
+                // 单模块系统失败按FAILED收口，后续模块继续执行。
                 status = DatasetExecutionStatus.FAILED;
                 executionResult = null;
                 snapshotId = null;
@@ -159,30 +169,37 @@ public class ProjectPanoramaExecutionService {
                 missingRequired.add(module.datasetCode());
             }
             results.add(new ProjectPanoramaResult.ModuleResult(
-                    module.datasetCode(),
-                    module.required(),
-                    status,
-                    executionResult != null && executionResult.dataComplete(),
-                    snapshotId,
-                    executionResult
-            ));
+                            module.datasetCode(),
+                            module.required(),
+                            status,
+                            executionResult != null
+                                    && executionResult.dataComplete(),
+                            snapshotId,
+                            executionResult
+                    )
+            );
         }
-
         PanoramaExecutionState state = overallState(completeCount, results.size());
+
         boolean requiredComplete = missingRequired.isEmpty();
+
         boolean allModulesComplete = completeCount == results.size();
+
         List<ProjectIssueResult> issues = issueRuleService.evaluate(ruleSet, results);
-        ProjectPanoramaSnapshotService.SnapshotReference aggregate = panoramaSnapshotService.create(
-                new ProjectPanoramaSnapshotService.CreateCommand(
-                        command.userId(),
-                        command.sessionId(),
-                        subject,
-                        plan,
-                        canonicalInput,
-                        issues,
-                        results
-                )
-        );
+
+        ProjectPanoramaSnapshotService.SnapshotReference aggregate =
+                panoramaSnapshotService.create(
+                        new ProjectPanoramaSnapshotService.CreateCommand(
+                                command.userId(),
+                                command.sessionId(),
+                                subject,
+                                plan,
+                                canonicalInput,
+                                issues,
+                                results
+                        )
+                );
+
         return new ProjectPanoramaResult(
                 plan.profileId(),
                 plan.configChecksum(),
@@ -195,6 +212,14 @@ public class ProjectPanoramaExecutionService {
                 results
         );
     }
+
+    /**
+     * 查询当前项目类型配置的可用分析模块。
+     */
+    public ProjectPanoramaPlan configuredPlan(String projectType) {
+        return profileService.resolve(projectType);
+    }
+
 
     private void validateExecutionResult(
             ProjectPanoramaPlan.Module module,

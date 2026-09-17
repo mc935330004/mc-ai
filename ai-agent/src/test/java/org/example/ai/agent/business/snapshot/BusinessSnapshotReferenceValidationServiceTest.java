@@ -59,7 +59,7 @@ class BusinessSnapshotReferenceValidationServiceTest {
                         LocalDateTime.of(2026, 9, 9, 9, 0)));
         when(fixture.accessService.reauthorize(any())).thenReturn(Optional.of(
                 new BusinessSnapshotAccessService.AccessGrant(
-                        1L, CONFIG_CHECKSUM, FIELD_CHECKSUM
+                        1L, CONFIG_CHECKSUM, FIELD_CHECKSUM, 60
                 )
         ));
 
@@ -96,7 +96,7 @@ class BusinessSnapshotReferenceValidationServiceTest {
         when(fixture.snapshotMapper.selectById("snapshot-1")).thenReturn(snapshot);
         when(fixture.accessService.reauthorize(any())).thenReturn(Optional.of(
                 new BusinessSnapshotAccessService.AccessGrant(
-                        1L, CONFIG_CHECKSUM, FIELD_CHECKSUM
+                        1L, CONFIG_CHECKSUM, FIELD_CHECKSUM, 60
                 )
         ));
 
@@ -111,7 +111,7 @@ class BusinessSnapshotReferenceValidationServiceTest {
                         LocalDateTime.of(2026, 9, 9, 9, 0)));
         when(fixture.accessService.reauthorize(any())).thenReturn(Optional.of(
                 new BusinessSnapshotAccessService.AccessGrant(
-                        1L, "f".repeat(64), "e".repeat(64)
+                        1L, "f".repeat(64), "e".repeat(64), 60
                 )
         ));
 

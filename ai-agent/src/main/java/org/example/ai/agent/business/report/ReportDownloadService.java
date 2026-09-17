@@ -82,9 +82,12 @@ public class ReportDownloadService {
         String visibleStatus = task.getExpiresAt() != null
                 && !task.getExpiresAt().isAfter(LocalDateTime.now(clock))
                 ? "EXPIRED" : task.getStatus();
-        return new TaskView(task.getTaskId(), visibleStatus, task.getFormat(),
-                task.getDataComplete(), task.getFileName(), task.getMimeType(), task.getFileSize(),
-                task.getSafeErrorCode(), task.getSafeErrorMessage(), task.getExpiresAt(), sections);
+        return new TaskView(
+                task.getTaskId(), visibleStatus, task.getFormat(), task.getDataComplete(),
+                task.getContentVersion(), task.getFrozenAt(),
+                task.getFileName(), task.getMimeType(), task.getFileSize(),
+                task.getSafeErrorCode(), task.getSafeErrorMessage(), task.getExpiresAt(), sections
+        );
     }
 
     /** 成功态且未过期的所有者任务，逐章节复核权限后才读取并校验文件。 */
@@ -232,12 +235,14 @@ public class ReportDownloadService {
         }
     }
 
-    /** 报告任务安全状态视图，不包含存储路径、校验和和身份字段。 */
+    /** 报告任务安全状态视图，不包含存储路径、校验和、冻结内容和身份字段。 */
     public record TaskView(
             String taskId,
             String status,
             String format,
             Boolean dataComplete,
+            String contentVersion,
+            LocalDateTime frozenAt,
             String fileName,
             String mimeType,
             Long fileSize,

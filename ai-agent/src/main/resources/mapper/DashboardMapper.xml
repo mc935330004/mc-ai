@@ -248,7 +248,6 @@
                     THEN COALESCE(NULLIF(capability.module_name, ''), NULLIF(capability.domain, ''), '业务能力')
                 WHEN workflow.workflow_name IS NOT NULL THEN '工作流'
                 WHEN trace.route_type = 'RAG_ONLY' THEN '知识问答'
-                WHEN trace.route_type = 'DIRECT_CHAT' THEN '直接问答'
                 ELSE '其他问题'
             END) AS topic,
             COUNT(*) AS questionCount,

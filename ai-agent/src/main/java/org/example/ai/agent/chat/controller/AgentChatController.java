@@ -55,12 +55,11 @@ public class AgentChatController {
                         request.getModelCode()
                 );
         request.setModelCode(modelCode);
-        // 只注入受控数量的历史上下文。
-        request.setConversationMemory( aiChatSessionService.buildMemory(
-                        userId,
-                        request.getConversationId()
-                )
-        );
+        request.setConversationMemory(aiChatSessionService.buildMemory(
+                userId,
+                request.getConversationId(),
+                request.getAuthorization()
+        ));
         // 先保存用户问题，助手回答完成后再保存回答。
         aiChatSessionService.saveUserMessage(
                 userId,
@@ -100,32 +99,45 @@ public class AgentChatController {
     }
 
     @GetMapping("/sessions/{sessionId}/messages")
-    public Result<List<ChatMessageVO>> listMessages(@PathVariable String sessionId) {
+    public Result<List<ChatMessageVO>> listMessages( @PathVariable String sessionId) {
         String userId = currentUserProvider.getRequiredUserId();
-        return Result.success(aiChatSessionService.listMessages(userId, sessionId));
+        String authorization = currentUserProvider.getRequiredAuthorization();
+        return Result.success(aiChatSessionService.listMessages(
+                userId,
+                sessionId,
+                authorization
+        ));
     }
 
     /**
      * 获取指定回答的持久化快照，用于断线或刷新后的恢复。
      */
     @GetMapping("/sessions/{sessionId}/runs/{runId}/response")
-    public Result<ChatResponseSnapshotVO> getResponseSnapshot(@PathVariable String sessionId, @PathVariable String runId, @RequestParam(required = false) String responseId, HttpServletResponse response) {
-        // 恢复查询不能使用旧缓存。
+    public Result<ChatResponseSnapshotVO> getResponseSnapshot(@PathVariable String sessionId, @PathVariable String runId,
+                                                              @RequestParam(required = false) String responseId,
+                                                              HttpServletResponse response) {
         response.setHeader("Cache-Control", "no-store");
-        // 用户身份只从认证上下文读取，不接收前端指定用户。
         String userId = currentUserProvider.getRequiredUserId();
-        return Result.success(aiChatSessionService.getResponseSnapshot(userId, sessionId, runId, responseId));
+        String authorization = currentUserProvider.getRequiredAuthorization();
+        return Result.success(aiChatSessionService.getResponseSnapshot(userId, sessionId, runId, responseId, authorization));
     }
 
     /**
      * 读取当前回答中指定表格的一页数据。
      */
     @GetMapping("/sessions/{sessionId}/runs/{runId}/tables/{blockId}/rows")
-    public Result<ChatTablePageVO> pageTableRows(@PathVariable String sessionId, @PathVariable String runId,
-                                                 @PathVariable String blockId, @RequestParam String responseId, @RequestParam(defaultValue = "1") int current, @RequestParam(defaultValue = "10") int size, HttpServletResponse response) {
-        // 业务快照不能被浏览器或代理缓存复用。
+    public Result<ChatTablePageVO> pageTableRows(
+            @PathVariable String sessionId,
+            @PathVariable String runId,
+            @PathVariable String blockId,
+            @RequestParam String responseId,
+            @RequestParam(defaultValue = "1") int current,
+            @RequestParam(defaultValue = "10") int size,
+            HttpServletResponse response) {
         response.setHeader("Cache-Control", "no-store");
-        return Result.success(chatTablePageService.page(currentUserProvider.getRequiredUserId(), sessionId, runId, responseId, blockId, current, size));
+        String userId = currentUserProvider.getRequiredUserId();
+        String authorization = currentUserProvider.getRequiredAuthorization();
+        return Result.success(chatTablePageService.page(userId, sessionId, runId, responseId, blockId, current, size, authorization));
     }
 
     @PatchMapping("/sessions/{sessionId}/model")

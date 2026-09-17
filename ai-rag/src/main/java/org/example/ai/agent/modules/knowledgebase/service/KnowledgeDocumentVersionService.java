@@ -13,9 +13,17 @@ public interface KnowledgeDocumentVersionService extends IService<KnowledgeDocum
     /**
      * 执行指定文档版本的向量化。
      *
-     * @param versionId 文档版本ID，对应 knowledge_document_version.id
+     * vectorJobId由向量任务ID稳定生成，同一任务重试时保持不变。
      */
-    void vectorizeVersion(Long versionId);
+    void vectorizeVersion(Long versionId, String vectorJobId);
+
+    /**
+     * 保存向量化失败状态。
+     *
+     * 该方法由任务Worker在向量化事务回滚后调用，
+     * 保证失败原因不会随原事务一起回滚。
+     */
+    void markVectorizeFailed(Long versionId, String errorMessage);
 
     /**
      * 发布指定文档版本。

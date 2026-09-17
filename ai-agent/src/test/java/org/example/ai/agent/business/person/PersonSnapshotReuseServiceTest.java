@@ -10,6 +10,7 @@ import org.example.ai.agent.business.snapshot.SnapshotMatchDecision;
 import org.example.ai.agent.business.snapshot.SnapshotMatchResult;
 import org.example.ai.agent.business.snapshot.entity.BusinessSnapshot;
 import org.example.ai.agent.business.snapshot.mapper.BusinessSnapshotMapper;
+import org.example.ai.agent.common.enums.SnapshotReadMode;
 import org.example.ai.agent.chat.support.ContentHashUtils;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -177,7 +178,7 @@ class PersonSnapshotReuseServiceTest {
                 "DAY",
                 Set.of(FACT_CODE),
                 Set.of(SnapshotFactChannel.CALCULATION),
-                false
+                SnapshotReadMode.REUSE_IF_FRESH
         );
     }
 }

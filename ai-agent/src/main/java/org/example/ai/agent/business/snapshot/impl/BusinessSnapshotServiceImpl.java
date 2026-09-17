@@ -153,7 +153,7 @@ public class BusinessSnapshotServiceImpl implements BusinessSnapshotService {
             throw badRequest("快照缺少可验证的工作流运行引用");
         }
 
-        LocalDateTime expiresAt = calculateExpiry(dataset.ttlMinutes(), sourceSnapshot, items, now);
+        LocalDateTime expiresAt = calculateRetentionExpiry(sourceSnapshot, items, now);
         BusinessSnapshot snapshot = buildSnapshot(validated, dataset, items, expiresAt, now);
         List<BusinessSnapshotItem> entities = items.stream()
                 .map(item -> toEntity(snapshot.getSnapshotId(), item, now))
@@ -608,12 +608,14 @@ public class BusinessSnapshotServiceImpl implements BusinessSnapshotService {
         return artifact;
     }
 
-    private LocalDateTime calculateExpiry(
-            int ttlMinutes,
+    /**
+     * expiresAt表示历史保留截止时间，新鲜期由completedAt和数据集TTL确定。
+     */
+    private LocalDateTime calculateRetentionExpiry(
             BusinessSnapshot sourceSnapshot,
             List<VerifiedItem> items,
             LocalDateTime now) {
-        LocalDateTime expiresAt = now.plusMinutes(Math.min(ttlMinutes, GLOBAL_MAX_TTL_MINUTES));
+        LocalDateTime expiresAt = now.plusMinutes(GLOBAL_MAX_TTL_MINUTES);
         if (sourceSnapshot != null && sourceSnapshot.getExpiresAt().isBefore(expiresAt)) {
             expiresAt = sourceSnapshot.getExpiresAt();
         }

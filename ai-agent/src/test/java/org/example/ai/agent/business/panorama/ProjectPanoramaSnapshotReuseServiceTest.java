@@ -21,6 +21,7 @@ import org.example.ai.agent.business.snapshot.BusinessSnapshotAccessService;
 import org.example.ai.agent.business.snapshot.entity.BusinessSnapshot;
 import org.example.ai.agent.business.snapshot.mapper.BusinessSnapshotMapper;
 import org.example.ai.agent.chat.support.ContentHashUtils;
+import org.example.ai.agent.common.enums.SnapshotReadMode;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -132,6 +133,71 @@ class ProjectPanoramaSnapshotReuseServiceTest {
         );
     }
 
+    /**
+     * 定向分析只能恢复该范围内的模块，不能按完整方案要求额外模块。
+     */
+    @Test
+    void focusedScopeRestoresOnlySelectedModule() throws Exception {
+        arrangeValidReuse();
+        when(moduleMapper.selectList(any())).thenReturn(List.of(
+                moduleReference(1L, "BUDGET", false, 1,
+                        DatasetExecutionStatus.EMPTY, "snapshot-budget")
+        ));
+
+        Optional<ProjectPanoramaResult> reused = service.reuse(command(
+                new ProjectPanoramaPlan.Scope(
+                        ProjectPanoramaPlan.AnalysisMode.FOCUSED,
+                        List.of("BUDGET")
+                ),
+                SnapshotReadMode.REUSE_IF_FRESH
+        ));
+
+        assertThat(reused).isPresent();
+        assertThat(reused.orElseThrow().modules())
+                .extracting(ProjectPanoramaResult.ModuleResult::datasetCode)
+                .containsExactly("BUDGET");
+    }
+
+    /**
+     * 普通追问拒绝陈旧快照，明确历史引用允许读取保留期内的同一快照。
+     */
+    @Test
+    void staleRetainedPanoramaRequiresExplicitHistoryMode() throws Exception {
+        arrangeValidReuse();
+        BusinessSnapshot contract = moduleSnapshot(
+                "snapshot-contract", "CONTRACT",
+                Map.of("display", Map.of("contractAmount", "100万元"), "model", Map.of())
+        );
+        BusinessSnapshot budget = moduleSnapshot(
+                "snapshot-budget", "BUDGET",
+                Map.of("display", Map.of(), "model", Map.of())
+        );
+        contract.setCompletedAt(NOW.minusMinutes(61));
+        budget.setCompletedAt(NOW.minusMinutes(61));
+        when(businessSnapshotMapper.selectById("snapshot-contract")).thenReturn(contract);
+        when(businessSnapshotMapper.selectById("snapshot-budget")).thenReturn(budget);
+
+        assertThat(service.reuse(command(
+                deepScope(), SnapshotReadMode.REUSE_IF_FRESH
+        ))).isEmpty();
+        assertThat(service.reuse(command(
+                deepScope(), SnapshotReadMode.REUSE_SNAPSHOT
+        ))).isPresent();
+    }
+
+    /**
+     * 强制实时模式不能执行权限复核后的快照回退。
+     */
+    @Test
+    void forceLiveModeBypassesSnapshotReuse() {
+        assertThat(service.reuse(command(
+                deepScope(), SnapshotReadMode.FORCE_LIVE
+        ))).isEmpty();
+
+        verify(authorizationService, never()).authorize(any());
+        verify(snapshotMapper, never()).selectById(any());
+    }
+
     @Test
     void aggregateOwnerSessionOrAuthorizedProjectMismatchRejectsReuse() throws Exception {
         arrangeValidReuse();
@@ -191,7 +257,7 @@ class ProjectPanoramaSnapshotReuseServiceTest {
         arrangeValidReuse();
         when(accessService.reauthorize(any())).thenReturn(Optional.of(
                 new BusinessSnapshotAccessService.AccessGrant(
-                        101L, DATASET_CHECKSUM, "f".repeat(64)
+                        101L, DATASET_CHECKSUM, "f".repeat(64), 60
                 )
         ));
 
@@ -324,6 +390,12 @@ class ProjectPanoramaSnapshotReuseServiceTest {
     }
 
     private ProjectPanoramaSnapshotReuseService.ReuseCommand command() {
+        return command(deepScope(), SnapshotReadMode.REUSE_IF_FRESH);
+    }
+
+    private ProjectPanoramaSnapshotReuseService.ReuseCommand command(
+            ProjectPanoramaPlan.Scope scope,
+            SnapshotReadMode readMode) {
         return new ProjectPanoramaSnapshotReuseService.ReuseCommand(
                 "run-sensitive",
                 "user-sensitive",
@@ -332,7 +404,16 @@ class ProjectPanoramaSnapshotReuseServiceTest {
                 Map.of("tenant", "tenant-secret"),
                 "selection-token-secret",
                 "panorama-1",
+                scope,
+                readMode,
                 Map.of("startDate", "2026-01-01", "projectYear", 2026)
+        );
+    }
+
+    private ProjectPanoramaPlan.Scope deepScope() {
+        return new ProjectPanoramaPlan.Scope(
+                ProjectPanoramaPlan.AnalysisMode.DEEP,
+                List.of()
         );
     }
 
@@ -418,13 +499,14 @@ class ProjectPanoramaSnapshotReuseServiceTest {
         snapshot.setFactsJson(objectMapper.writeValueAsString(Map.of(datasetCode, channels)));
         snapshot.setConfigChecksum(DATASET_CHECKSUM);
         snapshot.setFieldPolicyChecksum(FIELD_POLICY_CHECKSUM);
+        snapshot.setCompletedAt(NOW.minusMinutes(5));
         snapshot.setExpiresAt(NOW.plusMinutes(30));
         return snapshot;
     }
 
     private BusinessSnapshotAccessService.AccessGrant grant() {
         return new BusinessSnapshotAccessService.AccessGrant(
-                101L, DATASET_CHECKSUM, FIELD_POLICY_CHECKSUM
+                101L, DATASET_CHECKSUM, FIELD_POLICY_CHECKSUM, 60
         );
     }
 

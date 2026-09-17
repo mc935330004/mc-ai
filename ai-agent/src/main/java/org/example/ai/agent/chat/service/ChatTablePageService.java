@@ -52,7 +52,7 @@ public class ChatTablePageService {
             String responseId,
             String blockId,
             int current,
-            int size) {
+            int size,String authorization) {
 
         if (!StringUtils.hasText(responseId)
                 || !StringUtils.hasText(blockId)
@@ -65,9 +65,12 @@ public class ChatTablePageService {
             );
         }
 
-        // 复用现有用户归属、会话归属和回答唯一性检查。
         ChatResponseSnapshotVO saved = chatSessionService.getResponseSnapshot(
-                userId, sessionId, runId, responseId
+                userId,
+                sessionId,
+                runId,
+                responseId,
+                authorization
         );
 
         if (!StringUtils.hasText(saved.documentJson())) {
