@@ -9,15 +9,18 @@ import org.example.ai.agent.business.dataset.model.DatasetExecutionResult;
 import org.example.ai.agent.business.dataset.model.DatasetExecutionSource;
 import org.example.ai.agent.business.department.DepartmentBusinessQueryService;
 import org.example.ai.agent.business.department.DepartmentBusinessQueryService.DepartmentQueryStatus;
+import org.example.ai.agent.business.metric.ProjectMetricReadService;
 import org.example.ai.agent.business.person.model.MultiPersonSummary.Aggregate;
 import org.example.ai.agent.business.person.model.MultiPersonSummary.AnomalyPerson;
 import org.example.ai.agent.business.person.model.MultiPersonSummary.PersonQueryStatus;
 import org.example.ai.agent.business.intent.BusinessQueryIntent;
 import org.example.ai.agent.business.intent.BusinessQueryIntentResolver;
 import org.example.ai.agent.business.model.BusinessSubjectType;
+import org.example.ai.agent.business.model.DatasetExecutionStatus;
 import org.example.ai.agent.business.panorama.ProjectPanoramaExecutionService;
 import org.example.ai.agent.business.panorama.ProjectPanoramaSnapshotReuseService;
 import org.example.ai.agent.business.panorama.model.PanoramaExecutionState;
+import org.example.ai.agent.business.panorama.model.ProjectPanoramaPlan;
 import org.example.ai.agent.business.panorama.model.ProjectPanoramaResult;
 import org.example.ai.agent.business.person.PersonBusinessQueryService;
 import org.example.ai.agent.business.person.PersonDatasetPlanService;
@@ -41,6 +44,9 @@ import org.example.ai.agent.chat.stream.ChatResponseAccumulator;
 import org.example.ai.agent.chat.stream.ResponseStreamEventFactory;
 import org.example.ai.agent.chat.stream.ResponseStreamContext;
 import org.example.ai.agent.chat.support.AgentStreamSession;
+import org.example.ai.agent.common.model.ProjectListScope;
+import org.example.ai.agent.common.model.ProjectRelationship;
+import org.example.ai.agent.common.enums.SnapshotReadMode;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -92,12 +98,14 @@ class BusinessAssistantServiceTest {
         verify(fixture.conversationStateService).saveState(any(), any(), state.capture());
         assertThat(state.getValue().getLastInput()).containsEntry("selectionToken", "department-selection-token")
                 .containsEntry("startDate", "2026-08-01").containsEntry("endDate", "2026-08-31");
-        InOrder order = org.mockito.Mockito.inOrder(fixture.stream);
+        InOrder order = org.mockito.Mockito.inOrder(fixture.stream, fixture.chatSessionService);
         order.verify(fixture.stream).startChatResponse();
         order.verify(fixture.stream).sendResponseSnapshot();
         order.verify(fixture.stream, org.mockito.Mockito.atLeastOnce()).publishResponseBlock(any());
         order.verify(fixture.stream).beginFinalization();
-        order.verify(fixture.stream).sendResponseSnapshot();
+        order.verify(fixture.chatSessionService).saveAssistantMessage(
+                any(), any(), any(), any(), any(), any(), any()
+        );
         order.verify(fixture.stream).finishChatResponse();
     }
 
@@ -406,6 +414,8 @@ class BusinessAssistantServiceTest {
         task.setFormat("PDF");
         task.setStatus("PENDING");
         task.setExpiresAt(java.time.LocalDateTime.now().plusHours(1));
+        task.setFrozenAt(java.time.LocalDateTime.of(2026, 9, 17, 10, 0));
+        task.setContentVersion("a".repeat(64));
         when(fixture.reportTaskService.create(any())).thenReturn(task);
         ProjectPanoramaResult panorama = new ProjectPanoramaResult(
                 1L, "a".repeat(64), "panorama-1", PanoramaExecutionState.FAILED,
@@ -446,7 +456,9 @@ class BusinessAssistantServiceTest {
         request.setInheritedInput(Map.of(
                 "selectionToken", "project-token",
                 "subjectType", "PROJECT",
-                "panoramaSnapshotId", "panorama-1"
+                "panoramaSnapshotId", "panorama-1",
+                "analysisMode", "DEEP",
+                "analysisDatasetCodes", List.of()
         ));
 
         fixture.service.handle(request, fixture.stream, "run-1");
@@ -455,7 +467,9 @@ class BusinessAssistantServiceTest {
                 ArgumentCaptor.forClass(ProjectPanoramaSnapshotReuseService.ReuseCommand.class);
         verify(fixture.panoramaSnapshotReuseService).reuse(command.capture());
         assertThat(command.getValue().panoramaSnapshotId()).isEqualTo("panorama-1");
-        verify(fixture.panoramaExecutionService, never()).execute(any(), any());
+        assertThat(command.getValue().scope().mode()).isEqualTo(ProjectPanoramaPlan.AnalysisMode.DEEP);
+        assertThat(command.getValue().readMode()).isEqualTo(SnapshotReadMode.REUSE_IF_FRESH);
+        verify(fixture.panoramaExecutionService, never()).execute(any(), any(), any());
     }
 
     @Test
@@ -463,18 +477,45 @@ class BusinessAssistantServiceTest {
         Fixture fixture = new Fixture();
         when(fixture.intentResolver.resolve(any(), any())).thenReturn(projectIntent(true, null));
         when(fixture.subjectResolutionService.resolve(any())).thenReturn(resolvedProject());
-        when(fixture.panoramaExecutionService.execute(any(), any())).thenReturn(projectPanorama());
+        when(fixture.panoramaExecutionService.execute(any(), any(), any())).thenReturn(projectPanorama());
         AgentRequest request = request("刷新项目数据");
         request.setInheritedInput(Map.of(
                 "selectionToken", "project-token",
                 "subjectType", "PROJECT",
-                "panoramaSnapshotId", "panorama-1"
+                "panoramaSnapshotId", "panorama-1",
+                "analysisMode", "DEEP",
+                "analysisDatasetCodes", List.of()
         ));
 
         fixture.service.handle(request, fixture.stream, "run-1");
 
         verify(fixture.panoramaSnapshotReuseService, never()).reuse(any());
-        verify(fixture.panoramaExecutionService).execute(any(), any());
+        verify(fixture.panoramaExecutionService).execute(any(), any(), any());
+    }
+
+    /**
+     * 会话解析器确定的强制实时模式必须绕过旧快照，即使意图模型没有识别刷新语义。
+     */
+    @Test
+    void forceLiveReadModeBypassesInheritedProjectSnapshot() throws Exception {
+        Fixture fixture = new Fixture();
+        when(fixture.intentResolver.resolve(any(), any())).thenReturn(projectIntent(false, null));
+        when(fixture.subjectResolutionService.resolve(any())).thenReturn(resolvedProject());
+        when(fixture.panoramaExecutionService.execute(any(), any(), any())).thenReturn(projectPanorama());
+        AgentRequest request = request("按最新数据重新查询");
+        request.setSnapshotReadMode(SnapshotReadMode.FORCE_LIVE);
+        request.setInheritedInput(Map.of(
+                "selectionToken", "project-token",
+                "subjectType", "PROJECT",
+                "panoramaSnapshotId", "panorama-1",
+                "analysisMode", "DEEP",
+                "analysisDatasetCodes", List.of()
+        ));
+
+        fixture.service.handle(request, fixture.stream, "run-1");
+
+        verify(fixture.panoramaSnapshotReuseService, never()).reuse(any());
+        verify(fixture.panoramaExecutionService).execute(any(), any(), any());
     }
 
     @Test
@@ -484,18 +525,20 @@ class BusinessAssistantServiceTest {
         when(fixture.subjectResolutionService.resolve(any())).thenReturn(resolvedProject());
         when(fixture.panoramaSnapshotReuseService.reuse(any()))
                 .thenReturn(java.util.Optional.empty());
-        when(fixture.panoramaExecutionService.execute(any(), any())).thenReturn(projectPanorama());
+        when(fixture.panoramaExecutionService.execute(any(), any(), any())).thenReturn(projectPanorama());
         AgentRequest request = request("继续分析这个项目");
         request.setInheritedInput(Map.of(
                 "selectionToken", "project-token",
                 "subjectType", "PROJECT",
-                "panoramaSnapshotId", "expired-panorama"
+                "panoramaSnapshotId", "expired-panorama",
+                "analysisMode", "DEEP",
+                "analysisDatasetCodes", List.of()
         ));
 
         fixture.service.handle(request, fixture.stream, "run-1");
 
         verify(fixture.panoramaSnapshotReuseService).reuse(any());
-        verify(fixture.panoramaExecutionService).execute(any(), any());
+        verify(fixture.panoramaExecutionService).execute(any(), any(), any());
     }
 
     @Test
@@ -503,14 +546,14 @@ class BusinessAssistantServiceTest {
         Fixture fixture = new Fixture();
         when(fixture.intentResolver.resolve(any(), any())).thenReturn(projectIntent(false, "P-1001"));
         when(fixture.subjectResolutionService.resolve(any())).thenReturn(resolvedProject());
-        when(fixture.panoramaExecutionService.execute(any(), any())).thenReturn(projectPanorama());
-        AgentRequest request = request("查询 P-1001");
+        when(fixture.panoramaExecutionService.execute(any(), any(), any())).thenReturn(projectPanorama());
+        AgentRequest request = request("完整分析 P-1001");
         request.setExtra(Map.of("panoramaSnapshotId", "forged-panorama"));
 
         fixture.service.handle(request, fixture.stream, "run-1");
 
         verify(fixture.panoramaSnapshotReuseService, never()).reuse(any());
-        verify(fixture.panoramaExecutionService).execute(any(), any());
+        verify(fixture.panoramaExecutionService).execute(any(), any(), any());
     }
 
     @Test
@@ -525,8 +568,8 @@ class BusinessAssistantServiceTest {
                 ),
                 List.of(), 1, 20, 1, false, "主体已定位"
         ));
-        when(fixture.panoramaExecutionService.execute(any(), any())).thenReturn(projectPanorama());
-        AgentRequest request = request("查询 P-2002");
+        when(fixture.panoramaExecutionService.execute(any(), any(), any())).thenReturn(projectPanorama());
+        AgentRequest request = request("完整分析 P-2002");
         request.setInheritedInput(Map.of(
                 "selectionToken", "project-a-token",
                 "subjectType", "PROJECT",
@@ -541,7 +584,7 @@ class BusinessAssistantServiceTest {
         assertThat(resolution.getValue().projectCode()).isEqualTo("P-2002");
         assertThat(resolution.getValue().selectionToken()).isNull();
         verify(fixture.panoramaSnapshotReuseService, never()).reuse(any());
-        verify(fixture.panoramaExecutionService).execute(any(), any());
+        verify(fixture.panoramaExecutionService).execute(any(), any(), any());
     }
 
     @Test
@@ -581,22 +624,209 @@ class BusinessAssistantServiceTest {
                 null,
                 List.of(new SubjectCandidate(
                         BusinessSubjectType.PROJECT, "selection-token", "示例项目",
-                        null, null, "P-1001", "DELIVERY"
+                        null, null, "P-1001", "DELIVERY",
+                        ProjectRelationship.RESPONSIBLE, "进行中"
                 )),
-                1, 20, 1, false, "请从当前授权范围内选择主体"
+                1, 10, 0, false, true, "请从当前授权范围内选择主体"
         ));
 
         fixture.service.handle(request("我的项目"), fixture.stream, "run-1");
 
-        verify(fixture.panoramaExecutionService, never()).execute(any(), any());
+        ArgumentCaptor<SubjectResolutionRequest> requestCaptor =
+                ArgumentCaptor.forClass(SubjectResolutionRequest.class);
+        verify(fixture.subjectResolutionService).resolve(requestCaptor.capture());
+        assertThat(requestCaptor.getValue().projectListScope()).isEqualTo(ProjectListScope.MY_PROJECTS);
+        assertThat(requestCaptor.getValue().pageSize()).isEqualTo(10);
+        String json = fixture.objectMapper.writeValueAsString(fixture.accumulator.complete());
+        assertThat(json).contains("分析此项目", "SELECT_SUBJECT", "selection-token", "我负责", "进行中")
+                .contains("\"totalKnown\":false", "\"hasMore\":true")
+                .doesNotContain("选择凭证");
+        verify(fixture.panoramaExecutionService, never()).execute(any(), any(), any());
         verify(fixture.personBusinessQueryService, never()).query(any());
-        verify(fixture.stream, org.mockito.Mockito.times(2)).sendResponseSnapshot();
+        verify(fixture.stream).sendResponseSnapshot();
         verify(fixture.stream).finishChatResponse();
         InOrder order = org.mockito.Mockito.inOrder(fixture.accumulator, fixture.stream);
         order.verify(fixture.accumulator).setContext(any());
         order.verify(fixture.stream).sendResponseSnapshot();
         order.verify(fixture.stream).sendResponseEvent(any());
         order.verify(fixture.stream).publishResponseBlock(any());
+    }
+
+    /**
+     * 只有用户明确提出“可查看”时才扩大项目查询范围。
+     */
+    @Test
+    void explicitViewableProjectQuestionUsesViewableScope() throws Exception {
+        Fixture fixture = new Fixture();
+        when(fixture.intentResolver.resolve(any(), any())).thenReturn(new BusinessQueryIntent(
+                BusinessSubjectType.PROJECT, null, null, null,
+                2026, null, null, List.of(), false, null, false, false
+        ));
+        when(fixture.subjectResolutionService.resolve(any())).thenReturn(new SubjectResolutionResult(
+                SubjectResolutionState.EMPTY, null, List.of(), 1, 10, 0, true, false, "未找到项目"
+        ));
+
+        fixture.service.handle(request("查询我可查看的项目"), fixture.stream, "run-1");
+
+        ArgumentCaptor<SubjectResolutionRequest> requestCaptor =
+                ArgumentCaptor.forClass(SubjectResolutionRequest.class);
+        verify(fixture.subjectResolutionService).resolve(requestCaptor.capture());
+        assertThat(requestCaptor.getValue().projectListScope()).isEqualTo(ProjectListScope.VIEWABLE_PROJECTS);
+    }
+
+    @Test
+    void projectWithoutAnalysisScopeReturnsSelectionAndExecutesNothing() throws Exception {
+        Fixture fixture = new Fixture();
+        when(fixture.intentResolver.resolve(any(), any())).thenReturn(projectIntent(false, null));
+        when(fixture.subjectResolutionService.resolve(any())).thenReturn(resolvedProject());
+        when(fixture.panoramaExecutionService.configuredPlan("DELIVERY")).thenReturn(projectPlan());
+        when(fixture.reportDatasetService.list()).thenReturn(List.of(
+                dataset("PROJECT_BASE"), dataset("CONTRACT"), dataset("BUDGET"), dataset("CASH_FLOW")
+        ));
+
+        fixture.service.handle(request("分析这个项目"), fixture.stream, "run-1");
+
+        String json = fixture.objectMapper.writeValueAsString(fixture.accumulator.complete());
+        assertThat(json).contains("SELECTION", "快速概览", "CONTRACT", "BUDGET", "CASH_FLOW", "完整分析");
+        verify(fixture.panoramaExecutionService, never()).execute(any(), any(), any());
+        verify(fixture.panoramaSnapshotReuseService, never()).reuse(any());
+        ArgumentCaptor<org.example.ai.agent.chat.memory.model.BusinessConversationState> state =
+                ArgumentCaptor.forClass(org.example.ai.agent.chat.memory.model.BusinessConversationState.class);
+        verify(fixture.conversationStateService).saveState(any(), any(), state.capture());
+        assertThat(state.getValue().isAwaitingClarification()).isTrue();
+        assertThat(state.getValue().getLastInput())
+                .containsEntry("selectionToken", "project-token")
+                .containsKey("analysisClarificationId")
+                .containsEntry("analysisAllowedDatasetCodes", List.of("CONTRACT", "BUDGET", "CASH_FLOW"));
+    }
+
+    @Test
+    void focusedProjectAnalysisPassesOnlySelectedModules() throws Exception {
+        Fixture fixture = new Fixture();
+        when(fixture.intentResolver.resolve(any(), any())).thenReturn(new BusinessQueryIntent(
+                BusinessSubjectType.PROJECT, null, null, null, 2026, null, null,
+                List.of("BUDGET", "CASH_FLOW"), false, null, false, false
+        ));
+        when(fixture.subjectResolutionService.resolve(any())).thenReturn(resolvedProject());
+        when(fixture.panoramaExecutionService.execute(any(), any(), any())).thenReturn(projectPanorama());
+
+        fixture.service.handle(request("分析概算和现金流"), fixture.stream, "run-1");
+
+        ArgumentCaptor<ProjectPanoramaPlan.Scope> scope = ArgumentCaptor.forClass(ProjectPanoramaPlan.Scope.class);
+        verify(fixture.panoramaExecutionService).execute(any(), scope.capture(), any());
+        assertThat(scope.getValue().mode()).isEqualTo(ProjectPanoramaPlan.AnalysisMode.FOCUSED);
+        assertThat(scope.getValue().datasetCodes()).containsExactly("BUDGET", "CASH_FLOW");
+    }
+
+    @Test
+    void paymentPolicyQuestionUsesPaymentFactsAndPublishesRealReferences() throws Exception {
+        Fixture fixture = new Fixture();
+        when(fixture.intentResolver.resolve(any(), any())).thenReturn(projectIntent(false, "P-1001"));
+        when(fixture.subjectResolutionService.resolve(any())).thenReturn(resolvedProject());
+        ProjectPanoramaResult paymentPanorama = new ProjectPanoramaResult(
+                1L, "a".repeat(64), "panorama-payment", PanoramaExecutionState.COMPLETE,
+                true, true, List.of(), List.of(), List.of(
+                new ProjectPanoramaResult.ModuleResult(
+                        "PAYMENT", true, DatasetExecutionStatus.SUCCESS, true,
+                        "snapshot-payment", null,
+                        Map.of("approvalStatus", "APPROVED"),
+                        Map.of("approvalStatus", "APPROVED"), "d".repeat(64)
+                )
+        ));
+        when(fixture.panoramaExecutionService.execute(any(), any(), any())).thenReturn(paymentPanorama);
+        org.example.ai.agent.modules.knowledgebase.model.KnowledgeEvidence evidence =
+                new org.example.ai.agent.modules.knowledgebase.model.KnowledgeEvidence(
+                        "evidence:11:101", 1L, 11L, 101L, 1,
+                        "付款管理制度", "V2", "付款应在审批通过后执行。",
+                        "payment-policy.pdf", 2, 0.91,
+                        java.time.LocalDateTime.of(2026, 9, 17, 10, 0)
+                );
+        when(fixture.policyComparisonService.analyze(any())).thenReturn(
+                new org.example.ai.agent.business.policy.BusinessPolicyComparisonService.Result(
+                        org.example.ai.agent.business.policy.BusinessPolicyComparisonService.Status.COMPLIANT,
+                        "付款已审批，符合制度要求。", List.of(evidence)
+                )
+        );
+        AgentRequest request = request("分析 P-1001 项目当前付款是否符合公司制度");
+        request.setKnowledgeAccessPrincipal(
+                new org.example.ai.agent.modules.knowledgebase.security.KnowledgeAccessPrincipal(
+                        "user-1", 1L, 10L
+                )
+        );
+
+        fixture.service.handle(request, fixture.stream, "run-1");
+
+        ArgumentCaptor<ProjectPanoramaPlan.Scope> scope = ArgumentCaptor.forClass(ProjectPanoramaPlan.Scope.class);
+        verify(fixture.panoramaExecutionService).execute(any(), scope.capture(), any());
+        assertThat(scope.getValue().datasetCodes()).containsExactly("PAYMENT");
+        String json = fixture.objectMapper.writeValueAsString(fixture.accumulator.complete());
+        assertThat(json).contains(
+                "制度对照：符合", "付款已审批，符合制度要求。",
+                "付款管理制度", "V2", "evidence:11:101"
+        );
+    }
+
+    /**
+     * 前端选择动作只能使用服务端保存的澄清凭证和允许模块。
+     */
+    @Test
+    void projectAnalysisActionUsesServerBoundFocusedScope() throws Exception {
+        Fixture fixture = new Fixture();
+        when(fixture.intentResolver.resolve(any(), any())).thenReturn(projectIntent(false, null));
+        when(fixture.subjectResolutionService.resolve(any())).thenReturn(resolvedProject());
+        when(fixture.conversationStateService.loadState("user-1", "conversation-1"))
+                .thenReturn(java.util.Optional.of(projectAnalysisClarificationState()));
+        when(fixture.panoramaExecutionService.execute(any(), any(), any())).thenReturn(projectPanorama());
+        AgentRequest request = request("分析概算和现金流");
+        request.setExtra(Map.of(
+                "analysisClarificationId", "clarification-1",
+                "analysisMode", "FOCUSED",
+                "analysisDatasetCodes", List.of("BUDGET", "CASH_FLOW")
+        ));
+
+        fixture.service.handle(request, fixture.stream, "run-1");
+
+        ArgumentCaptor<ProjectPanoramaPlan.Scope> scope = ArgumentCaptor.forClass(ProjectPanoramaPlan.Scope.class);
+        verify(fixture.panoramaExecutionService).execute(any(), scope.capture(), any());
+        assertThat(scope.getValue().mode()).isEqualTo(ProjectPanoramaPlan.AnalysisMode.FOCUSED);
+        assertThat(scope.getValue().datasetCodes()).containsExactly("BUDGET", "CASH_FLOW");
+    }
+
+    /**
+     * 客户端不能提交服务端未授权的项目分析模块。
+     */
+    @Test
+    void projectAnalysisActionRejectsDatasetOutsideServerAllowList() {
+        Fixture fixture = new Fixture();
+        when(fixture.intentResolver.resolve(any(), any())).thenReturn(projectIntent(false, null));
+        when(fixture.subjectResolutionService.resolve(any())).thenReturn(resolvedProject());
+        when(fixture.conversationStateService.loadState("user-1", "conversation-1"))
+                .thenReturn(java.util.Optional.of(projectAnalysisClarificationState()));
+        AgentRequest request = request("分析付款");
+        request.setExtra(Map.of(
+                "analysisClarificationId", "clarification-1",
+                "analysisMode", "FOCUSED",
+                "analysisDatasetCodes", List.of("PAYMENT")
+        ));
+
+        assertThatThrownBy(() -> fixture.service.handle(request, fixture.stream, "run-1"))
+                .hasMessage("所选项目分析模块不可用");
+        verify(fixture.panoramaExecutionService, never()).execute(any(), any(), any());
+    }
+
+    @Test
+    void completeAnalysisIsTheOnlyQuestionThatUsesDeepScope() throws Exception {
+        Fixture fixture = new Fixture();
+        when(fixture.intentResolver.resolve(any(), any())).thenReturn(projectIntent(false, null));
+        when(fixture.subjectResolutionService.resolve(any())).thenReturn(resolvedProject());
+        when(fixture.panoramaExecutionService.execute(any(), any(), any())).thenReturn(projectPanorama());
+
+        fixture.service.handle(request("完整分析这个项目"), fixture.stream, "run-1");
+
+        ArgumentCaptor<ProjectPanoramaPlan.Scope> scope = ArgumentCaptor.forClass(ProjectPanoramaPlan.Scope.class);
+        verify(fixture.panoramaExecutionService).execute(any(), scope.capture(), any());
+        assertThat(scope.getValue().mode()).isEqualTo(ProjectPanoramaPlan.AnalysisMode.DEEP);
+        assertThat(scope.getValue().datasetCodes()).isEmpty();
     }
 
     @Test
@@ -620,10 +850,10 @@ class BusinessAssistantServiceTest {
                         false, null, null
                 )
         ));
-        when(fixture.panoramaExecutionService.execute(any(), any())).thenAnswer(invocation -> {
+        when(fixture.panoramaExecutionService.execute(any(), any(), any())).thenAnswer(invocation -> {
             @SuppressWarnings("unchecked")
             java.util.function.Consumer<org.example.ai.agent.business.panorama.model.ProjectPanoramaProgressEvent>
-                    progress = invocation.getArgument(1);
+                    progress = invocation.getArgument(2);
             progress.accept(new org.example.ai.agent.business.panorama.model.ProjectPanoramaProgressEvent(
                     "CONTRACT", org.example.ai.agent.business.model.DatasetExecutionStatus.RUNNING, 1, 2
             ));
@@ -642,11 +872,17 @@ class BusinessAssistantServiceTest {
         task.setFormat("PDF");
         task.setStatus("PENDING");
         task.setExpiresAt(java.time.LocalDateTime.now().plusHours(1));
+        task.setFrozenAt(java.time.LocalDateTime.of(2026, 9, 17, 10, 0));
+        task.setContentVersion("a".repeat(64));
         when(fixture.reportTaskService.create(any())).thenReturn(task);
 
-        fixture.service.handle(request("查询 P-1001 并导出 PDF"), fixture.stream, "run-1");
+        AgentRequest request = request("完整分析 P-1001 并导出 PDF");
+        request.setSnapshotReadMode(SnapshotReadMode.FORCE_LIVE);
+        request.setInheritedInput(Map.of("sourceRunId", "run-previous"));
 
-        verify(fixture.panoramaExecutionService).execute(any(), any());
+        fixture.service.handle(request, fixture.stream, "run-1");
+
+        verify(fixture.panoramaExecutionService).execute(any(), any(), any());
         InOrder progressOrder = org.mockito.Mockito.inOrder(fixture.accumulator, fixture.stream);
         progressOrder.verify(fixture.accumulator).setContext(any());
         progressOrder.verify(fixture.stream).sendResponseSnapshot();
@@ -656,6 +892,7 @@ class BusinessAssistantServiceTest {
         ArgumentCaptor<CompositeReportTaskService.CreateCommand> reportCommand =
                 ArgumentCaptor.forClass(CompositeReportTaskService.CreateCommand.class);
         verify(fixture.reportTaskService).create(reportCommand.capture());
+        assertThat(reportCommand.getValue().sourceRunId()).isEqualTo("run-1");
         assertThat(reportCommand.getValue().plannedReport().plan().subjectId())
                 .isEqualTo("project-raw-1");
         ArgumentCaptor<BusinessSnapshotReferenceValidationService.ValidationCommand> validation =
@@ -674,7 +911,9 @@ class BusinessAssistantServiceTest {
         modelFailureOrder.verify(fixture.stream).failResponseBlock(any());
         verify(fixture.stream, org.mockito.Mockito.atLeastOnce()).publishResponseBlock(
                 org.mockito.ArgumentMatchers.argThat(block -> block instanceof ArtifactBlock artifact
-                        && "task-1".equals(artifact.taskId()))
+                        && "task-1".equals(artifact.taskId())
+                        && "a".repeat(64).equals(artifact.contentVersion())
+                        && java.time.LocalDateTime.of(2026, 9, 17, 10, 0).equals(artifact.frozenAt()))
         );
         ArgumentCaptor<String> savedResponse = ArgumentCaptor.forClass(String.class);
         verify(fixture.chatSessionService).saveAssistantMessage(
@@ -684,7 +923,8 @@ class BusinessAssistantServiceTest {
                 org.mockito.ArgumentMatchers.eq("model-1"),
                 org.mockito.ArgumentMatchers.eq("CHAT"), savedResponse.capture()
         );
-        assertThat(savedResponse.getValue()).contains("\"taskId\":\"task-1\"");
+        assertThat(savedResponse.getValue())
+                .contains("\"taskId\":\"task-1\"", "\"contentVersion\":\"" + "a".repeat(64));
     }
 
     @Test
@@ -920,13 +1160,19 @@ class BusinessAssistantServiceTest {
         task.setFormat("PDF");
         task.setStatus("PENDING");
         task.setExpiresAt(java.time.LocalDateTime.now().plusHours(1));
+        task.setFrozenAt(java.time.LocalDateTime.of(2026, 9, 17, 10, 0));
+        task.setContentVersion("a".repeat(64));
         when(fixture.reportTaskService.create(any())).thenReturn(task);
 
-        fixture.service.handle(request("查询张三并导出 PDF"), fixture.stream, "run-1");
+        AgentRequest request = request("查询张三并导出 PDF");
+        request.setInheritedInput(Map.of("sourceRunId", "run-previous"));
+
+        fixture.service.handle(request, fixture.stream, "run-1");
 
         ArgumentCaptor<CompositeReportTaskService.CreateCommand> command =
                 ArgumentCaptor.forClass(CompositeReportTaskService.CreateCommand.class);
         verify(fixture.reportTaskService).create(command.capture());
+        assertThat(command.getValue().sourceRunId()).isEqualTo("run-previous");
         assertThat(command.getValue().plannedReport().plan().subjectId())
                 .isEqualTo("employee-raw-1");
         assertThat(command.getValue().plannedReport().plan().dataComplete()).isFalse();
@@ -1411,12 +1657,12 @@ class BusinessAssistantServiceTest {
                 false, null, false, false
         ));
         when(fixture.subjectResolutionService.resolve(any())).thenReturn(resolvedProject());
-        when(fixture.panoramaExecutionService.execute(any(), any())).thenReturn(projectPanorama());
+        when(fixture.panoramaExecutionService.execute(any(), any(), any())).thenReturn(projectPanorama());
 
         fixture.service.handle(request("查询项目多个模块"), fixture.stream, "run-1");
 
         verify(fixture.personDatasetSelectionService, never()).select(any());
-        verify(fixture.panoramaExecutionService).execute(any(), any());
+        verify(fixture.panoramaExecutionService).execute(any(), any(), any());
     }
 
     @Test
@@ -1532,6 +1778,30 @@ class BusinessAssistantServiceTest {
                         Map.of("amount", 8600), Map.of("summary", "合同正常"), "d".repeat(64)
                 )
         ));
+    }
+
+    private ProjectPanoramaPlan projectPlan() {
+        return new ProjectPanoramaPlan(1L, "DELIVERY", "项目全景", "a".repeat(64), List.of(
+                new ProjectPanoramaPlan.Module("PROJECT_BASE", true, 10, 30_000),
+                new ProjectPanoramaPlan.Module("CONTRACT", false, 20, 30_000),
+                new ProjectPanoramaPlan.Module("BUDGET", false, 30, 30_000),
+                new ProjectPanoramaPlan.Module("CASH_FLOW", false, 40, 30_000)
+        ));
+    }
+
+    private org.example.ai.agent.chat.memory.model.BusinessConversationState projectAnalysisClarificationState() {
+        org.example.ai.agent.chat.memory.model.BusinessConversationState state =
+                new org.example.ai.agent.chat.memory.model.BusinessConversationState();
+        state.setActiveObjectType(BusinessSubjectType.PROJECT.name());
+        state.setActiveObjectIds(List.of("P-1001"));
+        state.setAwaitingClarification(true);
+        state.setLastInput(Map.of(
+                "selectionToken", "project-token",
+                "analysisClarificationId", "clarification-1",
+                "analysisClarificationExpiresAt", java.time.LocalDateTime.now().plusMinutes(10).toString(),
+                "analysisAllowedDatasetCodes", List.of("BUDGET", "CASH_FLOW")
+        ));
+        return state;
     }
 
     private PersonBusinessQueryService.Result personReportResult() {
@@ -1664,6 +1934,8 @@ class BusinessAssistantServiceTest {
         task.setFormat(format);
         task.setStatus("PENDING");
         task.setExpiresAt(java.time.LocalDateTime.now().plusHours(1));
+        task.setFrozenAt(java.time.LocalDateTime.of(2026, 9, 17, 10, 0));
+        task.setContentVersion("a".repeat(64));
         return task;
     }
 
@@ -1749,7 +2021,12 @@ class BusinessAssistantServiceTest {
         ));
         private final ResponseStreamEventFactory eventFactory = mock(ResponseStreamEventFactory.class);
         private final BusinessAssistantService service;
-
+        private final ProjectMetricReadService projectMetricReadService =
+                mock(ProjectMetricReadService.class);
+        private final org.example.ai.agent.business.security.BusinessResponseAccessService responseAccessService =
+                mock(org.example.ai.agent.business.security.BusinessResponseAccessService.class);
+        private final org.example.ai.agent.business.policy.BusinessPolicyComparisonService policyComparisonService =
+                mock(org.example.ai.agent.business.policy.BusinessPolicyComparisonService.class);
         private Fixture() {
             when(stream.getMessageId()).thenReturn("response-1");
             when(stream.getChatResponseAccumulator()).thenReturn(accumulator);
@@ -1767,14 +2044,32 @@ class BusinessAssistantServiceTest {
                 accumulator.setDataComplete(invocation.getArgument(0));
                 return null;
             }).when(stream).setResponseDataComplete(org.mockito.ArgumentMatchers.anyBoolean());
+            doAnswer(invocation -> {
+                accumulator.setReferences(invocation.getArgument(0));
+                return null;
+            }).when(stream).setResponseReferences(any());
+            when(responseAccessService.bind(any(), any(), any())).thenAnswer(invocation ->
+                    objectMapper.writeValueAsString(invocation.getArgument(0))
+            );
             service = new org.example.ai.agent.business.impl.BusinessAssistantServiceImpl(
-                    intentResolver, subjectResolutionService, panoramaExecutionService,
+                    intentResolver,
+                    subjectResolutionService,
+                    panoramaExecutionService,
                     panoramaSnapshotReuseService,
-                    personBusinessQueryService, personDatasetSelectionService,
+                    personBusinessQueryService,
+                    personDatasetSelectionService,
                     personDatasetPlanService,
                     projectPeriodContextService,
-                    departmentBusinessQueryService, reportDatasetService, composer,
-                    reportService, conversationStateService, chatSessionService, objectMapper
+                    departmentBusinessQueryService,
+                    reportDatasetService,
+                    composer,
+                    reportService,
+                    conversationStateService,
+                    chatSessionService,
+                    projectMetricReadService,
+                    responseAccessService,
+                    policyComparisonService,
+                    objectMapper
             );
         }
     }
