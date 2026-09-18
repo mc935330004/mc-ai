@@ -7,6 +7,7 @@ import org.example.ai.agent.common.file.DocumentParseService;
 import org.example.ai.agent.modules.knowledgebase.entity.KnowledgeDocument;
 import org.example.ai.agent.modules.knowledgebase.entity.KnowledgeDocumentVersion;
 import org.example.ai.agent.modules.knowledgebase.mapper.KnowledgeChunkMapper;
+import org.example.ai.agent.modules.knowledgebase.mapper.KnowledgeBaseVectorTaskMapper;
 import org.example.ai.agent.modules.knowledgebase.repository.VectorRepository;
 import org.example.ai.agent.modules.knowledgebase.security.KnowledgeAccessContext;
 import org.example.ai.agent.modules.knowledgebase.security.KnowledgeAccessPrincipal;
@@ -53,6 +54,8 @@ class KnowledgeDocumentVersionServiceImplTest {
     @Mock
     private KnowledgeBaseVectorTaskService vectorTaskService;
     @Mock
+    private KnowledgeBaseVectorTaskMapper vectorTaskMapper;
+    @Mock
     private KnowledgeAccessContext knowledgeAccessContext;
 
     private KnowledgeDocumentVersionServiceImpl versionService;
@@ -68,6 +71,7 @@ class KnowledgeDocumentVersionServiceImplTest {
                 vectorStoreProvider,
                 vectorRepository,
                 vectorTaskService,
+                vectorTaskMapper,
                 knowledgeAccessContext
         ));
     }
@@ -109,12 +113,28 @@ class KnowledgeDocumentVersionServiceImplTest {
         doReturn(version).when(versionService).getById(100L);
         doReturn(true).when(versionService).updateById(any(KnowledgeDocumentVersion.class));
 
-        versionService.markVectorizeFailed(100L, "PGVector connection failed");
+        when(vectorTaskMapper.failOrRetryClaim(21L, "claim-1", "PGVector connection failed")).thenReturn(1);
 
+        boolean updated = versionService.markVectorizeFailed(
+                21L, 100L, "claim-1", "PGVector connection failed"
+        );
+
+        assertThat(updated).isTrue();
         assertThat(version.getParseStatus()).isEqualTo("FAILED");
         assertThat(version.getVectorStatus()).isEqualTo("FAILED");
         assertThat(version.getVectorError()).isEqualTo("PGVector connection failed");
         verify(versionService).updateById(version);
+    }
+
+    @Test
+    void shouldIgnoreLateFailureFromExpiredClaim() {
+        when(vectorTaskMapper.failOrRetryClaim(21L, "expired-claim", "timeout")).thenReturn(0);
+
+        boolean updated = versionService.markVectorizeFailed(21L, 100L, "expired-claim", "timeout");
+
+        assertThat(updated).isFalse();
+        verify(versionService, never()).getById(100L);
+        verify(versionService, never()).updateById(any(KnowledgeDocumentVersion.class));
     }
 
     private KnowledgeDocument document(Long documentId, Long currentVersionId) {

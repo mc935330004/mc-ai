@@ -4,42 +4,29 @@ import com.baomidou.mybatisplus.extension.service.IService;
 import org.example.ai.agent.modules.knowledgebase.entity.KnowledgeDocumentVersion;
 
 /**
- * 企业知识文档版本向量化服务。
- *
- * 第二阶段核心服务：
- * 负责把 knowledge_document_version 中的原始文件解析、切片、入库、写入向量库。
+ * 企业知识文档版本服务。
  */
 public interface KnowledgeDocumentVersionService extends IService<KnowledgeDocumentVersion> {
-    /**
-     * 执行指定文档版本的向量化。
-     *
-     * vectorJobId由向量任务ID稳定生成，同一任务重试时保持不变。
-     */
-    void vectorizeVersion(Long versionId, String vectorJobId);
 
     /**
-     * 保存向量化失败状态。
-     *
-     * 该方法由任务Worker在向量化事务回滚后调用，
-     * 保证失败原因不会随原事务一起回滚。
+     * 执行指定任务领取批次的文档向量化。
      */
-    void markVectorizeFailed(Long versionId, String errorMessage);
+    void vectorizeVersion(Long taskId, Long versionId, String claimToken);
+
+    /**
+     * 保存当前领取批次的任务及版本失败状态。
+     *
+     * @return true表示当前领取批次更新成功，false表示领取已经失效
+     */
+    boolean markVectorizeFailed(Long taskId, Long versionId, String claimToken, String errorMessage);
 
     /**
      * 发布指定文档版本。
-     *
-     * 企业级 RAG 中，向量化完成不等于立即生效。
-     * 只有发布后的版本，才能作为正式问答的检索来源。
-     *
-     * @param documentId 文档ID
-     * @param versionId 文档版本ID
      */
     void publishVersion(Long documentId, Long versionId);
 
     /**
      * 重新向量化指定文档版本。
-     *
-     * 用于文档内容、切片策略或向量写入异常后的手动重建。
      */
     void revectorizeVersion(Long documentId, Long versionId);
 }

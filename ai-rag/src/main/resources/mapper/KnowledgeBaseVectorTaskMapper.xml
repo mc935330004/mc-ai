@@ -1,17 +1,62 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
 <mapper namespace="org.example.ai.agent.modules.knowledgebase.mapper.KnowledgeBaseVectorTaskMapper">
 
+    <!-- 使用唯一领取令牌抢占待处理任务 -->
     <update id="lockPendingTask">
         UPDATE knowledge_base_vector_task
         SET status = 'PROCESSING',
-        lock_owner = #{lockOwner},
-        locked_at = NOW(),
-        started_at = NOW(),
-        updated_at = NOW()
+            lock_owner = #{claimToken},
+            locked_at = NOW(),
+            started_at = NOW(),
+            finished_at = NULL,
+            error_message = NULL,
+            updated_at = NOW()
         WHERE id = #{taskId}
-        AND status = 'PENDING'
+          AND status = 'PENDING'
     </update>
+
+    <!-- 只有仍持有本次领取令牌的执行器才能完成任务 -->
+    <update id="completeClaim">
+        UPDATE knowledge_base_vector_task
+        SET status = 'COMPLETED',
+            lock_owner = NULL,
+            locked_at = NULL,
+            finished_at = NOW(),
+            error_message = NULL,
+            updated_at = NOW()
+        WHERE id = #{taskId}
+          AND status = 'PROCESSING'
+          AND lock_owner = #{claimToken}
+    </update>
+
+    <!-- 只有仍持有本次领取令牌的执行器才能记录失败 -->
+    <update id="failOrRetryClaim">
+        UPDATE knowledge_base_vector_task
+        SET status = CASE
+                         WHEN retry_count + 1 >= max_retry_count THEN 'FAILED'
+                         ELSE 'PENDING'
+            END,
+            finished_at = CASE
+                              WHEN retry_count + 1 >= max_retry_count THEN NOW()
+                              ELSE NULL
+                END,
+            started_at = CASE
+                             WHEN retry_count + 1 >= max_retry_count THEN started_at
+                             ELSE NULL
+                END,
+            retry_count = retry_count + 1,
+            lock_owner = NULL,
+            locked_at = NULL,
+            error_message = #{errorMessage},
+            updated_at = NOW()
+        WHERE id = #{taskId}
+          AND status = 'PROCESSING'
+          AND lock_owner = #{claimToken}
+    </update>
+
+    <!-- 恢复仍可重试的超时任务 -->
     <update id="resetTimeoutTasks">
         UPDATE knowledge_base_vector_task
         SET status = 'PENDING',
@@ -19,12 +64,15 @@
             lock_owner = NULL,
             locked_at = NULL,
             started_at = NULL,
+            finished_at = NULL,
             updated_at = NOW(),
             error_message = 'task timeout, reset to pending'
         WHERE status = 'PROCESSING'
           AND locked_at &lt; DATE_SUB(NOW(), INTERVAL #{timeoutMinutes} MINUTE)
           AND retry_count + 1 &lt; max_retry_count
     </update>
+
+    <!-- 超时后已达到最大重试次数 -->
     <update id="failTimeoutTasks">
         UPDATE knowledge_base_vector_task
         SET status = 'FAILED',
@@ -38,4 +86,5 @@
           AND locked_at &lt; DATE_SUB(NOW(), INTERVAL #{timeoutMinutes} MINUTE)
           AND retry_count + 1 &gt;= max_retry_count
     </update>
+
 </mapper>

@@ -12,25 +12,24 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
-import java.net.InetAddress;
-import java.time.LocalDateTime;
 import java.util.List;
 import java.util.UUID;
 
 @Slf4j
 @Service
-@ConditionalOnProperty(prefix = "app.vector-task", name = "enabled", havingValue = "true", matchIfMissing = true)
 @RequiredArgsConstructor
+@ConditionalOnProperty(prefix = "app.vector-task", name = "enabled", havingValue = "true", matchIfMissing = true)
 public class KnowledgeBaseVectorTaskWorker {
+
     private final KnowledgeBaseVectorTaskService taskService;
     private final KnowledgeBaseVectorTaskMapper taskMapper;
-    private final KnowledgeDocumentVersionService knowledgeDocumentVersionService;
+    private final KnowledgeDocumentVersionService versionService;
 
-    private final String workerId = buildWorkerId();
     @Value("${app.vector-task.timeout-minutes:30}")
     private int timeoutMinutes;
+
     /**
-     * 轮询任务
+     * 轮询并领取待处理的向量任务。
      */
     @Scheduled(fixedDelayString = "${app.vector-task.poll-delay-ms:5000}")
     public void consume() {
@@ -39,139 +38,77 @@ public class KnowledgeBaseVectorTaskWorker {
                 .orderByAsc(KnowledgeBaseVectorTask::getCreatedAt)
                 .last("LIMIT 5")
                 .list();
+
         for (KnowledgeBaseVectorTask task : tasks) {
-            int locked = taskMapper.lockPendingTask(task.getId(), workerId);
-            if (locked == 1) {
-                process(task.getId());
-            }
+            String claimToken = createClaimToken();
+            int claimed = taskMapper.lockPendingTask(task.getId(), claimToken);
+            if (claimed == 1) process(task.getId(), task.getVersionId(), claimToken);
         }
     }
 
     /**
-     * 恢复超时任务
+     * 恢复超过处理时间的任务。
      */
     @Scheduled(fixedDelayString = "${app.vector-task.recover-delay-ms:60000}")
     public void recoverTimeoutTasks() {
         int failed = taskMapper.failTimeoutTasks(timeoutMinutes);
         int reset = taskMapper.resetTimeoutTasks(timeoutMinutes);
         if (reset > 0 || failed > 0) {
-            log.warn("恢复卡死向量化任务: reset={}, failed={}", reset, failed);
+            log.warn("恢复超时向量任务: reset={}, failed={}", reset, failed);
         }
     }
-    /**
-     * 处理向量任务。
-     */
-    private void process(Long taskId) {
-        KnowledgeBaseVectorTask task = taskService.getById(taskId);
-        if (task == null || task.getVersionId() == null) return;
 
+    /**
+     * 处理当前领取批次。
+     */
+    private void process(Long taskId, Long versionId, String claimToken) {
         try {
-            knowledgeDocumentVersionService.vectorizeVersion(
-                    task.getVersionId(),
-                    vectorJobId(task.getId())
-            );
-            markCompleted(task);
+            versionService.vectorizeVersion(taskId, versionId, claimToken);
+            log.info("知识库向量任务完成: taskId={}, versionId={}", taskId, versionId);
         } catch (Exception exception) {
-            persistVersionFailure(task, exception);
-            markFailedOrRetry(task, exception);
+            handleFailure(taskId, versionId, claimToken, exception);
         }
     }
 
     /**
-     * 同一个任务无论重试多少次，都使用相同的向量业务幂等标识。
+     * 保存当前领取批次的失败状态。
      */
-    private String vectorJobId(Long taskId) {
-        return "vector-task:" + taskId;
-    }
-
-    /**
-     * 向量化主事务失败后单独保存版本失败状态。
-     */
-    private void persistVersionFailure(KnowledgeBaseVectorTask task, Exception exception) {
-        if (task.getVersionId() == null) return;
+    private void handleFailure(Long taskId, Long versionId, String claimToken, Exception exception) {
+        String errorMessage = truncate(exception.getMessage());
         try {
-            knowledgeDocumentVersionService.markVectorizeFailed(
-                    task.getVersionId(),
-                    truncate(exception.getMessage())
+            boolean updated = versionService.markVectorizeFailed(
+                    taskId,
+                    versionId,
+                    claimToken,
+                    errorMessage
             );
+
+            if (!updated) {
+                log.warn("忽略过期领取批次的失败结果: taskId={}, versionId={}, claimToken={}",
+                        taskId, versionId, claimToken);
+                return;
+            }
+
+            log.warn("知识库向量任务执行失败: taskId={}, versionId={}, error={}",
+                    taskId, versionId, errorMessage, exception);
         } catch (Exception stateException) {
-            log.error(
-                    "保存文档版本失败状态异常: taskId={}, versionId={}, error={}",
-                    task.getId(),
-                    task.getVersionId(),
-                    stateException.getMessage(),
-                    stateException
-            );
+            log.error("保存向量任务失败状态异常: taskId={}, versionId={}, error={}",
+                    taskId, versionId, stateException.getMessage(), stateException);
         }
     }
 
     /**
-     * 标记任务完成
-     * @param task
+     * 每次领取都生成新的代次令牌，防止旧执行器迟到写入。
      */
-    private void markCompleted(KnowledgeBaseVectorTask task) {
-        task.setStatus(VectorTaskStatus.COMPLETED.name());
-        task.setFinishedAt(LocalDateTime.now());
-        task.setUpdatedAt(LocalDateTime.now());
-        task.setErrorMessage(null);
-        task.setLockOwner(null);
-        task.setLockedAt(null);
-        taskService.updateById(task);
-
-        log.info(
-                "知识库向量化任务完成: taskId={}, versionId={}",
-                task.getId(),
-                task.getVersionId()
-        );
+    private String createClaimToken() {
+        return UUID.randomUUID().toString().replace("-", "");
     }
 
     /**
-     * 标记任务失败
-     * @param task
-     * @param e
-     */
-    private void markFailedOrRetry(KnowledgeBaseVectorTask task, Exception e) {
-        int retryCount = task.getRetryCount() == null ? 1 : task.getRetryCount() + 1;
-        int maxRetryCount = task.getMaxRetryCount() == null ? 3 : task.getMaxRetryCount();
-
-        task.setRetryCount(retryCount);
-        task.setErrorMessage(truncate(e.getMessage()));
-
-        if (retryCount >= maxRetryCount) {
-            task.setStatus(VectorTaskStatus.FAILED.name());
-            task.setFinishedAt(LocalDateTime.now());
-        } else {
-            task.setStatus(VectorTaskStatus.PENDING.name());
-            task.setLockOwner(null);
-            task.setLockedAt(null);
-            task.setStartedAt(null);
-        }
-        task.setUpdatedAt(LocalDateTime.now());
-        taskService.updateById(task);
-        log.warn("知识库向量化任务失败: taskId={}, kbId={}, retry={}/{}, error={}",
-                task.getId(), task.getVersionId(), retryCount, maxRetryCount, e.getMessage(), e);
-    }
-
-    /**
-     * 截取错误信息
-     * @param message
-     * @return
+     * 限制持久化错误信息长度。
      */
     private String truncate(String message) {
-        if (message == null || message.isBlank()) {
-            return "unknown error";
-        }
+        if (message == null || message.isBlank()) return "unknown error";
         return message.length() > 500 ? message.substring(0, 500) : message;
-    }
-    /**
-     * 构建workerId
-     * @return
-     */
-    private String buildWorkerId() {
-        try {
-            return InetAddress.getLocalHost().getHostName() + "-" + UUID.randomUUID();
-        } catch (Exception e) {
-            return "worker-" + UUID.randomUUID();
-        }
     }
 }

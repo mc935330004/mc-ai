@@ -85,6 +85,24 @@ class BusinessAssistantStreamIntegrationTest {
     }
 
     @Test
+    void explicitBusinessAssistantRouteDoesNotRequireCapabilityParameters() throws Exception {
+        Method predicate = Class.forName(
+                "org.example.ai.agent.chat.service.impl.DefaultAgentOrchestrator"
+        ).getDeclaredMethod("isConfirmedBusinessRead", IntentResult.class);
+        predicate.setAccessible(true);
+        IntentResult direct = IntentResult.builder()
+                .routeType(RouteType.BUSINESS_QUERY)
+                .businessAssistantDirect(true)
+                .needClarify(false)
+                .build();
+
+        assertThat(predicate.invoke(null, direct)).isEqualTo(true);
+
+        direct.setNeedClarify(true);
+        assertThat(predicate.invoke(null, direct)).isEqualTo(false);
+    }
+
+    @Test
     void contextSnapshotMustPrecedeStructuredStateAndChecksumsRemainValid() {
         ObjectMapper objectMapper = new ObjectMapper().findAndRegisterModules();
         ResponseChecksumService checksumService = new ResponseChecksumService(objectMapper);

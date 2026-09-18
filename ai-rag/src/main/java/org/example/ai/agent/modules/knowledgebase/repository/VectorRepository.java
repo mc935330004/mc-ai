@@ -65,6 +65,55 @@ public class VectorRepository {
     }
 
     /**
+     * 原子替换指定文档版本的向量数据。
+     *
+     * 删除该版本的其他批次，只保留当前批次，并移除临时批次标识。
+     */
+    public int replaceVersionVectors(Long versionId, String jobId) {
+        if (versionId == null || jobId == null || jobId.isBlank()) {
+            throw new BusinessException(
+                    ErrorCode.BAD_REQUEST,
+                    "文档版本ID和向量批次标识不能为空"
+            );
+        }
+
+        String sql = """
+            WITH removed AS (
+                DELETE FROM vector_store
+                WHERE metadata->>'version_id' = ?
+                  AND COALESCE(metadata->>'kb_vector_job_id', '') <> ?
+                RETURNING 1
+            )
+            UPDATE vector_store
+            SET metadata = (metadata::jsonb - 'kb_vector_job_id')::json
+            WHERE metadata->>'version_id' = ?
+              AND metadata->>'kb_vector_job_id' = ?
+            """;
+
+        try {
+            String versionValue = versionId.toString();
+            int updatedRows = jdbcTemplate.update(
+                    sql,
+                    versionValue,
+                    jobId,
+                    versionValue,
+                    jobId
+            );
+            log.info("文档版本向量批次替换完成: versionId={}, jobId={}, rows={}",
+                    versionId, jobId, updatedRows);
+            return updatedRows;
+        } catch (Exception exception) {
+            log.error("文档版本向量批次替换失败: versionId={}, jobId={}, error={}",
+                    versionId, jobId, exception.getMessage(), exception);
+            throw new BusinessException(
+                    ErrorCode.KNOWLEDGE_BASE_VECTORIZATION_FAILED,
+                    "替换文档版本向量失败",
+                    exception
+            );
+        }
+    }
+
+    /**
      * 将临时向量提升为正式知识库向量。
      *
      * <p>写入阶段先把 kb_id 标记为 pending，全部写入成功后再统一改成真实知识库 ID。</p>

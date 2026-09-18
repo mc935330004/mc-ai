@@ -11,6 +11,7 @@ import org.example.ai.agent.common.file.DocumentParseService;
 import org.example.ai.agent.modules.knowledgebase.entity.KnowledgeChunk;
 import org.example.ai.agent.modules.knowledgebase.entity.KnowledgeDocument;
 import org.example.ai.agent.modules.knowledgebase.entity.KnowledgeDocumentVersion;
+import org.example.ai.agent.modules.knowledgebase.mapper.KnowledgeBaseVectorTaskMapper;
 import org.example.ai.agent.modules.knowledgebase.mapper.KnowledgeChunkMapper;
 import org.example.ai.agent.modules.knowledgebase.mapper.KnowledgeDocumentVersionMapper;
 import org.example.ai.agent.modules.knowledgebase.repository.VectorRepository;
@@ -50,6 +51,7 @@ public class KnowledgeDocumentVersionServiceImpl extends ServiceImpl<KnowledgeDo
     private final ObjectProvider<VectorStore> vectorStoreProvider;
     private final VectorRepository vectorRepository;
     private final KnowledgeBaseVectorTaskService vectorTaskService;
+    private final KnowledgeBaseVectorTaskMapper vectorTaskMapper;
     /**
      * 管理端发布和重新向量化时使用当前租户身份。
      */
@@ -61,13 +63,18 @@ public class KnowledgeDocumentVersionServiceImpl extends ServiceImpl<KnowledgeDo
     private final TextSplitter textSplitter = TokenTextSplitter.builder().build();
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public void vectorizeVersion(Long versionId, String vectorJobId) {
-        if (!StringUtils.hasText(vectorJobId)) {
-            throw new BusinessException(
-                    ErrorCode.BAD_REQUEST,
-                    "向量任务幂等标识不能为空"
-            );
+    public void vectorizeVersion(Long taskId, Long versionId, String claimToken) {
+        if (taskId == null || taskId <= 0) {
+            throw new BusinessException(ErrorCode.BAD_REQUEST, "向量任务ID必须大于0");
         }
+        if (versionId == null || versionId <= 0) {
+            throw new BusinessException(ErrorCode.BAD_REQUEST, "文档版本ID必须大于0");
+        }
+        if (!StringUtils.hasText(claimToken)) {
+            throw new BusinessException(ErrorCode.BAD_REQUEST, "任务领取令牌不能为空");
+        }
+
+        String vectorJobId = vectorJobId(taskId, claimToken);
         KnowledgeDocumentVersion version = getActiveVersion(versionId);
         KnowledgeDocument document = documentService.getOne(
                 Wrappers.<KnowledgeDocument>lambdaQuery()
@@ -77,35 +84,52 @@ public class KnowledgeDocumentVersionServiceImpl extends ServiceImpl<KnowledgeDo
         if (document == null) {
             throw new BusinessException(ErrorCode.NOT_FOUND, "文档不存在");
         }
+
         try {
             markProcessing(version);
 
             String content = parseVersionContent(version);
             List<Document> splitDocuments = splitContent(content);
 
-            // 当前事务失败时MySQL切片会回滚，PGVector临时数据通过稳定jobId清理。
-            deleteOldChunksAndVectors(version.getId());
+            /*
+             * MySQL切片受当前事务保护。
+             * PGVector使用独立批次写入，不能在开始时按版本删除，
+             * 否则迟到的旧批次可能删除新批次的数据。
+             */
+            deleteOldChunks(version.getId());
             List<KnowledgeChunk> chunks = saveChunks(document, version, splitDocuments);
             writeVectors(document, version, chunks, vectorJobId);
             markCompleted(version, chunks.size());
 
-            log.info(
-                    "文档版本向量化完成: documentId={}, versionId={}, vectorJobId={}, chunkCount={}",
-                    document.getId(),
-                    version.getId(),
-                    vectorJobId,
-                    chunks.size()
-            );
+            /*
+             * 只有仍持有领取令牌的批次才能完成任务。
+             * 更新失败会抛出异常并回滚MySQL切片和版本状态。
+             */
+            int completed = vectorTaskMapper.completeClaim(taskId, claimToken);
+            if (completed != 1) {
+                throw new BusinessException(
+                        ErrorCode.KNOWLEDGE_BASE_VECTORIZATION_FAILED,
+                        "向量任务领取已经失效"
+                );
+            }
+
+            /*
+             * 当前领取确认有效后，原子替换该版本的PGVector数据。
+             */
+            int replaced = vectorRepository.replaceVersionVectors(versionId, vectorJobId);
+            if (replaced != chunks.size()) {
+                throw new BusinessException(
+                        ErrorCode.KNOWLEDGE_BASE_VECTORIZATION_FAILED,
+                        "向量数据替换数量不一致"
+                );
+            }
+
+            log.info("文档版本向量化完成: taskId={}, documentId={}, versionId={}, vectorJobId={}, chunkCount={}",
+                    taskId, document.getId(), versionId, vectorJobId, chunks.size());
         } catch (Exception exception) {
-            // 这里不能保存FAILED状态，否则会随当前事务回滚。
-            log.error(
-                    "文档版本向量化事务失败: documentId={}, versionId={}, vectorJobId={}, error={}",
-                    document.getId(),
-                    version.getId(),
-                    vectorJobId,
-                    exception.getMessage(),
-                    exception
-            );
+            cleanupAttemptVectors(vectorJobId);
+            log.error("文档版本向量化事务失败: taskId={}, documentId={}, versionId={}, vectorJobId={}, error={}",
+                    taskId, document.getId(), versionId, vectorJobId, exception.getMessage(), exception);
             throw exception;
         }
     }
@@ -308,15 +332,15 @@ public class KnowledgeDocumentVersionServiceImpl extends ServiceImpl<KnowledgeDo
     }
 
     /**
-     * 删除旧的切片和向量
-     * @param versionId
+     * 删除当前版本的旧MySQL切片。
+     *
+     * PGVector旧数据在当前领取批次确认有效后统一替换。
      */
-    private void deleteOldChunksAndVectors(Long versionId) {
+    private void deleteOldChunks(Long versionId) {
         chunkMapper.delete(
                 Wrappers.<KnowledgeChunk>lambdaQuery()
                         .eq(KnowledgeChunk::getVersionId, versionId)
         );
-        vectorRepository.deleteByVersionId(versionId);
     }
 
     /**
@@ -359,7 +383,7 @@ public class KnowledgeDocumentVersionServiceImpl extends ServiceImpl<KnowledgeDo
         return chunks;
     }
     /**
-     * 使用稳定任务标识写入向量。
+     * 使用当前领取批次标识写入向量。
      */
     private void writeVectors(KnowledgeDocument document, KnowledgeDocumentVersion version,
                               List<KnowledgeChunk> chunks, String vectorJobId) {
@@ -370,7 +394,7 @@ public class KnowledgeDocumentVersionServiceImpl extends ServiceImpl<KnowledgeDo
                     "VectorStore 未启用，无法写入向量库"
             );
         }
-        // 清除同一任务上一次异常中断后可能遗留的向量。
+        // 清除当前领取批次可能遗留的临时向量。
         vectorRepository.deleteByVectorJobId(vectorJobId);
 
         List<Document> vectorDocuments = new ArrayList<>();
@@ -397,7 +421,7 @@ public class KnowledgeDocumentVersionServiceImpl extends ServiceImpl<KnowledgeDo
                 vectorStore.add(vectorDocuments.subList(start, end));
             }
         } catch (Exception exception) {
-            vectorRepository.deleteByVectorJobId(vectorJobId);
+            cleanupAttemptVectors(vectorJobId);
             throw new BusinessException(
                     ErrorCode.KNOWLEDGE_BASE_VECTORIZATION_FAILED,
                     "写入向量库失败: " + exception.getMessage(),
@@ -405,28 +429,76 @@ public class KnowledgeDocumentVersionServiceImpl extends ServiceImpl<KnowledgeDo
             );
         }
     }
+
     /**
-     * 标记完成
-     * @param version
-     * @param chunkCount
+     * 标记文档版本向量化完成。
      */
-    private void markCompleted( KnowledgeDocumentVersion version, int chunkCount) {
+    private void markCompleted(KnowledgeDocumentVersion version, int chunkCount) {
         version.setParseStatus("COMPLETED");
         version.setVectorStatus("COMPLETED");
         version.setVectorError(null);
         version.setChunkCount(chunkCount);
         version.setUpdatedAt(LocalDateTime.now());
-        this.updateById(version);
+
+        if (!this.updateById(version)) {
+            throw new BusinessException(
+                    ErrorCode.KNOWLEDGE_BASE_VECTORIZATION_FAILED,
+                    "更新文档版本完成状态失败"
+            );
+        }
     }
     @Override
     @Transactional(rollbackFor = Exception.class)
-    public void markVectorizeFailed(Long versionId, String errorMessage) {
-        KnowledgeDocumentVersion version = getActiveVersion(versionId);
+    public boolean markVectorizeFailed(Long taskId, Long versionId, String claimToken, String errorMessage) {
+        String safeError = truncateError(errorMessage);
+        int updated = vectorTaskMapper.failOrRetryClaim(taskId, claimToken, safeError);
+
+        // 更新数量为0，说明任务已经被恢复或被其他批次重新领取。
+        if (updated != 1) return false;
+
+        /*
+         * 无版本ID的异常任务仍然需要正常结束任务状态，
+         * 但不再更新文档版本。
+         */
+        if (versionId == null || versionId <= 0) return true;
+
+        KnowledgeDocumentVersion version = this.getById(versionId);
+        if (version == null || Integer.valueOf(1).equals(version.getDelFlag())) {
+            log.warn("向量任务关联的文档版本不存在: taskId={}, versionId={}", taskId, versionId);
+            return true;
+        }
+
         version.setParseStatus("FAILED");
         version.setVectorStatus("FAILED");
-        version.setVectorError(truncateError(errorMessage));
+        version.setVectorError(safeError);
         version.setUpdatedAt(LocalDateTime.now());
-        this.updateById(version);
+
+        if (!this.updateById(version)) {
+            throw new BusinessException(
+                    ErrorCode.KNOWLEDGE_BASE_VECTORIZATION_FAILED,
+                    "更新文档版本失败状态失败"
+            );
+        }
+        return true;
+    }
+
+    /**
+     * 使用任务ID和领取令牌生成独立向量批次标识。
+     */
+    private String vectorJobId(Long taskId, String claimToken) {
+        return "vector-task:" + taskId + ":" + claimToken;
+    }
+
+    /**
+     * 清理当前领取批次写入的临时向量。
+     */
+    private void cleanupAttemptVectors(String vectorJobId) {
+        try {
+            vectorRepository.deleteByVectorJobId(vectorJobId);
+        } catch (Exception cleanupException) {
+            log.error("清理当前向量批次失败: vectorJobId={}, error={}",
+                    vectorJobId, cleanupException.getMessage(), cleanupException);
+        }
     }
 
     /**

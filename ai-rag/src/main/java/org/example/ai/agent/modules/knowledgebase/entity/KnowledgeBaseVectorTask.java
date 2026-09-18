@@ -50,7 +50,9 @@ public class KnowledgeBaseVectorTask implements Serializable {
     private Integer maxRetryCount;
 
     /**
-     * 任务锁持有者，用于多实例部署时标识哪个服务实例正在处理该任务
+     * 当前任务领取令牌。
+     *
+     * 每次重新领取都会生成新令牌，用于隔离超时任务的迟到写入。
      */
     @TableField("lock_owner")
     private String lockOwner;
